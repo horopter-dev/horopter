@@ -380,3 +380,65 @@ func (s *Store) QueryChanges(ctx context.Context, q ChangeQuery) ([]core.Change,
 	}
 	return out, nil
 }
+
+// RebuildProjection discards a tenant's projection and replays its event log in ULID
+// order.
+//
+// Because Fold is pure and ids are time-sortable, this reproduces the projection
+// exactly — which is what makes the read side safe to evolve. Note the accumulator
+// passes a nil *Change for the first event of each ref, matching how AppendEvent
+// applies events incrementally; Fold is written so both spellings converge.
+func (s *Store) RebuildProjection(ctx context.Context, tenantID string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin rebuild transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `DELETE FROM change WHERE tenant = $1`, tenantID); err != nil {
+		return fmt.Errorf("clear projection for tenant %q: %w", tenantID, err)
+	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT id, tenant, schema_version, source, type, subject, actor, title,
+		       occurred_at, received_at, correlation_ref, attributes
+		FROM event WHERE tenant = $1 ORDER BY id ASC`, tenantID)
+	if err != nil {
+		return fmt.Errorf("read event log for tenant %q: %w", tenantID, err)
+	}
+
+	var events []core.Event
+	for rows.Next() {
+		var ev core.Event
+		if err := rows.Scan(&ev.ID, &ev.Tenant, &ev.SchemaVersion, &ev.Source, &ev.Type,
+			&ev.Subject, &ev.Actor, &ev.Title, &ev.OccurredAt, &ev.ReceivedAt,
+			&ev.CorrelationRef, &ev.Attributes); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan event row: %w", err)
+		}
+		events = append(events, ev)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate event log: %w", err)
+	}
+
+	acc := map[string]core.Change{}
+	for _, ev := range events {
+		ref := core.RefFor(ev)
+		var prev *core.Change
+		if c, ok := acc[ref]; ok {
+			prev = &c
+		}
+		acc[ref] = core.Fold(prev, ev)
+	}
+	for _, c := range acc {
+		if err := upsertChange(ctx, tx, c); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit rebuild for tenant %q: %w", tenantID, err)
+	}
+	return nil
+}
