@@ -33,9 +33,9 @@ func TestValidateAcceptsValidEvent(t *testing.T) {
 
 func TestValidateRejectsMissingFields(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
+		name   string
 		mutate func(*core.Event)
-		want  string
+		want   string
 	}{
 		{"no tenant", func(e *core.Event) { e.Tenant = "" }, "tenant"},
 		{"no type", func(e *core.Event) { e.Type = "" }, "type"},

@@ -9,7 +9,12 @@ tasks:
   build:
     cmds:
       - go build -o horopter ./cmd/horopter
+  fmt:
+    cmds:
+      - gofmt -l .
+      - test -z "$(gofmt -l .)"
   check:
     cmds:
+      - task: fmt
       - task: lint
       - task: test
