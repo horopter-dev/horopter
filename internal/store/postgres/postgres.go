@@ -406,25 +406,19 @@ func (s *Store) RebuildProjection(ctx context.Context, tenantID string) error {
 	if err != nil {
 		return fmt.Errorf("read event log for tenant %q: %w", tenantID, err)
 	}
+	defer rows.Close()
 
-	var events []core.Event
+	// Folding directly inside the scan loop, rather than materialising the whole event
+	// log into a slice first, keeps peak memory proportional to the number of distinct
+	// refs rather than the total number of events replayed.
+	acc := map[string]core.Change{}
 	for rows.Next() {
 		var ev core.Event
 		if err := rows.Scan(&ev.ID, &ev.Tenant, &ev.SchemaVersion, &ev.Source, &ev.Type,
 			&ev.Subject, &ev.Actor, &ev.Title, &ev.OccurredAt, &ev.ReceivedAt,
 			&ev.CorrelationRef, &ev.Attributes); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan event row: %w", err)
+			return fmt.Errorf("scan event row for tenant %q: %w", tenantID, err)
 		}
-		events = append(events, ev)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate event log: %w", err)
-	}
-
-	acc := map[string]core.Change{}
-	for _, ev := range events {
 		ref := core.RefFor(ev)
 		var prev *core.Change
 		if c, ok := acc[ref]; ok {
@@ -432,6 +426,11 @@ func (s *Store) RebuildProjection(ctx context.Context, tenantID string) error {
 		}
 		acc[ref] = core.Fold(prev, ev)
 	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate event log for tenant %q: %w", tenantID, err)
+	}
+	rows.Close()
+
 	for _, c := range acc {
 		if err := upsertChange(ctx, tx, c); err != nil {
 			return err

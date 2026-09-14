@@ -10,7 +10,7 @@ tasks:
     env:
       HOROPTER_TEST_DSN: postgres://horopter:horopter@localhost:5432/horopter
     cmds:
-      - go test ./... -race -count=1
+      - go test -race -count=1 {{.CLI_ARGS | default "./..."}}
   lint:
     cmds:
       - golangci-lint run ./...
