@@ -198,6 +198,11 @@ func findByIdemKey(
 	return ev, true, nil
 }
 
+// afterLoadHook is nil in production. Tests set it to widen the window between the
+// projection read and its write, making the lost-update race deterministic instead
+// of dependent on machine timing.
+var afterLoadHook func()
+
 // applyToProjection folds one event onto its change, holding a row lock for the
 // duration of the read-modify-write.
 //
@@ -209,6 +214,9 @@ func applyToProjection(ctx context.Context, tx pgx.Tx, ev core.Event) error {
 	cur, found, err := lockAndLoadChange(ctx, tx, ev.Tenant, ref)
 	if err != nil {
 		return err
+	}
+	if afterLoadHook != nil {
+		afterLoadHook()
 	}
 	var prev *core.Change
 	if found {
