@@ -16,7 +16,7 @@ const (
 
 // OpenSentinel stands in for the end of an open change so that the overlap
 // predicate can be served by a plain index. It is a far-future literal rather
-// than Postgres 'infinity', which SQLite does not understand.
+// than Postgres 'infinity' because Go's time.Time cannot represent infinity.
 var OpenSentinel = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 
 // Change is the derived, rebuildable projection that every render adapter

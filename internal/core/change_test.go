@@ -9,7 +9,7 @@ import (
 )
 
 func TestOpenSentinelIsFarFutureNotInfinity(t *testing.T) {
-	// SQLite has no 'infinity' timestamp; a literal must sort after any real value.
+	// Go's time.Time cannot represent infinity; a literal must sort after any real value.
 	assert.Equal(t, "9999-12-31T23:59:59Z", core.OpenSentinel.Format(time.RFC3339))
 }
 
