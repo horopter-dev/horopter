@@ -3,7 +3,9 @@ package postgres_test
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,26 +26,39 @@ func newStore(t *testing.T) *postgres.Store {
 	return s
 }
 
-// runID distinguishes one `go test` process from the next. The tests share a database
-// that nothing truncates, so identifiers scoped only to a test name are reused by the
-// following run: AppendEvent then finds the stored idempotency key, returns without
-// folding, and the test asserts against rows an earlier run wrote. Every identifier a
-// test puts in the database therefore carries this token.
-var runID = fmt.Sprintf("%d", time.Now().UnixNano())
+// The tests share a database that nothing truncates, so every identifier a test puts
+// into it has to be one no earlier execution used. Otherwise AppendEvent finds the
+// stored idempotency key, returns without folding, and the test asserts against rows
+// something else wrote — which is a silent vacuous pass for the concurrency test and an
+// outright failure for the others.
+//
+// procToken separates one `go test` process from the next; idSeq separates every call
+// within a process. The counter is what makes -count=N honest: a repetition reuses both
+// the process and the test name, so a token fixed at either would repeat identifiers
+// across iterations and the second iteration would do no work at all.
+var (
+	procToken = strconv.FormatInt(time.Now().UnixNano(), 36)
+	idSeq     atomic.Uint64
+)
 
-// tenant returns a tenant id unique to this test and this run, keeping tests isolated
-// from one another and from every previous run.
-func tenant(t *testing.T) string {
-	t.Helper()
-	return "test-" + t.Name() + "-" + runID
+// uniqueToken returns a token no other call in any execution has produced.
+func uniqueToken() string {
+	return procToken + strconv.FormatUint(idSeq.Add(1), 36)
 }
 
-// eventID returns an event id unique to this test and this run. event.id is a bare
-// primary key with no tenant in it, so a per-tenant identifier is not enough to keep
-// two tests, or two runs of one test, from colliding on it.
+// tenant returns a tenant id unique to this call, naming the test for traceability.
+func tenant(t *testing.T) string {
+	t.Helper()
+	return "test-" + t.Name() + "-" + uniqueToken()
+}
+
+// eventID returns an event id unique to this call. event.id is a bare primary key with
+// no tenant in it, so ids must be unique across every tenant and every execution, not
+// merely within the tenant that writes them. suffix names the event for traceability
+// and plays no part in uniqueness.
 func eventID(t *testing.T, suffix string) string {
 	t.Helper()
-	return runID + "-" + t.Name() + "-" + suffix
+	return uniqueToken() + "-" + t.Name() + "-" + suffix
 }
 
 func mkEvent(tn, id, idem, corr, typ string, at time.Time) core.Event {
