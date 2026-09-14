@@ -7,11 +7,14 @@ package postgres
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/yo61/horopter/internal/core"
 )
 
 //go:embed migrations/*.sql
@@ -115,4 +118,197 @@ type EventQuery struct {
 	Tenant string
 	Ref    string
 	Limit  int
+}
+
+// AppendEvent stores an event and folds it into the projection in one transaction.
+//
+// A duplicate idempotency key is not an error: CI retries are normal traffic, so the
+// stored event is returned with created=false.
+func (s *Store) AppendEvent(ctx context.Context, ev core.Event) (core.Event, bool, error) {
+	if err := ev.Validate(); err != nil {
+		return core.Event{}, false, err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return core.Event{}, false, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if ev.IdempotencyKey != "" {
+		existing, found, err := findByIdemKey(ctx, tx, ev.Tenant, ev.IdempotencyKey)
+		if err != nil {
+			return core.Event{}, false, err
+		}
+		if found {
+			return existing, false, tx.Commit(ctx)
+		}
+	}
+
+	var idem *string
+	if ev.IdempotencyKey != "" {
+		idem = &ev.IdempotencyKey
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO event (id, tenant, idempotency_key, schema_version, source, type,
+		                   subject, actor, title, occurred_at, received_at,
+		                   correlation_ref, attributes)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		ev.ID, ev.Tenant, idem, ev.SchemaVersion, ev.Source, ev.Type,
+		ev.Subject, ev.Actor, ev.Title, ev.OccurredAt.UTC(), ev.ReceivedAt.UTC(),
+		ev.CorrelationRef, ev.Attributes,
+	); err != nil {
+		return core.Event{}, false, fmt.Errorf("insert event %q: %w", ev.ID, err)
+	}
+
+	if err := applyToProjection(ctx, tx, ev); err != nil {
+		return core.Event{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return core.Event{}, false, fmt.Errorf("commit event %q: %w", ev.ID, err)
+	}
+	return ev, true, nil
+}
+
+// findByIdemKey returns the previously stored event for (tenant, idempotencyKey), if any.
+func findByIdemKey(
+	ctx context.Context, tx pgx.Tx, tenantID, idempotencyKey string,
+) (core.Event, bool, error) {
+	var (
+		ev   core.Event
+		idem *string
+	)
+	err := tx.QueryRow(ctx, `
+		SELECT id, tenant, idempotency_key, schema_version, source, type, subject,
+		       actor, title, occurred_at, received_at, correlation_ref, attributes
+		FROM event WHERE tenant = $1 AND idempotency_key = $2`,
+		tenantID, idempotencyKey,
+	).Scan(&ev.ID, &ev.Tenant, &idem, &ev.SchemaVersion, &ev.Source, &ev.Type, &ev.Subject,
+		&ev.Actor, &ev.Title, &ev.OccurredAt, &ev.ReceivedAt, &ev.CorrelationRef, &ev.Attributes)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return core.Event{}, false, nil
+	}
+	if err != nil {
+		return core.Event{}, false, fmt.Errorf(
+			"find event by idempotency key %q/%q: %w", tenantID, idempotencyKey, err)
+	}
+	if idem != nil {
+		ev.IdempotencyKey = *idem
+	}
+	return ev, true, nil
+}
+
+// applyToProjection folds one event onto its change, holding a row lock for the
+// duration of the read-modify-write.
+//
+// The lock is load-bearing: ingress runs with several replicas, and without it two
+// events for the same ref can be read, folded and written concurrently, with the
+// later write discarding the earlier event's contribution and raising no error.
+func applyToProjection(ctx context.Context, tx pgx.Tx, ev core.Event) error {
+	ref := core.RefFor(ev)
+	cur, found, err := lockAndLoadChange(ctx, tx, ev.Tenant, ref)
+	if err != nil {
+		return err
+	}
+	var prev *core.Change
+	if found {
+		prev = &cur
+	}
+	return upsertChange(ctx, tx, core.Fold(prev, ev))
+}
+
+// lockAndLoadChange reads a change FOR UPDATE, serialising concurrent folds of the
+// same ref. Returns found=false when the row does not exist yet; the subsequent
+// INSERT ... ON CONFLICT then resolves the insert race.
+func lockAndLoadChange(
+	ctx context.Context, tx pgx.Tx, tenantID, ref string,
+) (core.Change, bool, error) {
+	var (
+		c     core.Change
+		endAt *time.Time
+		st    string
+	)
+	err := tx.QueryRow(ctx, `
+		SELECT tenant, ref, subject, type, title, actor, start_at, end_at,
+		       status, attributes, last_event_id
+		FROM change WHERE tenant = $1 AND ref = $2 FOR UPDATE`,
+		tenantID, ref,
+	).Scan(&c.Tenant, &c.Ref, &c.Subject, &c.Type, &c.Title, &c.Actor,
+		&c.Start, &endAt, &st, &c.Attributes, &c.LastEventID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return core.Change{}, false, nil
+	}
+	if err != nil {
+		return core.Change{}, false, fmt.Errorf("lock change %q/%q: %w", tenantID, ref, err)
+	}
+	c.End = endAt
+	c.Status = core.Status(st)
+	return c, true, nil
+}
+
+func upsertChange(ctx context.Context, tx pgx.Tx, c core.Change) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO change (tenant, ref, subject, type, title, actor, start_at, end_at,
+		                    end_effective, status, attributes, last_event_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		ON CONFLICT (tenant, ref) DO UPDATE SET
+		  subject=EXCLUDED.subject, type=EXCLUDED.type, title=EXCLUDED.title,
+		  actor=EXCLUDED.actor, start_at=EXCLUDED.start_at, end_at=EXCLUDED.end_at,
+		  end_effective=EXCLUDED.end_effective, status=EXCLUDED.status,
+		  attributes=EXCLUDED.attributes, last_event_id=EXCLUDED.last_event_id`,
+		c.Tenant, c.Ref, c.Subject, c.Type, c.Title, c.Actor,
+		c.Start.UTC(), c.End, c.EndEffective().UTC(), string(c.Status),
+		c.Attributes, c.LastEventID,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert change %q/%q: %w", c.Tenant, c.Ref, err)
+	}
+	return nil
+}
+
+// ListEvents selects raw events for a tenant, optionally scoped to one correlation
+// ref, ordered by id ascending (which is chronological, since ids are ULIDs).
+func (s *Store) ListEvents(ctx context.Context, q EventQuery) ([]core.Event, error) {
+	query := `
+		SELECT id, tenant, idempotency_key, schema_version, source, type, subject,
+		       actor, title, occurred_at, received_at, correlation_ref, attributes
+		FROM event WHERE tenant = $1`
+	args := []any{q.Tenant}
+
+	if q.Ref != "" {
+		args = append(args, q.Ref)
+		query += fmt.Sprintf(" AND correlation_ref = $%d", len(args))
+	}
+	query += " ORDER BY id ASC"
+	if q.Limit != 0 {
+		args = append(args, q.Limit)
+		query += fmt.Sprintf(" LIMIT $%d", len(args))
+	}
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list events for tenant %q: %w", q.Tenant, err)
+	}
+	defer rows.Close()
+
+	var evs []core.Event
+	for rows.Next() {
+		var (
+			ev   core.Event
+			idem *string
+		)
+		if err := rows.Scan(&ev.ID, &ev.Tenant, &idem, &ev.SchemaVersion, &ev.Source, &ev.Type,
+			&ev.Subject, &ev.Actor, &ev.Title, &ev.OccurredAt, &ev.ReceivedAt,
+			&ev.CorrelationRef, &ev.Attributes); err != nil {
+			return nil, fmt.Errorf("scan event row for tenant %q: %w", q.Tenant, err)
+		}
+		if idem != nil {
+			ev.IdempotencyKey = *idem
+		}
+		evs = append(evs, ev)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate events for tenant %q: %w", q.Tenant, err)
+	}
+	return evs, nil
 }
