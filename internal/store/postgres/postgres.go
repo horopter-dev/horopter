@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -319,4 +320,63 @@ func (s *Store) ListEvents(ctx context.Context, q EventQuery) ([]core.Event, err
 		return nil, fmt.Errorf("iterate events for tenant %q: %w", q.Tenant, err)
 	}
 	return evs, nil
+}
+
+// QueryChanges returns changes overlapping [q.From, q.To].
+//
+// The predicate is overlap, not start-containment. Filtering on start alone would hide
+// a change that began before the window and is still running — precisely the change
+// someone most needs to see when zooming into a spike.
+func (s *Store) QueryChanges(ctx context.Context, q ChangeQuery) ([]core.Change, error) {
+	sb := strings.Builder{}
+	sb.WriteString(`
+		SELECT tenant, ref, subject, type, title, actor, start_at, end_at,
+		       status, attributes, last_event_id
+		FROM change
+		WHERE tenant = $1 AND start_at <= $2 AND end_effective >= $3`)
+	args := []any{q.Tenant, q.To.UTC(), q.From.UTC()}
+
+	if q.Subject != "" {
+		args = append(args, q.Subject)
+		fmt.Fprintf(&sb, " AND subject = $%d", len(args))
+	}
+	if q.Type != "" {
+		args = append(args, q.Type)
+		fmt.Fprintf(&sb, " AND type = $%d", len(args))
+	}
+	if q.Status != "" {
+		args = append(args, q.Status)
+		fmt.Fprintf(&sb, " AND status = $%d", len(args))
+	}
+	sb.WriteString(" ORDER BY start_at ASC, ref ASC")
+	if q.Limit > 0 {
+		args = append(args, q.Limit)
+		fmt.Fprintf(&sb, " LIMIT $%d", len(args))
+	}
+
+	rows, err := s.pool.Query(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("query changes for tenant %q: %w", q.Tenant, err)
+	}
+	defer rows.Close()
+
+	var out []core.Change
+	for rows.Next() {
+		var (
+			c     core.Change
+			endAt *time.Time
+			st    string
+		)
+		if err := rows.Scan(&c.Tenant, &c.Ref, &c.Subject, &c.Type, &c.Title,
+			&c.Actor, &c.Start, &endAt, &st, &c.Attributes, &c.LastEventID); err != nil {
+			return nil, fmt.Errorf("scan change row: %w", err)
+		}
+		c.End = endAt
+		c.Status = core.Status(st)
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate change rows: %w", err)
+	}
+	return out, nil
 }

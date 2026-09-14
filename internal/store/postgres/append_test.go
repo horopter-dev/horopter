@@ -43,7 +43,7 @@ var (
 
 // uniqueToken returns a token no other call in any execution has produced.
 func uniqueToken() string {
-	return procToken + strconv.FormatUint(idSeq.Add(1), 36)
+	return procToken + "-" + strconv.FormatUint(idSeq.Add(1), 36)
 }
 
 // tenant returns a tenant id unique to this call, naming the test for traceability.
