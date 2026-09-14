@@ -38,3 +38,13 @@ CREATE TABLE IF NOT EXISTS change (
 CREATE INDEX IF NOT EXISTS ix_change_overlap ON change (tenant, start_at, end_effective);
 CREATE INDEX IF NOT EXISTS ix_change_subject ON change (tenant, subject);
 CREATE INDEX IF NOT EXISTS ix_change_status  ON change (tenant, status);
+
+CREATE TABLE IF NOT EXISTS schema_version (
+    version    INTEGER     NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    singleton  BOOLEAN     NOT NULL DEFAULT TRUE,
+    CONSTRAINT schema_version_singleton UNIQUE (singleton)
+);
+
+INSERT INTO schema_version (version) VALUES (1)
+ON CONFLICT (singleton) DO UPDATE SET version = 1, applied_at = now();

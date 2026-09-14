@@ -203,15 +203,6 @@ func TestEgressRejectsMalformedTimeParams(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "from")
 }
 
-func TestEgressHasNoWriteRoutes(t *testing.T) {
-	h, _, _ := newServer(t)
-	req := httptest.NewRequest(http.MethodPost, "/v1/events", nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code,
-		"egress must expose no write path at all")
-}
-
 func TestListEventsReturnsRawLog(t *testing.T) {
 	h, s, tn := newServer(t)
 	seed(t, s, tn, "dep-10", "deployment.started",
@@ -309,15 +300,15 @@ func TestHealthzWorksWithNilStore(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "healthz must not require a database")
 }
 
-// TestRoutesRegisterOnlyGETHandlers replaces TestEgressHasNoWriteRoutes's single
-// hardcoded HTTP probe of POST /v1/events with a general, structural check: it parses
-// server.go, walks every mux.Handle/mux.HandleFunc call inside Routes(), and asserts
-// each pattern string starts with "GET ". An HTTP probe against one path can only
-// ever prove that one path has no write twin; a write route registered at any other
-// path — POST /v1/ingest, PUT /v1/changes — would pass every HTTP-level test in this
-// file while never being exercised. Reading the source is what generalizes the
-// property to "no write route anywhere", not just "no write route at this one URL".
-// It needs no database and runs unconditionally, like TestHealthzWorksWithNilStore.
+// TestRoutesRegisterOnlyGETHandlers asserts, with a general structural check, that
+// egress exposes no write route anywhere: it parses server.go, walks every
+// mux.Handle/mux.HandleFunc call inside Routes(), and asserts each pattern string
+// starts with "GET ". A single HTTP probe against one path can only ever prove that
+// one path has no write twin; a write route registered at any other path —
+// POST /v1/ingest, PUT /v1/changes — would pass every HTTP-level test in this file
+// while never being exercised. Reading the source is what generalizes the property to
+// "no write route anywhere", not just "no write route at this one URL". It needs no
+// database and runs unconditionally, like TestHealthzWorksWithNilStore.
 func TestRoutesRegisterOnlyGETHandlers(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "server.go", nil, parser.SkipObjectResolution)

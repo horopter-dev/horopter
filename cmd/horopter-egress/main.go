@@ -37,11 +37,15 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	store, err := postgres.Open(ctx, *dsn)
+	store, err := postgres.OpenNoMigrate(ctx, *dsn)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
+
+	if err := store.AssertSchemaVersion(ctx); err != nil {
+		return err
+	}
 
 	srv := &http.Server{
 		Addr:              *addr,
