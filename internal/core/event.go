@@ -33,7 +33,9 @@ type Event struct {
 // Validate reports whether the event may be appended to the log.
 func (e Event) Validate() error {
 	if e.Tenant == "" {
-		return fmt.Errorf("event %q: tenant is required; set it to \"default\" for single-tenant deployments", e.ID)
+		return fmt.Errorf(
+			"event %q: tenant is required; set it to \"default\" for "+
+				"single-tenant deployments", e.ID)
 	}
 	if e.Source == "" {
 		return fmt.Errorf("event %q: source is required, e.g. \"buildkite/pipelines/api\"", e.ID)
@@ -42,13 +44,17 @@ func (e Event) Validate() error {
 		return fmt.Errorf("event %q: type is required, e.g. \"deployment.started\"", e.ID)
 	}
 	if e.Subject == "" {
-		return fmt.Errorf("event %q: subject is required — the entity the change happened to, e.g. \"acme/prod\"", e.ID)
+		return fmt.Errorf(
+			"event %q: subject is required — the entity the change "+
+				"happened to, e.g. \"acme/prod\"", e.ID)
 	}
 	if e.OccurredAt.IsZero() {
 		return fmt.Errorf("event %q: occurred_at is required and must be an RFC3339 timestamp", e.ID)
 	}
 	if e.SchemaVersion != CurrentSchemaVersion {
-		return fmt.Errorf("event %q: schema_version %d is not supported; this build understands version %d",
+		return fmt.Errorf(
+			"event %q: schema_version %d is not supported; this build "+
+				"understands version %d",
 			e.ID, e.SchemaVersion, CurrentSchemaVersion)
 	}
 	return nil
