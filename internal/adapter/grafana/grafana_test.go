@@ -61,7 +61,10 @@ func TestRenderGoldenJSON(t *testing.T) {
 	out, err := grafana.New().Render([]core.Change{{
 		Ref: "dep-7", Subject: "acme/prod", Type: "deployment", Title: "API v2.5.0",
 		Start: start, End: &end, Status: core.StatusCompleted,
-		Attributes: map[string]any{"service.version": "2.5.0"},
+		Attributes: map[string]any{
+			"service.version":    "2.5.0",
+			"cicd.pipeline.name": "deploy-api",
+		},
 	}}, now)
 	require.NoError(t, err)
 
@@ -71,7 +74,12 @@ func TestRenderGoldenJSON(t *testing.T) {
 		"time": 1789380000000,
 		"timeEnd": 1789381200000,
 		"title": "API v2.5.0",
-		"tags": ["service.version:2.5.0", "status:completed", "subject:acme/prod"],
+		"tags": [
+			"cicd.pipeline.name:deploy-api",
+			"service.version:2.5.0",
+			"status:completed",
+			"subject:acme/prod"
+		],
 		"text": ""
 	}]`, string(b))
 }

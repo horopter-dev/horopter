@@ -9,6 +9,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/yo61/horopter/internal/adapter"
 	"github.com/yo61/horopter/internal/core"
 )
 
@@ -23,6 +24,8 @@ type Annotation struct {
 
 // Renderer renders changes as Grafana annotations.
 type Renderer struct{}
+
+var _ adapter.Renderer = (*Renderer)(nil)
 
 // New returns a Grafana renderer.
 func New() *Renderer { return &Renderer{} }
