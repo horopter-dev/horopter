@@ -2,28 +2,28 @@ package core
 
 import "strings"
 
-// terminalSuffixes maps an event type's trailing segment to the status it
-// implies. Any type whose last dot-separated segment appears here is terminal.
-var terminalSuffixes = map[string]Status{
-	"completed":   StatusCompleted,
-	"finished":    StatusCompleted,
-	"succeeded":   StatusCompleted,
-	"failed":      StatusFailed,
-	"rolled_back": StatusRolledBack,
-	"rolledback":  StatusRolledBack,
-	"cancelled":   StatusCancelled,
-	"canceled":    StatusCancelled,
-}
-
 // StatusForType reports the terminal status implied by an event type, and
-// whether the type is terminal at all.
+// whether the type is terminal at all. The terminal vocabulary is the event
+// type's last dot-separated segment; a switch (rather than a package-level
+// map) keeps it fixed at compile time so nothing in the package can rewrite
+// it at runtime.
 func StatusForType(t string) (Status, bool) {
 	idx := strings.LastIndex(t, ".")
 	if idx < 0 || idx == len(t)-1 {
 		return "", false
 	}
-	s, ok := terminalSuffixes[t[idx+1:]]
-	return s, ok
+	switch t[idx+1:] {
+	case "completed", "finished", "succeeded", "resolved", "closed", "done", "ended":
+		return StatusCompleted, true
+	case "failed", "errored", "timed_out":
+		return StatusFailed, true
+	case "rolled_back", "rolledback":
+		return StatusRolledBack, true
+	case "cancelled", "canceled", "aborted":
+		return StatusCancelled, true
+	default:
+		return "", false
+	}
 }
 
 func isStartType(t string) bool {
@@ -40,11 +40,17 @@ func RefFor(ev Event) string {
 }
 
 // Fold applies one event to a change and returns the result. cur is nil for
-// the first event of a ref.
+// the first event of a ref, but a zero-value *Change (as produced by, e.g.,
+// `c := m[ref]; m[ref] = Fold(&c, ev)` over a map[string]Change) must yield
+// the identical result — Task 8 rebuilds the whole projection with exactly
+// that idiom.
 //
 // Fold is pure: it reads no clock, consumes no randomness, and does not
 // mutate cur or any map reachable from it. This is what makes a projection
-// rebuild reproduce production exactly.
+// rebuild reproduce production exactly. The attribute copy is shallow in its
+// values, though: a nested map[string]any or []any value is shared with the
+// input event rather than cloned. Fold never mutates such values, so purity
+// still holds, but the returned Change is not deeply independent of ev.
 func Fold(cur *Change, ev Event) Change {
 	var out Change
 	if cur != nil {
@@ -54,24 +60,16 @@ func Fold(cur *Change, ev Event) Change {
 			out.Attributes[k] = v
 		}
 	} else {
-		out = Change{
-			Tenant:     ev.Tenant,
-			Ref:        RefFor(ev),
-			Subject:    ev.Subject,
-			Start:      ev.OccurredAt, // fallback; a later .started overwrites it
-			Attributes: make(map[string]any, len(ev.Attributes)),
-		}
-		if ev.CorrelationRef == "" {
-			at := ev.OccurredAt
-			out.End = &at
-			out.Status = StatusOccurred
-		}
+		out = Change{Attributes: make(map[string]any, len(ev.Attributes))}
 	}
 
 	for k, v := range ev.Attributes {
 		out.Attributes[k] = v
 	}
 
+	out.Tenant = ev.Tenant
+	out.Ref = RefFor(ev)
+	out.Subject = ev.Subject
 	out.Type = ev.Type
 	out.Actor = ev.Actor
 	out.LastEventID = ev.ID
@@ -79,10 +77,15 @@ func Fold(cur *Change, ev Event) Change {
 	if out.Title == "" {
 		out.Title = ev.Type
 	}
+	if out.Start.IsZero() {
+		out.Start = ev.OccurredAt // fallback; a later .started overwrites it
+	}
 
 	switch {
 	case ev.CorrelationRef == "":
-		// Point: start and end already pinned above.
+		at := ev.OccurredAt
+		out.End = &at
+		out.Status = StatusOccurred
 	case isStartType(ev.Type):
 		out.Start = ev.OccurredAt
 		if out.End == nil {

@@ -40,8 +40,14 @@ type Change struct {
 func (c Change) IsOpen() bool { return c.End == nil }
 
 // IsPoint reports whether the change is instantaneous. A point renders as a
-// line, never as a region.
-func (c Change) IsPoint() bool { return c.End != nil && c.End.Equal(c.Start) }
+// line, never as a region. Timestamp equality alone cannot distinguish a
+// point from a closed interval that happens to have zero duration (a
+// same-second start/complete pair, common in backfills and idempotent
+// producers), so IsPoint also requires StatusOccurred, which only the
+// no-correlation-ref path ever sets.
+func (c Change) IsPoint() bool {
+	return c.Status == StatusOccurred && c.End != nil && c.End.Equal(c.Start)
+}
 
 // EndEffective returns the end used for overlap comparisons, substituting
 // OpenSentinel for an open change.
