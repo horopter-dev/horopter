@@ -121,6 +121,30 @@ func TestAppendEventRejectsInvalid(t *testing.T) {
 	assert.Contains(t, err.Error(), "subject")
 }
 
+// TestAppendEventNormalizesNilAttributes pins the store's contract at the boundary
+// where the NOT NULL constraint actually lives: a nil Attributes map means "no
+// attributes," identically to an empty one, and AppendEvent must accept it rather than
+// let it reach Postgres as an explicit NULL, which the attributes column rejects
+// (DEFAULT only fires when a column is omitted from the INSERT list, not when NULL is
+// bound explicitly).
+func TestAppendEventNormalizesNilAttributes(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	ev := mkEvent(tn, eventID(t, "1"), "k1", "dep-7", "deployment.started", at)
+	ev.Attributes = nil
+
+	_, created, err := s.AppendEvent(ctx, ev)
+	require.NoError(t, err, "a nil Attributes map must not violate the NOT NULL column")
+	assert.True(t, created)
+
+	evs, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn})
+	require.NoError(t, err)
+	require.Len(t, evs, 1)
+	assert.NotNil(t, evs[0].Attributes,
+		"the stored event must round-trip as an empty map, not nil")
+	assert.Empty(t, evs[0].Attributes)
+}
+
 // concurrentAppends is how many goroutines fold onto the same ref at once. Two would
 // prove the point; a handful makes the failure message informative. It must not exceed
 // four, pgxpool's floor for MaxConns: every participant holds a connection for the whole

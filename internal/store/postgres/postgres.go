@@ -130,6 +130,17 @@ func (s *Store) AppendEvent(ctx context.Context, ev core.Event) (core.Event, boo
 		return core.Event{}, false, err
 	}
 
+	// A nil Attributes map and an empty one are semantically identical — both mean "no
+	// attributes" — but the attributes column is JSONB NOT NULL, and Postgres's DEFAULT
+	// only fires when a column is omitted from the INSERT list, never when NULL is bound
+	// explicitly, so a nil map reaches the constraint and fails. The NOT NULL constraint
+	// lives here, so this is where the contract is owned: normalising once at the store
+	// boundary covers every caller (ingress, CloudEvents mapping, a future egress seed,
+	// any other producer) instead of repairing them one at a time at their call sites.
+	if ev.Attributes == nil {
+		ev.Attributes = map[string]any{}
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return core.Event{}, false, fmt.Errorf("begin transaction: %w", err)
