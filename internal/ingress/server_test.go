@@ -152,6 +152,45 @@ func TestCloudEventIngest(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
+// TestCloudEventMissingIDReturns400 exists because the CloudEvents id doubles as the
+// idempotency key: an unvalidated envelope with no id silently gets IdempotencyKey ""
+// (core.Event.Validate does not check it, and AppendEvent only dedupes a non-empty
+// key), so a producer that omits id would get 201 on every retry — duplicating the
+// event with nothing surfaced and nothing for an operator to notice. The spec marks id
+// REQUIRED; rejecting it here is what makes that failure impossible instead of latent.
+// TestHealthzWorksWithNilStore proves healthz never touches the database, without
+// needing a live one: New never dereferences its store argument, and a Server built
+// with a nil store still has to answer 200 from healthz for that to hold. It runs
+// unconditionally — no HOROPTER_TEST_DSN skip — because it is the one property in this
+// suite that a database-less CI leg can actually exercise: every other test here skips
+// without a live Postgres, so without this one the liveness/readiness split would have
+// zero coverage in that environment. If a future change reintroduces a
+// Pool().Ping call into healthz, this test panics on the nil store and fails.
+func TestHealthzWorksWithNilStore(t *testing.T) {
+	srv := ingress.New(nil, func() time.Time { return fixed }, rand.Reader, testToken)
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code, "healthz must not require a database")
+}
+
+func TestCloudEventMissingIDReturns400(t *testing.T) {
+	h, _ := newServer(t)
+	body := fmt.Sprintf(`{"specversion":"1.0","source":"/buildkite/pipelines/api",
+		"type":"deployment.started","subject":"acme/prod","time":"2026-09-14T10:00:00Z",
+		"datacontenttype":"application/json",
+		"data":{"tenant":%q,"correlation_ref":"dep-7"}}`, tenant(t))
+	req := httptest.NewRequest(http.MethodPost, "/v1/events/cloudevents",
+		bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/cloudevents+json")
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "id",
+		"the response must name the missing required field")
+}
+
 // TestCloudEventDuplicateIsIdempotent exists to give the "CloudEvents handler ignores
 // the CloudEvent id" mutation something to kill. The CloudEvents id doubles as the
 // idempotency key, so replaying the identical envelope — the shape a retried delivery

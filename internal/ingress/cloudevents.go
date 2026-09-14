@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2/event"
@@ -26,6 +27,17 @@ func (s *Server) postCloudEvent(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal(raw, &ce); err != nil {
 		writeError(w, http.StatusBadRequest, "malformed CloudEvent: "+err.Error()+
 			"; expected application/cloudevents+json")
+		return
+	}
+	// The CloudEvents id becomes the idempotency key below, so an unvalidated envelope
+	// with a missing id would silently get IdempotencyKey "" — core.Event.Validate does
+	// not check it, and AppendEvent only dedupes a non-empty key — meaning every retry
+	// of that envelope creates a new event instead of being recognised as a duplicate.
+	// ce.Validate() enforces the spec's REQUIRED fields (id, source, type), catching
+	// that before it can happen rather than after it silently has.
+	if err := ce.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid CloudEvent: "+
+			strings.TrimSpace(err.Error()))
 		return
 	}
 	now := s.clock()

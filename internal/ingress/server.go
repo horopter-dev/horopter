@@ -1,8 +1,13 @@
 // Package ingress is the write-side daemon: it receives events, validates them, and
 // appends them to the log, folding each into the projection in the same transaction.
 //
-// It contains no query code by design. Egress cannot write and ingress cannot read,
-// so a compromise or a bug in either is structurally confined to one half.
+// It contains no query code by design: no code here calls QueryChanges or ListEvents,
+// and Routes exposes no path that reaches them. That is a discipline this package's
+// code observes, not a privilege boundary — Server holds a full *postgres.Store, which
+// exposes those same read methods, so a compromise of the ingress process itself still
+// has a read-capable Store sitting in memory. What splitting into two binaries buys is
+// that a bug specific to the read path is only reachable through egress's routes, and a
+// bug specific to the write path only through ingress's.
 package ingress
 
 import (
