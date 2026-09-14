@@ -81,6 +81,8 @@ func TestRenderMapsStatusToOTelStatus(t *testing.T) {
 		{core.StatusFailed, "Error"},
 		{core.StatusRolledBack, "Error"},
 		{core.StatusOccurred, "Unset"},
+		{core.StatusInProgress, "Unset"},
+		{core.StatusCancelled, "Unset"},
 	} {
 		out, err := otlp.New().Render([]core.Change{{
 			Ref: "r", Start: start, End: &end, Status: tc.in,

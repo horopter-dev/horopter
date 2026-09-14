@@ -67,6 +67,13 @@ func (r *Renderer) Render(changes []core.Change, now time.Time) (any, error) {
 	return out, nil
 }
 
+// otelStatus maps a change's status to OTel's tri-state span status. In
+// progress and cancelled deliberately fall to the default "Unset": OTel's
+// Error means the operation failed, and a cancelled change was deliberately
+// stopped, not failed, so mapping it to Error would misreport a deliberate
+// stop as a failure in every downstream OTel backend. Unset — "no
+// definitive outcome recorded" — fits both a still-open change and a
+// cancelled one.
 func otelStatus(s core.Status) string {
 	switch s {
 	case core.StatusCompleted:
