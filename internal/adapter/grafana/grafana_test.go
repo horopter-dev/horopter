@@ -83,3 +83,14 @@ func TestRenderGoldenJSON(t *testing.T) {
 		"text": ""
 	}]`, string(b))
 }
+
+// Render(nil, now) must marshal to a JSON array, never null: Grafana's
+// JSON-datasource contract expects an array, and a bare null can break panels.
+func TestRenderNilChangesMarshalsToEmptyArray(t *testing.T) {
+	out, err := grafana.New().Render(nil, now)
+	require.NoError(t, err)
+
+	b, err := json.Marshal(out)
+	require.NoError(t, err)
+	assert.JSONEq(t, `[]`, string(b))
+}
