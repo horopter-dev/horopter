@@ -17,7 +17,7 @@ import (
 //go:embed migrations/*.sql
 var migrationFS embed.FS
 
-// migrationLockKey is an arbitrary but fixed application id for pg_advisory_lock.
+// migrationLockKey is an arbitrary but fixed application id for pg_advisory_xact_lock.
 // Every process that migrates uses this same key, which is what serialises them.
 const migrationLockKey int64 = 8145209847321
 
@@ -34,7 +34,8 @@ func (s *Store) Close() { s.pool.Close() }
 func Open(ctx context.Context, dsn string) (*Store, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
-		return nil, fmt.Errorf("connect to postgres: %w; check DATABASE_URL", err)
+		return nil, fmt.Errorf("connect to postgres: %w; check the dsn is a valid "+
+			"postgres connection string", err)
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
@@ -47,24 +48,30 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 	return &Store{pool: pool}, nil
 }
 
-// Migrate applies every embedded migration under a session-level advisory lock.
+// Migrate applies every embedded migration inside one transaction, guarded by a
+// transaction-scoped advisory lock.
 //
 // The lock is what makes this safe when several daemons start at once, as they do on
 // every rolling deploy: without it, concurrent CREATE INDEX statements race and can
 // leave a partially applied schema with no error surfaced to the operator.
+//
+// pg_advisory_xact_lock, rather than pg_advisory_lock, is deliberate: it is released
+// automatically by Postgres when the transaction commits or rolls back, so there is no
+// manual unlock call that can be skipped by a cancelled context or a swallowed error and
+// leave the lock held by a connection quietly returned to the pool. Postgres DDL is
+// transactional, so wrapping every migration statement in the same transaction is also
+// what makes a mid-file failure roll back cleanly instead of leaving a partially applied
+// schema.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
-	conn, err := pool.Acquire(ctx)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("acquire connection for migration: %w", err)
+		return fmt.Errorf("begin migration transaction: %w", err)
 	}
-	defer conn.Release()
+	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationLockKey); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, migrationLockKey); err != nil {
 		return fmt.Errorf("take migration advisory lock: %w", err)
 	}
-	defer func() {
-		_, _ = conn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, migrationLockKey)
-	}()
 
 	entries, err := migrationFS.ReadDir("migrations")
 	if err != nil {
@@ -81,9 +88,13 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		if err != nil {
 			return fmt.Errorf("read migration %q: %w", name, err)
 		}
-		if _, err := conn.Exec(ctx, string(stmt)); err != nil {
+		if _, err := tx.Exec(ctx, string(stmt)); err != nil {
 			return fmt.Errorf("apply migration %q: %w", name, err)
 		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit migration transaction: %w", err)
 	}
 	return nil
 }
