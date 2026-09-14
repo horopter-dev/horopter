@@ -152,12 +152,6 @@ func TestCloudEventIngest(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
-// TestCloudEventMissingIDReturns400 exists because the CloudEvents id doubles as the
-// idempotency key: an unvalidated envelope with no id silently gets IdempotencyKey ""
-// (core.Event.Validate does not check it, and AppendEvent only dedupes a non-empty
-// key), so a producer that omits id would get 201 on every retry — duplicating the
-// event with nothing surfaced and nothing for an operator to notice. The spec marks id
-// REQUIRED; rejecting it here is what makes that failure impossible instead of latent.
 // TestHealthzWorksWithNilStore proves healthz never touches the database, without
 // needing a live one: New never dereferences its store argument, and a Server built
 // with a nil store still has to answer 200 from healthz for that to hold. It runs
@@ -174,6 +168,12 @@ func TestHealthzWorksWithNilStore(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "healthz must not require a database")
 }
 
+// TestCloudEventMissingIDReturns400 exists because the CloudEvents id doubles as the
+// idempotency key: an unvalidated envelope with no id silently gets IdempotencyKey ""
+// (core.Event.Validate does not check it, and AppendEvent only dedupes a non-empty
+// key), so a producer that omits id would get 201 on every retry — duplicating the
+// event with nothing surfaced and nothing for an operator to notice. The spec marks id
+// REQUIRED; rejecting it here is what makes that failure impossible instead of latent.
 func TestCloudEventMissingIDReturns400(t *testing.T) {
 	h, _ := newServer(t)
 	body := fmt.Sprintf(`{"specversion":"1.0","source":"/buildkite/pipelines/api",
@@ -187,7 +187,10 @@ func TestCloudEventMissingIDReturns400(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "id",
+	// "id" alone would also match inside "invalid" (inval-id) regardless of whether the
+	// missing-id detail is actually present in the body, so the assertion has to pin the
+	// SDK's field-level wording, not just the word "id".
+	assert.Contains(t, rec.Body.String(), "id: MUST",
 		"the response must name the missing required field")
 }
 
