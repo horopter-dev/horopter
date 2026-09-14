@@ -1,6 +1,14 @@
 version: '3'
 tasks:
+  db:up:
+    cmds:
+      - docker compose up -d db
+  db:down:
+    cmds:
+      - docker compose down -v
   test:
+    env:
+      HOROPTER_TEST_DSN: postgres://horopter:horopter@localhost:5432/horopter
     cmds:
       - go test ./... -race -count=1
   lint:

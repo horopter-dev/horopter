@@ -1,0 +1,14 @@
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: horopter
+      POSTGRES_PASSWORD: horopter
+      POSTGRES_DB: horopter
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U horopter"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
