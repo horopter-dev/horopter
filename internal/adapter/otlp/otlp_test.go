@@ -32,19 +32,43 @@ func TestRenderUsesNanosecondsNotMilliseconds(t *testing.T) {
 	assert.Equal(t, end.UnixNano(), spans[0].EndUnixNano)
 }
 
+// A string-only fixture can't distinguish "kept typed" from "flattened to a
+// string": flattening a string is the identity operation. This fixture adds
+// an int, a bool, and a nested map — each becomes a different string under
+// Grafana-style "%v" flattening — and asserts the concrete Go type survives,
+// not just the rendered value, so a flattening regression fails a type
+// assertion rather than slipping through a same-string comparison.
 func TestRenderKeepsAttributesStructured(t *testing.T) {
 	end := start.Add(time.Minute)
 	out, err := otlp.New().Render([]core.Change{{
 		Ref: "dep-7", Subject: "acme/prod", Start: start, End: &end,
-		Status:     core.StatusCompleted,
-		Attributes: map[string]any{"service.version": "2.5.0"},
+		Status: core.StatusCompleted,
+		Attributes: map[string]any{
+			"service.version":           "2.5.0",
+			"cicd.pipeline.run.attempt": 3,
+			"deployment.rollback":       true,
+			"service.metadata":          map[string]any{"region": "us-east-1"},
+		},
 	}}, now)
 	require.NoError(t, err)
 
 	spans := out.([]otlp.Span)
-	assert.Equal(t, "2.5.0", spans[0].Attributes["service.version"],
+	attrs := spans[0].Attributes
+	assert.Equal(t, "2.5.0", attrs["service.version"],
 		"OTLP keeps typed attributes; it must NOT inherit Grafana's flattening")
-	assert.Equal(t, "acme/prod", spans[0].Attributes["horopter.subject"])
+	assert.Equal(t, "acme/prod", attrs["horopter.subject"])
+
+	attempt, ok := attrs["cicd.pipeline.run.attempt"].(int)
+	require.True(t, ok, "int attribute must survive as int, not be flattened to a string")
+	assert.Equal(t, 3, attempt)
+
+	rollback, ok := attrs["deployment.rollback"].(bool)
+	require.True(t, ok, "bool attribute must survive as bool, not be flattened to a string")
+	assert.True(t, rollback)
+
+	metadata, ok := attrs["service.metadata"].(map[string]any)
+	require.True(t, ok, "nested map attribute must survive as map[string]any, not a string")
+	assert.Equal(t, "us-east-1", metadata["region"])
 }
 
 func TestRenderMapsStatusToOTelStatus(t *testing.T) {
