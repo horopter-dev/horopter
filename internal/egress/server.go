@@ -197,7 +197,8 @@ func windowFromRFC3339(r *http.Request) (window, error) {
 // windowFromEpochMillis reads from/to as epoch milliseconds and limit as an optional
 // bounded integer: the neutral epoch-millisecond query-parameter contract. This is
 // not Grafana's own contract — windowFromAnnotationBody, reading RFC3339 out of a
-// POST body, is the parser Grafana's datasource plugins actually drive.
+// POST body, is the parser grafana/simple-json-datasource — an archived Grafana
+// datasource plugin, but the only one that speaks this transport — actually drives.
 func windowFromEpochMillis(r *http.Request) (window, error) {
 	from, err := epochMillisParam(r, "from")
 	if err != nil {
