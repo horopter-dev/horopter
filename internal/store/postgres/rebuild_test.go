@@ -11,6 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/yo61/horopter/internal/core"
 	"github.com/yo61/horopter/internal/store/postgres"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // TestRebuildReproducesProjectionForIDOrderedEvents pins RebuildProjection's guarantee
@@ -215,4 +218,36 @@ func TestAppendFailsFastWhileARebuildHoldsTheTenantLock(t *testing.T) {
 		"the message must let an operator tell a running rebuild from a dead database")
 	assert.Contains(t, err.Error(), "nothing was written",
 		"the message must say the append is safe to retry")
+}
+
+// TestRebuildRecordsItsShapeOnASpan pins RebuildProjection's span attributes: the
+// tenant, the events replayed and the refs they folded into say what the rebuild did,
+// and their ratio predicts how long the NEXT rebuild for this tenant will hold the lock.
+func TestRebuildRecordsItsShapeOnASpan(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)))
+	t.Cleanup(func() { otel.SetTracerProvider(prev) })
+
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
+	_, _, err := s.AppendEvent(ctx, mkEvent(tn, eventID(t, "a"), "k1", "dep-1",
+		"deployment.started", at))
+	require.NoError(t, err)
+
+	require.NoError(t, s.RebuildProjection(ctx, tn))
+
+	var attrs map[string]any
+	for _, span := range rec.Ended() {
+		if span.Name() == "RebuildProjection" {
+			attrs = map[string]any{}
+			for _, kv := range span.Attributes() {
+				attrs[string(kv.Key)] = kv.Value.AsInterface()
+			}
+		}
+	}
+	require.NotNil(t, attrs, "RebuildProjection must open a span")
+	assert.Equal(t, tn, attrs["horopter.rebuild.tenant"])
+	assert.Equal(t, int64(1), attrs["horopter.rebuild.events"])
+	assert.Equal(t, int64(1), attrs["horopter.rebuild.refs"])
 }

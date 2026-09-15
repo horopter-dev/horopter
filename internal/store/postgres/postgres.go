@@ -14,10 +14,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/yo61/horopter/internal/core"
+	"github.com/yo61/horopter/internal/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 //go:embed migrations/*.sql
@@ -94,7 +99,16 @@ func (s *Store) Close() { s.pool.Close() }
 // connect failure; the ping failure message is identical for both callers, so it is
 // not parameterised.
 func connect(ctx context.Context, dsn, connectErrHint string) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, dsn)
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("parse the postgres dsn: %w; %s", err, connectErrHint)
+	}
+	// otelpgx traces each statement. Bound values are NOT included: they carry event
+	// payloads, and query parameters are exactly where user data would leak into
+	// telemetry. The statement text itself is this project's own SQL and is what makes
+	// a span identifiable.
+	cfg.ConnConfig.Tracer = otelpgx.NewTracer()
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect to postgres: %w; %s", err, connectErrHint)
 	}
@@ -104,6 +118,11 @@ func connect(ctx context.Context, dsn, connectErrHint string) (*pgxpool.Pool, er
 	}
 	return pool, nil
 }
+
+// tracer returns the store's own instrumentation scope. Spans from this scope are the
+// four public operations below; per-statement spans come from otelpgx under its own
+// scope, so the two are separately switchable.
+func tracer() trace.Tracer { return otel.Tracer(telemetry.StoreScope) }
 
 // Open connects to dsn and applies all migrations.
 func Open(ctx context.Context, dsn string) (*Store, error) {
@@ -361,6 +380,9 @@ func trimToLimit[T any](rows []T, limit int) ([]T, bool) {
 // pinned-pool-connection hazard AppendLockTimeout exists to prevent, on the one statement
 // it did not cover.
 func (s *Store) AppendEvent(ctx context.Context, ev core.Event) (core.Event, bool, error) {
+	ctx, span := tracer().Start(ctx, "AppendEvent")
+	defer span.End()
+
 	ev, err := prepareEvent(ev)
 	if err != nil {
 		return core.Event{}, false, err
@@ -770,6 +792,9 @@ func upsertChange(ctx context.Context, tx pgx.Tx, c core.Change) error {
 // that owns the ref, never an unrelated event whose id happens to equal some other
 // change's correlation_ref.
 func (s *Store) ListEvents(ctx context.Context, q EventQuery) ([]core.Event, bool, error) {
+	ctx, span := tracer().Start(ctx, "ListEvents")
+	defer span.End()
+
 	query := `
 		SELECT id, tenant, idempotency_key, schema_version, source, type, subject,
 		       actor, title, occurred_at, received_at, correlation_ref, attributes
@@ -840,6 +865,9 @@ func scanEvents(rows pgx.Rows, tenantID string) ([]core.Event, error) {
 // changes it most needed. The over-fetch that detects it is invisible to the caller —
 // q.Limit still means what it says.
 func (s *Store) QueryChanges(ctx context.Context, q ChangeQuery) ([]core.Change, bool, error) {
+	ctx, span := tracer().Start(ctx, "QueryChanges")
+	defer span.End()
+
 	sb := strings.Builder{}
 	sb.WriteString(`
 		SELECT tenant, ref, subject, type, title, actor, start_at, started_at,
@@ -971,15 +999,20 @@ func scanChanges(rows pgx.Rows) ([]core.Change, error) {
 // bound on an event's delay is the producer's own retry patience. There is no batching,
 // no progress reporting and no online rebuild.
 func (s *Store) RebuildProjection(ctx context.Context, tenantID string) error {
+	ctx, span := tracer().Start(ctx, "RebuildProjection")
+	defer span.End()
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin rebuild transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	lockStart := time.Now()
 	if err := lockRebuildWrite(ctx, tx, tenantID); err != nil {
 		return err
 	}
+	lockWait := time.Since(lockStart)
 	if _, err := tx.Exec(ctx, `DELETE FROM change WHERE tenant = $1`, tenantID); err != nil {
 		return fmt.Errorf("clear projection for tenant %q: %w", tenantID, err)
 	}
@@ -987,13 +1020,21 @@ func (s *Store) RebuildProjection(ctx context.Context, tenantID string) error {
 		afterDeleteHook()
 	}
 
-	acc, err := foldEventLog(ctx, tx, tenantID)
+	acc, events, err := foldEventLog(ctx, tx, tenantID)
 	if err != nil {
 		return err
 	}
 	if err := writeProjection(ctx, tx, acc); err != nil {
 		return err
 	}
+
+	span.SetAttributes(
+		attribute.String("horopter.rebuild.tenant", tenantID),
+		attribute.Int("horopter.rebuild.events", events),
+		attribute.Int("horopter.rebuild.refs", len(acc)),
+		attribute.Int64("horopter.rebuild.lock_wait_ms", lockWait.Milliseconds()),
+	)
+
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit rebuild for tenant %q: %w", tenantID, err)
 	}
@@ -1012,24 +1053,26 @@ func (s *Store) RebuildProjection(ctx context.Context, tenantID string) error {
 // converge.
 func foldEventLog(
 	ctx context.Context, tx pgx.Tx, tenantID string,
-) (map[string]core.Change, error) {
+) (map[string]core.Change, int, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT id, tenant, schema_version, source, type, subject, actor, title,
 		       occurred_at, received_at, correlation_ref, attributes
 		FROM event WHERE tenant = $1 ORDER BY id ASC`, tenantID)
 	if err != nil {
-		return nil, fmt.Errorf("read event log for tenant %q: %w", tenantID, err)
+		return nil, 0, fmt.Errorf("read event log for tenant %q: %w", tenantID, err)
 	}
 	defer rows.Close()
 
 	acc := map[string]core.Change{}
+	events := 0
 	for rows.Next() {
 		var ev core.Event
 		if err := rows.Scan(&ev.ID, &ev.Tenant, &ev.SchemaVersion, &ev.Source, &ev.Type,
 			&ev.Subject, &ev.Actor, &ev.Title, &ev.OccurredAt, &ev.ReceivedAt,
 			&ev.CorrelationRef, &ev.Attributes); err != nil {
-			return nil, fmt.Errorf("scan event row for tenant %q: %w", tenantID, err)
+			return nil, 0, fmt.Errorf("scan event row for tenant %q: %w", tenantID, err)
 		}
+		events++
 		ref := core.RefFor(ev)
 		var prev *core.Change
 		if c, ok := acc[ref]; ok {
@@ -1038,9 +1081,9 @@ func foldEventLog(
 		acc[ref] = core.Fold(prev, ev)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate event log for tenant %q: %w", tenantID, err)
+		return nil, 0, fmt.Errorf("iterate event log for tenant %q: %w", tenantID, err)
 	}
-	return acc, nil
+	return acc, events, nil
 }
 
 // writeProjection inserts every rebuilt change.
