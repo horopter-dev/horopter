@@ -7,6 +7,9 @@ tasks:
     cmds:
       - docker compose down -v
   test:
+    preconditions:
+      - sh: 'docker compose exec -T db pg_isready -U horopter'
+        msg: 'the database is not reachable; start it with `task db:up` and retry'
     env:
       HOROPTER_TEST_DSN: postgres://horopter:horopter@localhost:5432/horopter
     cmds:

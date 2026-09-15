@@ -15,7 +15,7 @@ repos:
     hooks:
       - id: go-test
         name: go test
-        entry: go test ./... -count=1
+        entry: task test
         language: system
         pass_filenames: false
         stages: [pre-commit]
