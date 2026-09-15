@@ -13,7 +13,16 @@ import (
 	"github.com/yo61/horopter/internal/store/postgres"
 )
 
-func TestRebuildReproducesProjectionExactly(t *testing.T) {
+// TestRebuildReproducesProjectionForIDOrderedEvents pins RebuildProjection's guarantee
+// at the strength it actually has, not the stronger claim its former name made.
+// RebuildProjection's own doc comment explains why "exactly" was never quite true: live
+// appends fold in ARRIVAL order, while a rebuild replays in ID order, and the two only
+// coincide when ids sort the same way the events arrived. This test's ids come from
+// eventID, backed by monotonicEntropy precisely so that coincidence is guaranteed here
+// rather than left to chance — what this test actually proves is the id-ordered fold
+// production relies on when that condition holds, not that a rebuild is exact in
+// general.
+func TestRebuildReproducesProjectionForIDOrderedEvents(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	win := postgres.ChangeQuery{
@@ -29,9 +38,10 @@ func TestRebuildReproducesProjectionExactly(t *testing.T) {
 		{"config", "k3", "", "config.changed", 5 * time.Minute},
 		{"d2-started", "k4", "d2", "deployment.started", 30 * time.Minute},
 	}
-	// Event ids come from eventID: event.id is a GLOBAL primary key, so literals
-	// collide across tenants and across runs. eventID is backed by a monotonic
-	// counter, so ULID-order replay still has a meaningful order to break.
+	// event.id is a GLOBAL primary key, so literals collide across tenants and across
+	// runs; eventID's ids are both unique and, thanks to monotonicEntropy, ordered by
+	// call order, which is what makes the id-ordered rebuild below comparable to the
+	// arrival-ordered live fold above it at all.
 	for _, e := range events {
 		_, _, err := s.AppendEvent(ctx,
 			mkEvent(tn, eventID(t, e.suffix), e.idem, e.ref, e.typ, at.Add(e.off)))
@@ -46,7 +56,8 @@ func TestRebuildReproducesProjectionExactly(t *testing.T) {
 
 	after, _, err := s.QueryChanges(ctx, win)
 	require.NoError(t, err)
-	assert.Equal(t, before, after, "a rebuild must reproduce the projection exactly")
+	assert.Equal(t, before, after,
+		"a rebuild must reproduce the projection when ids sort in arrival order")
 }
 
 func TestRebuildIsTenantScoped(t *testing.T) {

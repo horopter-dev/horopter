@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oklog/ulid/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/yo61/horopter/internal/core"
@@ -54,19 +55,34 @@ func tenant(t *testing.T) string {
 	return "test-" + t.Name() + "-" + uniqueToken()
 }
 
+// monotonicEntropy makes successive eventID calls sort in call order even when two land
+// in the same millisecond, which core.NewULID's production entropy (plain crypto/rand)
+// does not guarantee — see RebuildProjection's own doc comment on why that gap matters.
+// rebuild_test.go's projection-equality test depends on id order matching call order: a
+// tie broken by pure random entropy could let two same-millisecond events swap places
+// under RebuildProjection's id-ordered replay, which folds in a different order than the
+// live appends that built "before" did.
+//
+// It is package-level, not per-call, because monotonicity is a property of a SEQUENCE of
+// reads sharing one accumulator, and it is not safe for concurrent use — which is fine
+// here, since eventID is only ever called from a test's own goroutine, before any worker
+// goroutines the test spawns are released (see TestConcurrentAppendsToSameRefDoNotLoseUpdates
+// and TestConcurrentDuplicateIdempotencyKeyReturnsTheOriginal, both of which build every
+// event before starting a single goroutine).
+var monotonicEntropy = ulid.Monotonic(rand.Reader, 0)
+
 // eventID returns a fresh, valid ULID for use as an event id. event.id is a bare
 // primary key with no tenant in it, so ids must be unique across every tenant and every
-// execution, not merely within the tenant that writes them; crypto/rand entropy gives
-// that guarantee the same way core.NewULID does in production, rather than relying on
-// uniqueToken's counter (see the identical reasoning in
-// internal/ingress/server_test.go's newServer).
+// execution, not merely within the tenant that writes them; monotonicEntropy's entropy
+// gives that guarantee the same way core.NewULID's does in production, plus the call
+// ordering guarantee production does not need and this package's tests do.
 //
 // core.Event.Validate rejects anything that is not a syntactically valid ULID, which
 // rules out embedding suffix in the id text the way this helper used to; suffix is
 // logged instead so a failing test's -v output still names the call that built the id.
 func eventID(t *testing.T, suffix string) string {
 	t.Helper()
-	id := core.NewULID(time.Now(), rand.Reader)
+	id := core.NewULID(time.Now(), monotonicEntropy)
 	t.Logf("eventID %q -> %s", suffix, id)
 	return id
 }
