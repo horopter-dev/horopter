@@ -171,4 +171,15 @@ this purpose.
 
 ## Licence
 
-TBD
+None yet, deliberately. This repository is private, and the licensing decision is
+deferred rather than pending — there is nothing to decide while the only readers
+are people who already have access.
+
+Note what the absence of a licence means, because it is the opposite of what an
+unlicensed repository is often assumed to mean: with no licence granted, default
+copyright applies and all rights are reserved. Nobody may use, copy, modify or
+redistribute this. That is the correct and intended position for private code.
+
+**Settle this before making the repository public**, not after — the default
+above does not become permissive by publication, and contributions accepted
+without a licence in place are awkward to relicense later.
