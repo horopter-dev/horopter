@@ -107,12 +107,14 @@ func seedManyChanges(t *testing.T, s *postgres.Store, tn string, n int) {
 	batch := &pgx.Batch{}
 	for range n {
 		ref := fmt.Sprintf("bulk-%s-%s-%d", t.Name(), procToken, tenantSeq.Add(1))
-		// end_effective is omitted deliberately: Postgres generates it from end_at, and
-		// a generated column rejects any value an INSERT supplies for it.
+		// start_at and end_effective are omitted deliberately: Postgres generates both,
+		// and a generated column rejects any value an INSERT supplies for it. started_at
+		// carries the asserted start these rows stand in for; first_seen_at repeats it,
+		// which is what a ref whose earliest event IS its start event folds to.
 		batch.Queue(`
-			INSERT INTO change (tenant, ref, subject, type, title, actor, start_at,
-			                     end_at, status, attributes, last_event_id)
-			VALUES ($1,$2,'acme/prod','deployment.started','','ci-bot',$3,NULL,
+			INSERT INTO change (tenant, ref, subject, type, title, actor, started_at,
+			                     first_seen_at, end_at, status, attributes, last_event_id)
+			VALUES ($1,$2,'acme/prod','deployment.started','','ci-bot',$3,$3,NULL,
 			        'in_progress','{}'::jsonb,'seed')`,
 			tn, ref, at)
 	}

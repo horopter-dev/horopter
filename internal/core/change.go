@@ -26,6 +26,17 @@ var OpenSentinel = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 
 // Change is the derived, rebuildable projection that every render adapter
 // reads. It takes one of three shapes: point, open, or closed.
+//
+// A change's start is two facts rather than one. StartedAt is the ASSERTION —
+// a start-type event's own occurred_at — and is nil until such an event
+// arrives. FirstSeenAt is the INFERENCE: the earliest occurred_at of any event
+// folded onto the ref, evidence that the change must have existed by then.
+// Start is COALESCE(StartedAt, FirstSeenAt) and mirrors the generated start_at
+// column, so consumers that only want "when did this start" read Start and are
+// unaffected by the split. FirstSeenAt < StartedAt is a real and queryable
+// anomaly — an event claiming to predate the change's declared start — rather
+// than something the fold has erased. See
+// decisions/2026-09-15-change-start-time-provenance.md.
 type Change struct {
 	Tenant      string
 	Ref         string
@@ -34,6 +45,8 @@ type Change struct {
 	Title       string
 	Actor       string
 	Start       time.Time
+	StartedAt   *time.Time
+	FirstSeenAt time.Time
 	End         *time.Time
 	Status      Status
 	Attributes  map[string]any

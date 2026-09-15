@@ -519,43 +519,49 @@ func lockAndLoadChange(
 	ctx context.Context, tx pgx.Tx, tenantID, ref string,
 ) (core.Change, bool, error) {
 	var (
-		c     core.Change
-		endAt *time.Time
-		st    string
+		c         core.Change
+		startedAt *time.Time
+		endAt     *time.Time
+		st        string
 	)
 	err := tx.QueryRow(ctx, `
-		SELECT tenant, ref, subject, type, title, actor, start_at, end_at,
-		       status, attributes, last_event_id
+		SELECT tenant, ref, subject, type, title, actor, start_at, started_at,
+		       first_seen_at, end_at, status, attributes, last_event_id
 		FROM change WHERE tenant = $1 AND ref = $2 FOR UPDATE`,
 		tenantID, ref,
 	).Scan(&c.Tenant, &c.Ref, &c.Subject, &c.Type, &c.Title, &c.Actor,
-		&c.Start, &endAt, &st, &c.Attributes, &c.LastEventID)
+		&c.Start, &startedAt, &c.FirstSeenAt, &endAt, &st, &c.Attributes, &c.LastEventID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return core.Change{}, false, nil
 	}
 	if err != nil {
 		return core.Change{}, false, fmt.Errorf("lock change %q/%q: %w", tenantID, ref, err)
 	}
+	c.StartedAt = startedAt
 	c.End = endAt
 	c.Status = core.Status(st)
 	return c, true, nil
 }
 
-// upsertChange writes a folded change. end_effective is absent from the column list
-// because Postgres generates it from end_at (migration 0002): it is the overlap index's
-// key, and one writer of it cannot drift from another.
+// upsertChange writes a folded change. Both derived columns are absent from the column
+// list, because Postgres generates them and rejects any value an INSERT supplies for one:
+// end_effective from end_at (migration 0002), and start_at from
+// COALESCE(started_at, first_seen_at) (migration 0003). What this writes is the facts the
+// domain owns — started_at, first_seen_at, end_at — so there is exactly one writer of each
+// derived value and no second writer to drift from.
 func upsertChange(ctx context.Context, tx pgx.Tx, c core.Change) error {
 	_, err := tx.Exec(ctx, `
-		INSERT INTO change (tenant, ref, subject, type, title, actor, start_at, end_at,
-		                    status, attributes, last_event_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		INSERT INTO change (tenant, ref, subject, type, title, actor, started_at,
+		                    first_seen_at, end_at, status, attributes, last_event_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		ON CONFLICT (tenant, ref) DO UPDATE SET
 		  subject=EXCLUDED.subject, type=EXCLUDED.type, title=EXCLUDED.title,
-		  actor=EXCLUDED.actor, start_at=EXCLUDED.start_at, end_at=EXCLUDED.end_at,
+		  actor=EXCLUDED.actor, started_at=EXCLUDED.started_at,
+		  first_seen_at=EXCLUDED.first_seen_at, end_at=EXCLUDED.end_at,
 		  status=EXCLUDED.status, attributes=EXCLUDED.attributes,
 		  last_event_id=EXCLUDED.last_event_id`,
 		c.Tenant, c.Ref, c.Subject, c.Type, c.Title, c.Actor,
-		c.Start.UTC(), c.End, string(c.Status), c.Attributes, c.LastEventID,
+		c.StartedAt, c.FirstSeenAt.UTC(), c.End, string(c.Status), c.Attributes, c.LastEventID,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert change %q/%q: %w", c.Tenant, c.Ref, err)
@@ -628,8 +634,8 @@ func (s *Store) ListEvents(ctx context.Context, q EventQuery) ([]core.Event, err
 func (s *Store) QueryChanges(ctx context.Context, q ChangeQuery) ([]core.Change, error) {
 	sb := strings.Builder{}
 	sb.WriteString(`
-		SELECT tenant, ref, subject, type, title, actor, start_at, end_at,
-		       status, attributes, last_event_id
+		SELECT tenant, ref, subject, type, title, actor, start_at, started_at,
+		       first_seen_at, end_at, status, attributes, last_event_id
 		FROM change
 		WHERE tenant = $1 AND start_at <= $2 AND end_effective >= $3`)
 	args := []any{q.Tenant, q.To.UTC(), q.From.UTC()}
@@ -661,14 +667,17 @@ func (s *Store) QueryChanges(ctx context.Context, q ChangeQuery) ([]core.Change,
 	var out []core.Change
 	for rows.Next() {
 		var (
-			c     core.Change
-			endAt *time.Time
-			st    string
+			c         core.Change
+			startedAt *time.Time
+			endAt     *time.Time
+			st        string
 		)
 		if err := rows.Scan(&c.Tenant, &c.Ref, &c.Subject, &c.Type, &c.Title,
-			&c.Actor, &c.Start, &endAt, &st, &c.Attributes, &c.LastEventID); err != nil {
+			&c.Actor, &c.Start, &startedAt, &c.FirstSeenAt, &endAt, &st,
+			&c.Attributes, &c.LastEventID); err != nil {
 			return nil, fmt.Errorf("scan change row: %w", err)
 		}
+		c.StartedAt = startedAt
 		c.End = endAt
 		c.Status = core.Status(st)
 		out = append(out, c)

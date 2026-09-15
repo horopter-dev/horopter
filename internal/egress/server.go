@@ -263,14 +263,26 @@ func (s *Server) render(
 
 // changesToJSON renders changes in neutral terms. No vendor field names, no epoch
 // units — those belong to the adapters.
+//
+// "start" is the answer to "when did this change start"; first_seen_at and started_at are
+// the two facts it is derived from. Both are emitted because the point of recording them
+// separately is that first_seen_at < started_at — an event claiming to predate the
+// change's declared start — becomes a queryable anomaly, and it cannot be queried if the
+// read side never emits it. started_at is omitted while it is NULL, the way "end" is
+// omitted while the change is open: absent means "no producer has asserted a start yet",
+// which is not the same fact as any timestamp would be.
 func changesToJSON(changes []core.Change) []map[string]any {
 	out := make([]map[string]any, 0, len(changes))
 	for _, c := range changes {
 		m := map[string]any{
 			"ref": c.Ref, "subject": c.Subject, "type": c.Type, "title": c.Title,
 			"actor": c.Actor, "start": c.Start.UTC().Format(time.RFC3339Nano),
-			"status": string(c.Status), "attributes": c.Attributes,
+			"first_seen_at": c.FirstSeenAt.UTC().Format(time.RFC3339Nano),
+			"status":        string(c.Status), "attributes": c.Attributes,
 			"last_event_id": c.LastEventID,
+		}
+		if c.StartedAt != nil {
+			m["started_at"] = c.StartedAt.UTC().Format(time.RFC3339Nano)
 		}
 		if c.End != nil {
 			m["end"] = c.End.UTC().Format(time.RFC3339Nano)

@@ -77,22 +77,58 @@ func Fold(cur *Change, ev Event) Change {
 	if out.Title == "" {
 		out.Title = ev.Type
 	}
-	// Spec §7: until the real start arrives, start falls back to the EARLIEST
-	// occurred_at seen for the ref, not the first one folded. The two differ when a
-	// later event carries an earlier timestamp, and keeping the earliest is also what
-	// makes the fallback insensitive to fold order, so a rebuild (id order) and a live
-	// append (arrival order) agree on it.
-	if out.Start.IsZero() || ev.OccurredAt.Before(out.Start) {
-		out.Start = ev.OccurredAt
+	// FirstSeenAt is the INFERENCE: the earliest occurred_at of any event folded onto
+	// the ref, which is evidence the change must have existed by then. It is a running
+	// minimum, so it does not matter which event carries it or when that event arrives.
+	// The ASSERTION — a start-type event's own occurred_at — is StartedAt, set in
+	// foldLifecycle below.
+	if out.FirstSeenAt.IsZero() || ev.OccurredAt.Before(out.FirstSeenAt) {
+		out.FirstSeenAt = ev.OccurredAt
+	}
+	foldLifecycle(&out, ev)
+
+	// Start is COALESCE(StartedAt, FirstSeenAt), which is exactly what Postgres
+	// generates for the start_at column (migration 0003). Computing the same value here
+	// keeps the in-memory Change equal to the row the database will hold, which
+	// RebuildProjection depends on: its accumulator feeds folded Change values straight
+	// back in as cur.
+	//
+	// Both facts are minima, so both are commutative and Start is therefore insensitive
+	// to fold order: a rebuild (id order) and a live append (arrival order) cannot
+	// disagree about it. See
+	// decisions/2026-09-15-change-start-time-provenance.md.
+	out.Start = out.FirstSeenAt
+	if out.StartedAt != nil {
+		out.Start = *out.StartedAt
 	}
 
+	return out
+}
+
+// foldLifecycle applies ev's lifecycle effect — the assertion of a start, an end, and
+// the status those imply — to out.
+//
+// out is a value Fold owns outright and has not returned yet, so writing through this
+// pointer does not weaken Fold's purity: nothing reachable from cur or ev is mutated.
+// Every time pointer assigned here is freshly allocated from a local copy for that same
+// reason — out.End and out.StartedAt may both have been copied from cur, and writing
+// through either would reach back into the caller's Change.
+func foldLifecycle(out *Change, ev Event) {
 	switch {
 	case ev.CorrelationRef == "":
 		at := ev.OccurredAt
 		out.End = &at
 		out.Status = StatusOccurred
 	case isStartType(ev.Type):
-		out.Start = ev.OccurredAt
+		// The EARLIEST assertion wins, not the last one folded. A ref can carry more
+		// than one start-type event — a retried pipeline, two producers describing one
+		// deployment — and last-folded-wins would make a rebuild (id order) and a live
+		// append (arrival order) disagree whenever their timestamps differ. Minimum is
+		// commutative, so taking it keeps the two convergent.
+		if out.StartedAt == nil || ev.OccurredAt.Before(*out.StartedAt) {
+			at := ev.OccurredAt
+			out.StartedAt = &at
+		}
 		if out.End == nil {
 			out.Status = StatusInProgress
 		}
@@ -112,6 +148,4 @@ func Fold(cur *Change, ev Event) Change {
 			out.Status = StatusInProgress
 		}
 	}
-
-	return out
 }

@@ -179,9 +179,9 @@ func TestChangeStatusVocabularyIsEnforced(t *testing.T) {
 	for _, bad := range []string{"", "in-progress", "IN_PROGRESS", "pending"} {
 		t.Run("status="+bad, func(t *testing.T) {
 			_, err := s.Pool().Exec(ctx, `
-				INSERT INTO change (tenant, ref, subject, type, title, actor, start_at,
-				                    end_at, status, attributes, last_event_id)
-				VALUES ($1,$2,'acme/prod','deployment.annotated','','ci-bot',$3,NULL,
+				INSERT INTO change (tenant, ref, subject, type, title, actor, started_at,
+				                    first_seen_at, end_at, status, attributes, last_event_id)
+				VALUES ($1,$2,'acme/prod','deployment.annotated','','ci-bot',NULL,$3,NULL,
 				        $4,'{}'::jsonb,'seed')`,
 				tn, eventID(t, "bad-status"), at, bad)
 			require.Error(t, err, "a status outside internal/core's vocabulary must be rejected")
@@ -191,9 +191,9 @@ func TestChangeStatusVocabularyIsEnforced(t *testing.T) {
 
 	var valid int
 	require.NoError(t, s.Pool().QueryRow(ctx, `
-		INSERT INTO change (tenant, ref, subject, type, title, actor, start_at,
-		                    end_at, status, attributes, last_event_id)
-		VALUES ($1,$2,'acme/prod','deployment.annotated','','ci-bot',$3,NULL,
+		INSERT INTO change (tenant, ref, subject, type, title, actor, started_at,
+		                    first_seen_at, end_at, status, attributes, last_event_id)
+		VALUES ($1,$2,'acme/prod','deployment.annotated','','ci-bot',NULL,$3,NULL,
 		        'in_progress','{}'::jsonb,'seed')
 		RETURNING 1`, tn, eventID(t, "good-status"), at).Scan(&valid),
 		"the constraint must still admit every status internal/core can produce")
@@ -253,4 +253,54 @@ func TestListEventsFindsAPointChangesEvents(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, correlated, 1, "a correlated ref must still list only its own events")
 	assert.Equal(t, "dep-9", correlated[0].CorrelationRef)
+}
+
+// TestStartAtIsGeneratedFromTheTwoStartFacts is TestEndEffectiveIsGeneratedFromEndAt's
+// counterpart for migration 0003. start_at is no longer written by Go: Postgres derives
+// it from COALESCE(started_at, first_seen_at), so the precedence of the assertion over
+// the inference is structural rather than a branch a later edit can get wrong. This
+// asserts the derivation against a ref whose only events are non-start (started_at stays
+// NULL, so start_at must follow first_seen_at) and then against the same ref once a start
+// event asserts a LATER time — under a single start column that assertion would have been
+// min'd away or would have destroyed the earlier evidence.
+func TestStartAtIsGeneratedFromTheTwoStartFacts(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	type row struct {
+		startAt     time.Time
+		startedAt   *time.Time
+		firstSeenAt time.Time
+	}
+	read := func(ref string) row {
+		var r row
+		require.NoError(t, s.Pool().QueryRow(ctx,
+			`SELECT start_at, started_at, first_seen_at FROM change
+			 WHERE tenant = $1 AND ref = $2`, tn, ref).Scan(&r.startAt, &r.startedAt, &r.firstSeenAt))
+		return r
+	}
+
+	_, _, err := s.AppendEvent(ctx,
+		mkEvent(tn, eventID(t, "annotated"), "k1", "gen-start", "deployment.annotated", at))
+	require.NoError(t, err)
+
+	inferred := read("gen-start")
+	assert.Nil(t, inferred.startedAt, "no producer has asserted a start yet")
+	assert.True(t, inferred.firstSeenAt.Equal(at))
+	assert.True(t, inferred.startAt.Equal(at),
+		"with no assertion, start_at must fall through to the inference")
+
+	asserted := at.Add(20 * time.Minute)
+	_, _, err = s.AppendEvent(ctx,
+		mkEvent(tn, eventID(t, "started"), "k2", "gen-start", "deployment.started", asserted))
+	require.NoError(t, err)
+
+	got := read("gen-start")
+	require.NotNil(t, got.startedAt)
+	assert.True(t, got.startedAt.Equal(asserted))
+	assert.True(t, got.firstSeenAt.Equal(at),
+		"the earlier evidence must survive the assertion rather than be overwritten")
+	assert.True(t, got.startAt.Equal(asserted),
+		"once asserted, start_at must follow the assertion even though it is later than "+
+			"the earliest event seen")
 }

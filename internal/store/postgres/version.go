@@ -13,7 +13,7 @@ import (
 // constant must be raised in the same change that adds a migration. It is deliberately
 // not read from the SQL: a daemon has to be able to refuse a schema newer than the one
 // its binary was built against.
-const ExpectedSchemaVersion = 2
+const ExpectedSchemaVersion = 3
 
 // SchemaVersion reads the version recorded by the migration.
 func (s *Store) SchemaVersion(ctx context.Context) (int, error) {

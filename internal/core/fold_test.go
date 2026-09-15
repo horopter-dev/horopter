@@ -88,7 +88,7 @@ func TestFoldTitleFallsBackToType(t *testing.T) {
 // implementation that shares (rather than clones) cur's attribute map is
 // caught by comparing a pre-fold clone against base.Attributes afterwards.
 // x and y are compared as whole structs, not field-by-field, so a divergence
-// in any of Change's eleven fields fails the test.
+// in any of Change's fields fails the test.
 func TestFoldIsPure(t *testing.T) {
 	a := ev("01A", "dep-7", "deployment.started", t10)
 	a.Attributes = map[string]any{"service.version": "2.4.0"}
@@ -276,4 +276,109 @@ func TestFoldStartFallsBackToTheEarliestOccurredAt(t *testing.T) {
 	// A real start still wins outright, even when it is later than the fallback.
 	c = core.Fold(&c, ev("01C", "dep-7", "deployment.started", t30))
 	assert.Equal(t, t30, c.Start, "the real start must overwrite the fallback, not be min'd with it")
+}
+
+// F9: the case decisions/2026-09-15-change-start-time-provenance.md was written to fix.
+// A stray annotation carrying a timestamp EARLIER than the change's declared start used
+// to drag the recorded start backwards behind the event that authoritatively declared it
+// — silently, and only in one of the two arrival orders. The assertion must win, and the
+// earlier evidence must still be recorded rather than destroyed.
+func TestFoldAnAssertedStartSurvivesALaterEventCarryingAnEarlierTime(t *testing.T) {
+	c := core.Fold(nil, ev("01A", "dep-7", "deployment.started", t20))
+	require.NotNil(t, c.StartedAt)
+	require.Equal(t, t20, *c.StartedAt, "precondition: the start event asserts t20")
+
+	c = core.Fold(&c, ev("01B", "dep-7", "deployment.annotated", t10))
+
+	assert.Equal(t, t20, c.Start,
+		"an annotation cannot move a declared start backwards; the assertion wins")
+	require.NotNil(t, c.StartedAt)
+	assert.Equal(t, t20, *c.StartedAt)
+	assert.Equal(t, t10, c.FirstSeenAt,
+		"the earlier evidence must still be recorded — first_seen_at < started_at is the "+
+			"anomaly worth auditing, and a single start field destroyed it")
+}
+
+// F10: a ref carrying more than one start-type event takes the EARLIEST assertion. The
+// decision document reasons from the assertion being idempotent, which holds for one
+// .started and fails for two with different timestamps: last-folded-wins would make a
+// rebuild (id order) and a live append (arrival order) disagree. Minimum is commutative,
+// so taking it is what keeps the document's stated property true.
+func TestFoldEarliestStartAssertionWins(t *testing.T) {
+	later := core.Fold(nil, ev("01A", "dep-7", "deployment.started", t30))
+	later = core.Fold(&later, ev("01B", "dep-7", "deployment.started", t10))
+
+	earlier := core.Fold(nil, ev("01B", "dep-7", "deployment.started", t10))
+	earlier = core.Fold(&earlier, ev("01A", "dep-7", "deployment.started", t30))
+
+	require.NotNil(t, later.StartedAt)
+	require.NotNil(t, earlier.StartedAt)
+	assert.Equal(t, t10, *later.StartedAt, "the later-arriving earlier assertion must win")
+	assert.Equal(t, t10, *earlier.StartedAt)
+	assert.Equal(t, later.Start, earlier.Start,
+		"two start-type events must fold to the same Start in either order")
+}
+
+// permutations returns every ordering of events, by recursive swap.
+func permutations(events []core.Event) [][]core.Event {
+	if len(events) <= 1 {
+		return [][]core.Event{append([]core.Event(nil), events...)}
+	}
+	var out [][]core.Event
+	for i := range events {
+		rest := make([]core.Event, 0, len(events)-1)
+		rest = append(rest, events[:i]...)
+		rest = append(rest, events[i+1:]...)
+		for _, tail := range permutations(rest) {
+			out = append(out, append([]core.Event{events[i]}, tail...))
+		}
+	}
+	return out
+}
+
+// F11: folding the same set of events in ANY order must produce the same StartedAt,
+// FirstSeenAt and Start. This is the property that makes RebuildProjection meaningful —
+// a rebuild replays in id order while a live append folds in arrival order, and the two
+// must converge — and it is the property the decision document claims. Both facts are
+// minima, which is what makes it hold; a rule that let the last-folded start win would
+// fail here on the two .started events alone.
+//
+// Only the three start fields are asserted. Title, Type, Actor, Subject, Status, End,
+// Attributes and LastEventID are genuinely last-folded-wins and are expected to differ
+// between orderings; asserting the whole struct would fail for reasons this test is not
+// about.
+func TestFoldStartFactsAreInsensitiveToFoldOrder(t *testing.T) {
+	t40 := time.Date(2026, 9, 14, 10, 40, 0, 0, time.UTC)
+	events := []core.Event{
+		ev("01A", "dep-7", "deployment.started", t20),
+		ev("01B", "dep-7", "deployment.annotated", t10),
+		ev("01C", "dep-7", "deployment.started", t30),
+		ev("01D", "dep-7", "deployment.completed", t40),
+	}
+
+	orders := permutations(events)
+	require.Len(t, orders, 24, "all 4! orderings must be exercised")
+
+	for _, order := range orders {
+		ids := make([]string, 0, len(order))
+		for _, e := range order {
+			ids = append(ids, e.ID)
+		}
+		var c core.Change
+		for i, e := range order {
+			if i == 0 {
+				c = core.Fold(nil, e)
+				continue
+			}
+			c = core.Fold(&c, e)
+		}
+		require.NotNil(t, c.StartedAt, "order %v: an asserted start must survive", ids)
+		assert.Equal(t, t20, *c.StartedAt,
+			"order %v: the earliest of the two assertions must win in every order", ids)
+		assert.Equal(t, t10, c.FirstSeenAt,
+			"order %v: the earliest occurred_at seen must win in every order", ids)
+		assert.Equal(t, t20, c.Start,
+			"order %v: Start is COALESCE(StartedAt, FirstSeenAt) and must not depend on "+
+				"fold order — a rebuild replays in id order, a live append in arrival order", ids)
+	}
 }
