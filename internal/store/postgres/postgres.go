@@ -32,6 +32,35 @@ const migrationLockKey int64 = 8145209847321
 // module and this store needs exactly one of them.
 const uniqueViolation = "23505"
 
+// lockNotAvailable is the SQLSTATE Postgres raises when lock_timeout expires while a
+// statement waits for a lock. It is matched so an operator reading a 503's server-side log
+// line can tell "a rebuild is running" from "the database is down".
+const lockNotAvailable = "55P03"
+
+// AppendLockTimeout bounds how long an append waits for the projection locks.
+//
+// RebuildProjection holds a tenant's lock exclusively for its whole duration, so without a
+// bound every append for that tenant queues behind it, each one pinning a connection from
+// a pool shared across tenants: a long rebuild stalls ingress for tenants that have
+// nothing to do with it. Failing fast instead turns that into a 503 the producer retries
+// once the rebuild finishes — the event is delayed rather than lost, which is strictly the
+// better failure.
+//
+// Three seconds is two orders of magnitude above ordinary same-ref contention (two appends
+// to one ref is a few milliseconds of read-modify-write), so it can only fire when
+// something rebuild-scale holds the lock. It is also well inside a normal HTTP client
+// timeout, so the producer receives a status it can act on rather than a client-side
+// timeout carrying none.
+const AppendLockTimeout = 3 * time.Second
+
+// RebuildLockTimeout bounds how long a rebuild waits for the tenant lock.
+//
+// It is longer than AppendLockTimeout because what a rebuild waits for is in-flight
+// appends finishing — milliseconds each — so reaching this bound means the tenant is under
+// sustained write load rather than that anything is wrong. Giving up then, with a message
+// telling the operator to retry, beats queueing indefinitely behind a stream of appends.
+const RebuildLockTimeout = 10 * time.Second
+
 // idemConstraint is the unique index enforcing one event per (tenant, idempotency_key).
 // A 23505 is matched against this name rather than against the error text, so a
 // different unique violation — a duplicate event id, say — is still reported as the
@@ -362,6 +391,33 @@ func isUniqueViolation(err error, constraint string) bool {
 		pgErr.Code == uniqueViolation && pgErr.ConstraintName == constraint
 }
 
+// isLockTimeout reports whether err is Postgres giving up on a lock wait because
+// lock_timeout expired.
+func isLockTimeout(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == lockNotAvailable
+}
+
+// setLockTimeout bounds how long any later statement in tx may wait for a lock.
+//
+// set_config(name, value, is_local => true) IS "SET LOCAL": it applies to this transaction
+// and reverts when the transaction commits or rolls back — the same property that made
+// pg_advisory_xact_lock the right choice over pg_advisory_lock, and the reason no code
+// path has to remember to unset it. SET itself accepts no bind parameter, so set_config is
+// how the Go constant stays the single source of truth for the value. lock_timeout reads a
+// bare number as milliseconds.
+//
+// The bound covers everything the transaction does after this call, not just the advisory
+// locks that follow it: the row-level FOR UPDATE and the change upsert are waits on
+// another transaction too, and pinning a connection on either is the same hazard.
+func setLockTimeout(ctx context.Context, tx pgx.Tx, d time.Duration, what string) error {
+	if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true)`,
+		strconv.FormatInt(d.Milliseconds(), 10)); err != nil {
+		return fmt.Errorf("bound the %s lock wait at %s: %w", what, d, err)
+	}
+	return nil
+}
+
 // recoverConcurrentDuplicate returns the stored event after this caller lost a race for
 // an idempotency key, which is the same result the non-concurrent duplicate path gives.
 //
@@ -483,11 +539,26 @@ func applyToProjection(ctx context.Context, tx pgx.Tx, ev core.Event) error {
 //
 // hashtext is 32-bit, so two unrelated refs can collide and briefly serialise against
 // each other. That costs throughput, never correctness.
+//
+// The wait is bounded first, by AppendLockTimeout: a rebuild holds the tenant lock
+// exclusively for its whole duration, and an unbounded wait behind it pins a pool
+// connection that other tenants need. See AppendLockTimeout for the reasoning.
 func lockProjectionWrite(ctx context.Context, tx pgx.Tx, tenantID, ref string) error {
+	if err := setLockTimeout(ctx, tx, AppendLockTimeout, "append"); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `
 		SELECT pg_advisory_xact_lock_shared(hashtext($1)),
 		       pg_advisory_xact_lock(hashtext($1 || '/' || $2))`,
 		tenantID, ref); err != nil {
+		if isLockTimeout(err) {
+			return fmt.Errorf(
+				"gave up after %s waiting for the projection lock on %q/%q: %w; a "+
+					"projection rebuild for this tenant holds it for the whole of its "+
+					"run, which is the only thing that waits this long — nothing was "+
+					"written, so retry the append once the rebuild finishes",
+				AppendLockTimeout, tenantID, ref, err)
+		}
 		return fmt.Errorf(
 			"take projection lock for %q/%q: %w; nothing was written, so the append "+
 				"can be retried", tenantID, ref, err)
@@ -498,9 +569,23 @@ func lockProjectionWrite(ctx context.Context, tx pgx.Tx, tenantID, ref string) e
 // lockRebuildWrite takes the tenant-scoped advisory lock exclusively, excluding every
 // append for that tenant — see lockProjectionWrite for why the granularity is the tenant
 // and not the ref.
+//
+// The wait is bounded by RebuildLockTimeout so a rebuild that cannot get the lock promptly
+// gives up and says so, rather than queueing behind a stream of appends while holding a
+// connection of its own.
 func lockRebuildWrite(ctx context.Context, tx pgx.Tx, tenantID string) error {
+	if err := setLockTimeout(ctx, tx, RebuildLockTimeout, "rebuild"); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx,
 		`SELECT pg_advisory_xact_lock(hashtext($1))`, tenantID); err != nil {
+		if isLockTimeout(err) {
+			return fmt.Errorf(
+				"gave up after %s waiting for the rebuild lock on tenant %q: %w; appends "+
+					"for this tenant are holding it, so nothing was written — retry when "+
+					"the tenant's write traffic is quieter",
+				RebuildLockTimeout, tenantID, err)
+		}
 		return fmt.Errorf(
 			"take rebuild lock for tenant %q: %w; nothing was written, so the rebuild "+
 				"can be retried", tenantID, err)
@@ -702,14 +787,19 @@ func (s *Store) QueryChanges(ctx context.Context, q ChangeQuery) ([]core.Change,
 // production holds. Live appends fold in ARRIVAL order, and core.NewULID draws entropy
 // from crypto/rand rather than ulid.MonotonicEntropy, so two ids minted in the same
 // millisecond do not sort by generation order. Two same-ref events inside one
-// millisecond can therefore rebuild to a different Title, Type, Actor, attribute set or
-// LastEventID than the one live folding produced. Every event is still folded in, and
-// the rebuild is still deterministic — replaying the same log again gives the same
-// answer — but "reproduces the projection exactly" is only true up to that ordering.
+// millisecond can therefore rebuild to a different Subject, Type, Title, Actor,
+// attribute set, LastEventID, End or Status than the one live folding produced — every
+// field whose rule is "the last event folded wins". Start, StartedAt and FirstSeenAt are
+// NOT in that set: both start facts are minima (migration 0003, core.Fold), so they are
+// commutative and the two orders agree on them. Every event is still folded in, and the
+// rebuild is still deterministic — replaying the same log again gives the same answer —
+// but "reproduces the projection exactly" is only true up to that ordering.
 //
-// Note the accumulator passes a nil *Change for the first event of each ref, matching
-// how AppendEvent applies events incrementally; Fold is written so both spellings
-// converge.
+// Operational exposure, which v0.1 does not remove: the exclusive lock blocks every
+// append for this tenant for the rebuild's whole duration. Blocked appends fail after
+// AppendLockTimeout with a retryable error rather than pinning pool connections, so the
+// bound on an event's delay is the producer's own retry patience. There is no batching,
+// no progress reporting and no online rebuild.
 func (s *Store) RebuildProjection(ctx context.Context, tenantID string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -727,25 +817,48 @@ func (s *Store) RebuildProjection(ctx context.Context, tenantID string) error {
 		afterDeleteHook()
 	}
 
+	acc, err := foldEventLog(ctx, tx, tenantID)
+	if err != nil {
+		return err
+	}
+	if err := writeProjection(ctx, tx, acc); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit rebuild for tenant %q: %w", tenantID, err)
+	}
+	return nil
+}
+
+// foldEventLog replays a tenant's event log in ULID order and returns the projection it
+// implies, keyed by ref.
+//
+// Folding inside the scan loop, rather than materialising the whole log into a slice
+// first, keeps peak memory proportional to the number of distinct refs rather than the
+// total number of events replayed.
+//
+// The accumulator passes a nil *core.Change for the first event of each ref, matching how
+// AppendEvent applies events incrementally; core.Fold is written so both spellings
+// converge.
+func foldEventLog(
+	ctx context.Context, tx pgx.Tx, tenantID string,
+) (map[string]core.Change, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT id, tenant, schema_version, source, type, subject, actor, title,
 		       occurred_at, received_at, correlation_ref, attributes
 		FROM event WHERE tenant = $1 ORDER BY id ASC`, tenantID)
 	if err != nil {
-		return fmt.Errorf("read event log for tenant %q: %w", tenantID, err)
+		return nil, fmt.Errorf("read event log for tenant %q: %w", tenantID, err)
 	}
 	defer rows.Close()
 
-	// Folding directly inside the scan loop, rather than materialising the whole event
-	// log into a slice first, keeps peak memory proportional to the number of distinct
-	// refs rather than the total number of events replayed.
 	acc := map[string]core.Change{}
 	for rows.Next() {
 		var ev core.Event
 		if err := rows.Scan(&ev.ID, &ev.Tenant, &ev.SchemaVersion, &ev.Source, &ev.Type,
 			&ev.Subject, &ev.Actor, &ev.Title, &ev.OccurredAt, &ev.ReceivedAt,
 			&ev.CorrelationRef, &ev.Attributes); err != nil {
-			return fmt.Errorf("scan event row for tenant %q: %w", tenantID, err)
+			return nil, fmt.Errorf("scan event row for tenant %q: %w", tenantID, err)
 		}
 		ref := core.RefFor(ev)
 		var prev *core.Change
@@ -755,17 +868,17 @@ func (s *Store) RebuildProjection(ctx context.Context, tenantID string) error {
 		acc[ref] = core.Fold(prev, ev)
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate event log for tenant %q: %w", tenantID, err)
+		return nil, fmt.Errorf("iterate event log for tenant %q: %w", tenantID, err)
 	}
-	rows.Close()
+	return acc, nil
+}
 
+// writeProjection inserts every rebuilt change.
+func writeProjection(ctx context.Context, tx pgx.Tx, acc map[string]core.Change) error {
 	for _, c := range acc {
 		if err := upsertChange(ctx, tx, c); err != nil {
 			return err
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit rebuild for tenant %q: %w", tenantID, err)
 	}
 	return nil
 }

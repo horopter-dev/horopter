@@ -2,12 +2,14 @@ package postgres_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/yo61/horopter/internal/core"
 	"github.com/yo61/horopter/internal/store/postgres"
 )
 
@@ -145,4 +147,56 @@ func TestRebuildDoesNotLoseConcurrentAppends(t *testing.T) {
 		"the rebuilt row's contents must survive the concurrent append; losing them means "+
 			"the append folded from nil over the rebuild")
 	assert.Contains(t, attrs, "attr.concurrent", "the concurrent append must survive too")
+}
+
+// TestAppendFailsFastWhileARebuildHoldsTheTenantLock covers the operational hazard the
+// lock bound exists for. RebuildProjection holds a tenant's advisory lock exclusively for
+// its whole run; without a bound every append for that tenant waits indefinitely, each one
+// pinning a connection from a pool shared across tenants, so a long rebuild stalls ingress
+// for tenants that have nothing to do with it.
+//
+// The error must NOT be a core.ErrInvalidEvent, which is what routes it to 503 rather than
+// 400 in ingress, and is the entire point: the producer retries, the retry lands after the
+// rebuild, and the event is delayed rather than lost.
+//
+// afterDeleteHook holds the rebuild open past AppendLockTimeout, which is what makes the
+// timeout fire rather than the append merely being slow. Like the other hooks it must be a
+// sleep, not a rendezvous: the appender cannot reach any rendezvous while the lock is held.
+func TestAppendFailsFastWhileARebuildHoldsTheTenantLock(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	_, _, err := s.AppendEvent(ctx,
+		mkEvent(tn, eventID(t, "seed"), "k0", "dep-7", "deployment.started", at))
+	require.NoError(t, err)
+
+	released := make(chan struct{})
+	var once sync.Once
+	postgres.SetAfterDeleteHook(func() {
+		once.Do(func() { close(released) })
+		time.Sleep(postgres.AppendLockTimeout + 500*time.Millisecond)
+	})
+	t.Cleanup(func() { postgres.SetAfterDeleteHook(nil) })
+
+	appended := make(chan error, 1)
+	go func() {
+		<-released
+		_, _, err := s.AppendEvent(ctx, mkEvent(tn, eventID(t, "blocked"), "k1", "dep-7",
+			"deployment.annotated", at.Add(time.Minute)))
+		appended <- err
+	}()
+
+	require.NoError(t, s.RebuildProjection(ctx, tn))
+
+	err = <-appended
+	require.Error(t, err,
+		"an append blocked by a rebuild must give up rather than hold a pool connection "+
+			"for the rebuild's whole duration")
+	assert.False(t, errors.Is(err, core.ErrInvalidEvent),
+		"a lock timeout is transient, not the caller's fault; wrapping ErrInvalidEvent "+
+			"would make ingress answer 400 and the producer discard the event")
+	assert.Contains(t, err.Error(), "rebuild",
+		"the message must let an operator tell a running rebuild from a dead database")
+	assert.Contains(t, err.Error(), "nothing was written",
+		"the message must say the append is safe to retry")
 }
