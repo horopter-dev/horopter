@@ -20,15 +20,20 @@ func TestSchemaVersionIsRecordedByMigration(t *testing.T) {
 	assert.NoError(t, s.AssertSchemaVersion(ctx))
 }
 
+// TestAssertSchemaVersionFailsLoudlyOnMismatch runs against isolatedSchemaDSN, not the
+// shared public schema newStore opens: it corrupts the GLOBAL schema_version singleton
+// to prove AssertSchemaVersion refuses to run against it, and a killed or panicking run
+// would leave that corruption behind for real — t.Cleanup only restores it on a normal
+// exit. An isolated schema is dropped, corrupted row and all, whether the test finishes
+// cleanly or not, so there is nothing left for an interrupted run to brick.
 func TestAssertSchemaVersionFailsLoudlyOnMismatch(t *testing.T) {
-	ctx, s := context.Background(), newStore(t)
-
-	_, err := s.Pool().Exec(ctx, `UPDATE schema_version SET version = $1`, 99)
+	ctx := context.Background()
+	s, err := postgres.Open(ctx, isolatedSchemaDSN(t, dsn(t)))
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		_, _ = s.Pool().Exec(ctx, `UPDATE schema_version SET version = $1`,
-			postgres.ExpectedSchemaVersion)
-	})
+	t.Cleanup(s.Close)
+
+	_, err = s.Pool().Exec(ctx, `UPDATE schema_version SET version = $1`, 99)
+	require.NoError(t, err)
 
 	err = s.AssertSchemaVersion(ctx)
 	require.Error(t, err, "a daemon must refuse to run against an unexpected schema")
