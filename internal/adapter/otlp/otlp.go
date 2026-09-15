@@ -57,10 +57,16 @@ type ScopeSpans struct {
 //
 // There is no Kind field: none of OTel's span kinds (SERVER, CLIENT, PRODUCER,
 // CONSUMER) describe a boundary an infrastructure change crosses, and INTERNAL
-// asserts a call-graph relationship this data doesn't have either. Leaving
-// kind at its zero value — which OTLP already defines as "assume INTERNAL" —
-// is more honest than picking one of the other four to make the field look
-// populated.
+// asserts a call-graph relationship this data doesn't have either. trace.proto
+// says of the zero value, SPAN_KIND_UNSPECIFIED: "Do NOT use as default" —
+// omitting the field disregards that instruction, it does not comply with it,
+// and implementations are only ever told they MAY (not must) treat an
+// unspecified kind as INTERNAL on receipt. This is a deliberate trade-off
+// between two imperfect options, not spec compliance: an omitted field a
+// receiver MAY reinterpret however it likes, versus a populated
+// SPAN_KIND_INTERNAL that flatly overclaims a call-graph relationship. Emitting
+// "kind": 1 is one line away, in Render, if that trade-off is judged the wrong
+// way round.
 type Span struct {
 	TraceID           string     `json:"traceId"`
 	SpanID            string     `json:"spanId"`
@@ -95,14 +101,21 @@ type KeyValue struct {
 	Value AnyValue `json:"value"`
 }
 
-// AnyValue is OTLP's typed attribute-value union: exactly one field is set,
-// mirroring the protobuf oneof it encodes. IntValue is a decimal string for
-// the same 64-bit reason as the span's timestamp fields. A Go value with no
-// clean member of this union — anything that is not a string, bool, int,
-// float64, []any or map[string]any — falls back to its fmt "%v" string form
-// in StringValue: lossy, but predictable and never a render failure. A Go
-// nil maps to a wholly empty AnyValue, which OTel defines as the union's own
-// "no value" case, rather than to the misleading string "<nil>".
+// AnyValue is OTLP's typed attribute-value union: at most one field is set,
+// mirroring the protobuf oneof it encodes — zero fields set is the documented
+// nil case below, not a bug. IntValue is a decimal string for the same 64-bit
+// reason as the span's timestamp fields; real traffic never reaches it,
+// though, because attributes arrive from Postgres jsonb via encoding/json,
+// which decodes every JSON number as float64, so a numeric attribute is
+// always emitted as doubleValue in production. The int case below exists for
+// a non-database caller (or a test) that hands this package a Go int
+// directly — worth keeping, but not evidence that intValue is on the live
+// path. A Go value with no clean member of this union — anything that is not
+// a string, bool, int, float64, []any or map[string]any — falls back to its
+// fmt "%v" string form in StringValue: lossy, but predictable and never a
+// render failure. A Go nil maps to a wholly empty AnyValue, which OTel
+// defines as the union's own "no value" case, rather than to the misleading
+// string "<nil>".
 type AnyValue struct {
 	StringValue *string       `json:"stringValue,omitempty"`
 	BoolValue   *bool         `json:"boolValue,omitempty"`
@@ -205,6 +218,11 @@ func attributesFor(m map[string]any) []KeyValue {
 
 // anyValueFor maps a Go attribute value onto OTLP's AnyValue union. See
 // AnyValue's doc comment for the fallback and nil rules.
+//
+// This switch sits at exactly 8, this project's cyclomatic-complexity ceiling
+// (confirmed with gocyclo). Adding another AnyValue member — another case —
+// pushes it over, so restructure first (e.g. split the numeric or the
+// recursive cases into a helper) rather than bolting one more branch on.
 func anyValueFor(v any) AnyValue {
 	switch t := v.(type) {
 	case nil:
