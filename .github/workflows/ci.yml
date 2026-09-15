@@ -54,7 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
+          if [[ -n "$unformatted" ]]; then
             echo "gofmt needed on:"
             echo "$unformatted"
             exit 1
@@ -68,6 +68,8 @@ jobs:
       - name: Apply database migrations
         run: |
           set -euo pipefail
+          # DATABASE_URL comes from the job's env: block above, not this script.
+          # shellcheck disable=SC2154
           go run ./cmd/horopter-migrate -dsn "$DATABASE_URL"
 
       - name: Test
