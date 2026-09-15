@@ -99,3 +99,40 @@ func TestDaemonsNeverMigrateOnStartup(t *testing.T) {
 		})
 	}
 }
+
+// TestMigrateDoesNotDowngradeARecordedSchemaVersion covers running an OLD
+// horopter-migrate against a NEWER database, which happens on any rollback or skewed
+// rollout. The recorded version used to come from the highest migration the BINARY
+// embeds, so the old binary rewrote schema_version downward while applied_migration still
+// listed every file actually applied — the recorded version then contradicted the
+// database's real structure and nothing raised a word.
+//
+// A ledger row the binary does not embed is what simulates the newer database: this
+// binary's embedded set stops well below 9999, so an embedded-list derivation records its
+// own lower number and a ledger derivation records 9999.
+//
+// It runs against an isolated schema, not the shared public one: it writes a bogus ledger
+// row and a version no daemon would accept, and leaving either behind in public would make
+// every later run of the suite fail.
+func TestMigrateDoesNotDowngradeARecordedSchemaVersion(t *testing.T) {
+	ctx := context.Background()
+	s, err := postgres.Open(ctx, isolatedSchemaDSN(t, dsn(t)))
+	require.NoError(t, err)
+	t.Cleanup(s.Close)
+
+	_, err = s.Pool().Exec(ctx,
+		`INSERT INTO applied_migration (filename) VALUES ('9999_applied_by_a_newer_binary.sql')`)
+	require.NoError(t, err)
+	_, err = s.Pool().Exec(ctx, `UPDATE schema_version SET version = 9999`)
+	require.NoError(t, err)
+
+	require.NoError(t, postgres.Migrate(ctx, s.Pool()),
+		"migrating a database ahead of this binary must not fail; it must record the truth")
+
+	v, err := s.SchemaVersion(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 9999, v,
+		"the recorded version must come from the ledger the database actually holds, not "+
+			"from the migrations this binary embeds; recording the lower embedded number "+
+			"leaves schema_version contradicting the applied_migration rows beside it")
+}

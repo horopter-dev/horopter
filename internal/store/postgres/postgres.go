@@ -134,7 +134,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	if err := applyPendingMigrations(ctx, tx, names); err != nil {
 		return err
 	}
-	if err := recordSchemaVersion(ctx, tx, names[len(names)-1]); err != nil {
+	if err := recordSchemaVersion(ctx, tx); err != nil {
 		return err
 	}
 
@@ -211,15 +211,36 @@ func applyPendingMigrations(ctx context.Context, tx pgx.Tx, names []string) erro
 	return nil
 }
 
-// recordSchemaVersion writes the version implied by the highest migration filename.
+// recordSchemaVersion writes the version implied by the highest migration filename the
+// LEDGER holds. It must run after applyPendingMigrations, inside the same transaction, so
+// it reads the ledger this run has just finished extending.
 //
-// Deriving it here is what stops it drifting: the version used to be a literal INSERT
-// inside 0001_init.sql, so adding a migration without editing that literal left the
-// database claiming a version the schema no longer matched, and nothing would have
-// noticed. ExpectedSchemaVersion stays a Go constant precisely so a daemon can assert
-// against this value and refuse to run on a schema it does not understand.
-func recordSchemaVersion(ctx context.Context, tx pgx.Tx, latest string) error {
-	v, err := schemaVersionFromFilename(latest)
+// The ledger is the authority, not the binary's embedded list. An older horopter-migrate
+// run against a newer database embeds fewer migrations, so recording its own highest
+// embedded file rewrote schema_version DOWNWARD while applied_migration still listed every
+// file actually applied — leaving the recorded version contradicting the database's real
+// structure, with nothing raised. Reading the ledger makes that binary record the true,
+// higher version instead, so its own ExpectedSchemaVersion check fails loudly and the
+// operator learns they are running the wrong binary.
+//
+// Deriving the number at all, rather than hardcoding it, is what stops a second kind of
+// drift: the version used to be a literal INSERT inside 0001_init.sql, so adding a
+// migration without editing that literal left the database claiming a version the schema
+// no longer matched. ExpectedSchemaVersion stays a Go constant precisely so a daemon can
+// assert against this value and refuse to run on a schema it does not understand.
+func recordSchemaVersion(ctx context.Context, tx pgx.Tx) error {
+	var latest *string
+	if err := tx.QueryRow(ctx,
+		`SELECT max(filename) FROM applied_migration`).Scan(&latest); err != nil {
+		return fmt.Errorf("read the highest applied migration from the ledger: %w", err)
+	}
+	if latest == nil {
+		return errors.New(
+			"the applied_migration ledger is empty after applying migrations, so no " +
+				"schema version can be derived; migrationNames rejects an empty embedded " +
+				"set, so this should be unreachable — report it rather than working around it")
+	}
+	v, err := schemaVersionFromFilename(*latest)
 	if err != nil {
 		return err
 	}
