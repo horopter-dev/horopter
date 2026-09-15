@@ -66,12 +66,3 @@ func (c Change) IsOpen() bool { return c.End == nil }
 func (c Change) IsPoint() bool {
 	return c.Status == StatusOccurred && c.End != nil && c.End.Equal(c.Start)
 }
-
-// EndEffective returns the end used for overlap comparisons, substituting
-// OpenSentinel for an open change.
-func (c Change) EndEffective() time.Time {
-	if c.End == nil {
-		return OpenSentinel
-	}
-	return *c.End
-}

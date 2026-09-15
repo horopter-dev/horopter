@@ -30,11 +30,3 @@ func TestChangeShapes(t *testing.T) {
 	assert.False(t, closed.IsOpen())
 	assert.False(t, closed.IsPoint())
 }
-
-func TestEndEffective(t *testing.T) {
-	start := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
-	end := start.Add(20 * time.Minute)
-
-	assert.Equal(t, end, core.Change{Start: start, End: &end}.EndEffective())
-	assert.Equal(t, core.OpenSentinel, core.Change{Start: start, End: nil}.EndEffective())
-}

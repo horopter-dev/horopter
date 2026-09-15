@@ -255,6 +255,43 @@ func TestListEventsFindsAPointChangesEvents(t *testing.T) {
 	assert.Equal(t, "dep-9", correlated[0].CorrelationRef)
 }
 
+// TestListEventsIdArmIgnoresCorrelatedEvents pins the correlation_ref = ” qualifier in
+// ListEvents' id arm. Without it the predicate is "correlation_ref = ref OR id = ref",
+// which also matches any event whose own id happens to equal the ref — and since a
+// correlated event's id is an arbitrary ULID while a ref is producer-supplied, a producer
+// using event ids as correlation refs makes exactly that collision. The two events below
+// belong to different changes and the audit log for one must not show the other's.
+//
+// The qualifier is load-bearing and nothing else covers it: loosening the predicate breaks
+// no other test in this package, so the id arm could quietly widen and the projection's
+// audit trail would start leaking between changes.
+func TestListEventsIdArmIgnoresCorrelatedEvents(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	// sharedRef is both a correlation ref (for memberID below) and another event's id.
+	// It must be unique to this run: event.id is a global primary key across every tenant
+	// and every past execution.
+	sharedRef := eventID(t, "shared-ref")
+	memberID := eventID(t, "member")
+
+	_, _, err := s.AppendEvent(ctx,
+		mkEvent(tn, memberID, "k1", sharedRef, "deployment.started", at))
+	require.NoError(t, err)
+	// This event's own id IS sharedRef, but it carries a correlation ref of its own, so
+	// it belongs to that other change and not to sharedRef's.
+	_, _, err = s.AppendEvent(ctx,
+		mkEvent(tn, sharedRef, "k2", eventID(t, "other-ref"), "deployment.started", at))
+	require.NoError(t, err)
+
+	got, _, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn, Ref: sharedRef})
+	require.NoError(t, err)
+	require.Len(t, got, 1,
+		"the id arm must only ever match the uncorrelated point that owns the ref; "+
+			"matching a correlated event whose id equals the ref leaks another change's log")
+	assert.Equal(t, memberID, got[0].ID)
+}
+
 // TestStartAtIsGeneratedFromTheTwoStartFacts is TestEndEffectiveIsGeneratedFromEndAt's
 // counterpart for migration 0003. start_at is no longer written by Go: Postgres derives
 // it from COALESCE(started_at, first_seen_at), so the precedence of the assertion over

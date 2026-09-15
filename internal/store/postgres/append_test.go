@@ -22,8 +22,8 @@ func newStore(t *testing.T) *postgres.Store {
 	require.NoError(t, err)
 	t.Cleanup(s.Close)
 	// Each test owns its own tenant, so tests are isolated without truncating shared
-	// tables. They must still run sequentially: afterLoadHook and afterIdemLookupHook
-	// are package-level vars that the concurrency tests install and clear.
+	// tables. They must still run sequentially: afterLoadHook, afterIdemLookupHook and
+	// afterDeleteHook are package-level vars that the concurrency tests install and clear.
 	return s
 }
 
@@ -228,14 +228,27 @@ func TestConcurrentAppendsToSameRefDoNotLoseUpdates(t *testing.T) {
 // A sleep would only make that likely. The rendezvous is safe here — unlike
 // afterLoadHook, which must be a sleep — because the lookup is a plain SELECT that
 // takes no lock, so neither participant holds anything the other is waiting for.
+//
+// hookCalls is what stops the test passing vacuously. Delete the hook's call site in the
+// store and the rendezvous never happens: the two goroutines usually serialise, the loser
+// finds the row at the ordinary lookup, and every assertion below still holds — while the
+// recovery path the test is named for was never entered. Exactly two calls is proof both
+// goroutines really did get past the check before either inserted.
 func TestConcurrentDuplicateIdempotencyKeyReturnsTheOriginal(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
 	key := "retry-" + uniqueToken()
 
-	var rendezvous sync.WaitGroup
+	var (
+		hookCalls  atomic.Int64
+		rendezvous sync.WaitGroup
+	)
 	rendezvous.Add(2)
-	postgres.SetAfterIdemLookupHook(func() { rendezvous.Done(); rendezvous.Wait() })
+	postgres.SetAfterIdemLookupHook(func() {
+		hookCalls.Add(1)
+		rendezvous.Done()
+		rendezvous.Wait()
+	})
 	t.Cleanup(func() { postgres.SetAfterIdemLookupHook(nil) })
 
 	type result struct {
@@ -278,4 +291,9 @@ func TestConcurrentDuplicateIdempotencyKeyReturnsTheOriginal(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, evs, 1, "a concurrent retry must not duplicate the event")
 	assert.True(t, returned[evs[0].ID], "the id both callers got must be the id that was stored")
+
+	assert.Equal(t, int64(2), hookCalls.Load(),
+		"both callers must have passed the idempotency check before either inserted; "+
+			"fewer calls means they serialised and the 23505 recovery path this test is "+
+			"named for was never exercised")
 }

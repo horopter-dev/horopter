@@ -34,12 +34,6 @@ func run() error {
 		return errors.New("DATABASE_URL is required, e.g. " +
 			"postgres://user:pass@host:5432/horopter")
 	}
-	token := os.Getenv("HOROPTER_INGRESS_TOKEN")
-	if token == "" {
-		return errors.New("HOROPTER_INGRESS_TOKEN is required; ingress accepts writes " +
-			"and must not run unauthenticated")
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -53,17 +47,41 @@ func run() error {
 		return err
 	}
 
-	srv := &http.Server{
-		Addr:              *addr,
-		Handler:           ingress.New(store, time.Now, rand.Reader, token).Routes(),
-		ReadHeaderTimeout: 10 * time.Second,
+	// ingress.New rejects an empty token, so HOROPTER_INGRESS_TOKEN is checked exactly
+	// once, in the constructor, rather than here as well: two guards on one fact drift.
+	api, err := ingress.New(store, time.Now, rand.Reader, os.Getenv("HOROPTER_INGRESS_TOKEN"))
+	if err != nil {
+		return err
 	}
 
+	return serve(ctx, &http.Server{
+		Addr:    *addr,
+		Handler: api.Routes(),
+		// ReadHeaderTimeout bounds a slowloris header dribble. ReadTimeout bounds the
+		// whole request including the body, so a client sending one byte a minute cannot
+		// hold a connection open indefinitely; 15s is far longer than a few-kilobyte
+		// event needs over any real network.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		// WriteTimeout bounds handler time plus the response write. An append is one
+		// short transaction, and the longest a handler can legitimately block is
+		// postgres.AppendLockTimeout waiting behind a rebuild, so this must comfortably
+		// exceed that or a retryable 503 would be replaced by a dropped connection.
+		WriteTimeout: 30 * time.Second,
+		// IdleTimeout bounds a kept-alive connection between requests, so idle clients
+		// cannot accumulate file descriptors.
+		IdleTimeout: 120 * time.Second,
+	})
+}
+
+// serve runs srv until ctx is cancelled or it fails, then drains in-flight requests
+// rather than cutting them mid-write on every rollout.
+func serve(ctx context.Context, srv *http.Server) error {
 	errCh := make(chan error, 1)
 	go func() {
-		slog.Info("horopter-ingress listening", "addr", *addr)
+		slog.Info("horopter-ingress listening", "addr", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- fmt.Errorf("serve on %s: %w", *addr, err)
+			errCh <- fmt.Errorf("serve on %s: %w", srv.Addr, err)
 		}
 	}()
 
@@ -74,7 +92,6 @@ func run() error {
 		slog.Info("shutting down")
 	}
 
-	// Drain in-flight requests rather than cutting them mid-write on every rollout.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)

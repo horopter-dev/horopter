@@ -73,7 +73,8 @@ func newServer(t *testing.T) (http.Handler, *postgres.Store) {
 	// status codes and response bodies), so the determinism bought nothing while
 	// guaranteeing a collision. crypto/rand.Reader is also what cmd/horopter-ingress
 	// uses in production, so the tests exercise the real entropy source.
-	srv := ingress.New(s, func() time.Time { return fixed }, rand.Reader, testToken)
+	srv, err := ingress.New(s, func() time.Time { return fixed }, rand.Reader, testToken)
+	require.NoError(t, err)
 	return srv.Routes(), s
 }
 
@@ -162,7 +163,8 @@ func TestCloudEventIngest(t *testing.T) {
 // zero coverage in that environment. If a future change reintroduces a
 // Pool().Ping call into healthz, this test panics on the nil store and fails.
 func TestHealthzWorksWithNilStore(t *testing.T) {
-	srv := ingress.New(nil, func() time.Time { return fixed }, rand.Reader, testToken)
+	srv, err := ingress.New(nil, func() time.Time { return fixed }, rand.Reader, testToken)
+	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, req)
@@ -286,4 +288,51 @@ func TestCloudEventsFromDifferentSourcesSharingAnIDAreDistinct(t *testing.T) {
 	evs, _, err := s.ListEvents(context.Background(), postgres.EventQuery{Tenant: tn})
 	require.NoError(t, err)
 	assert.Len(t, evs, 2, "both events must be in the log, not one")
+}
+
+// TestNewRejectsAnEmptyToken pins the guard where it is structural rather than remembered.
+// subtle.ConstantTimeCompare of two empty slices returns 1, so a Server built with an
+// empty token authenticates a request carrying no Authorization header at all — the write
+// side of a system of record, open to anyone who can reach the port. It used to be
+// prevented only by a check in cmd/horopter-ingress, which any other caller (a test, a
+// future embedding, a second binary) would bypass without noticing.
+//
+// It runs unconditionally: a constructor that refuses its argument needs no database.
+func TestNewRejectsAnEmptyToken(t *testing.T) {
+	srv, err := ingress.New(nil, func() time.Time { return fixed }, rand.Reader, "")
+	require.Error(t, err,
+		"an empty token makes every unauthenticated request authenticate successfully")
+	assert.Nil(t, srv, "a rejected configuration must not yield a usable server")
+	assert.Contains(t, err.Error(), "HOROPTER_INGRESS_TOKEN",
+		"the error must name the setting an operator has to fix")
+}
+
+// TestPostEventRejectsAnOversizedBody covers the body cap on both readers. Neither reader
+// had one: json.Decode and io.ReadAll both consume the whole body before anything is
+// validated, so a single request decided how much the process allocated. 413 rather than
+// 400 is the honest status — the body may be perfectly well formed and merely too large —
+// and reporting it as malformed JSON would send the caller hunting for a syntax error
+// that does not exist.
+func TestPostEventRejectsAnOversizedBody(t *testing.T) {
+	h, _ := newServer(t)
+	huge := fmt.Sprintf(`{"tenant":%q,"source":"ci","type":"deployment.started",
+		"subject":"acme/prod","occurred_at":"2026-09-14T10:00:00Z",
+		"attributes":{"blob":%q}}`, tenant(t), strings.Repeat("x", ingress.MaxBodyBytes+1))
+
+	for path, contentType := range map[string]string{
+		"/v1/events":             "application/json",
+		"/v1/events/cloudevents": "application/cloudevents+json",
+	} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(huge))
+			req.Header.Set("Content-Type", contentType)
+			req.Header.Set("Authorization", "Bearer "+testToken)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "exceeds",
+				"the caller must be told the body was too large, not that it was malformed")
+		})
+	}
 }

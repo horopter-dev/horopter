@@ -14,6 +14,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -28,6 +29,14 @@ import (
 // but every write is still tenant-scoped so enabling multi-tenancy is configuration.
 const DefaultTenant = "default"
 
+// MaxBodyBytes caps a request body. A fully populated event — every field set, a generous
+// attribute map — is a few kilobytes, and a CloudEvents envelope adds a little more, so
+// 1 MiB is three orders of magnitude of headroom for an unusually large attribute payload.
+// It is also nowhere near enough to be a memory lever: both body readers here consume the
+// whole body before anything is validated, so without a cap a single unauthenticated-
+// adjacent request decides how much the process allocates.
+const MaxBodyBytes = 1 << 20
+
 // Server is the ingress HTTP surface.
 type Server struct {
 	store   *postgres.Store
@@ -38,8 +47,24 @@ type Server struct {
 
 // New returns an ingress Server. clock and entropy are injected so handlers stay
 // deterministic under test.
-func New(s *postgres.Store, clock func() time.Time, entropy io.Reader, token string) *Server {
-	return &Server{store: s, clock: clock, entropy: entropy, token: token}
+//
+// An empty token is refused here rather than left to callers to check.
+// subtle.ConstantTimeCompare of two empty slices returns 1, so a Server built with ""
+// authenticates a request carrying no Authorization header at all — the write side of a
+// system of record, open to anyone who can reach the port. Enforcing it in the constructor
+// makes that structurally impossible instead of dependent on every caller remembering; it
+// returns an error rather than panicking because a panic is not this project's error
+// strategy.
+func New(
+	s *postgres.Store, clock func() time.Time, entropy io.Reader, token string,
+) (*Server, error) {
+	if token == "" {
+		return nil, errors.New(
+			"ingress token is required; set HOROPTER_INGRESS_TOKEN to a non-empty secret — " +
+				"an empty token authenticates every request, including ones sending no " +
+				"credentials at all")
+	}
+	return &Server{store: s, clock: clock, entropy: entropy, token: token}, nil
 }
 
 // Routes returns the handler for every ingress endpoint. Probes are unauthenticated;
@@ -96,9 +121,10 @@ type eventRequest struct {
 }
 
 func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, MaxBodyBytes)
 	var req eventRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "malformed JSON body: "+err.Error()+
+		writeBodyError(w, err, "malformed JSON body: "+err.Error()+
 			"; expected an object with source, type, subject and occurred_at")
 		return
 	}
@@ -165,6 +191,24 @@ func appendFailed(w http.ResponseWriter, r *http.Request, ev core.Event, err err
 	writeError(w, http.StatusServiceUnavailable,
 		"could not append the event; the store is temporarily unavailable — "+
 			"this request may be retried")
+}
+
+// writeBodyError answers a request body that could not be read.
+//
+// An over-sized body is 413, not 400: the body may be perfectly well formed and merely too
+// large, and http.MaxBytesReader surfaces the cap as a read error, so reporting it as
+// malformed JSON would send the caller hunting for a syntax error that is not there.
+// Anything else is the caller's own malformed input, reported with malformedMsg.
+func writeBodyError(w http.ResponseWriter, err error, malformedMsg string) {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf(
+			"request body exceeds the %d-byte limit; an event is a few kilobytes, so "+
+				"reference a large attribute payload instead of inlining it",
+			tooLarge.Limit))
+		return
+	}
+	writeError(w, http.StatusBadRequest, malformedMsg)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

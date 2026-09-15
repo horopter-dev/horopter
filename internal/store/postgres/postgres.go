@@ -343,19 +343,9 @@ func trimToLimit[T any](rows []T, limit int) ([]T, bool) {
 // after the first attempt finished — the lookup below finds it — or while it is still
 // in flight, which lands on the unique index instead; see recoverConcurrentDuplicate.
 func (s *Store) AppendEvent(ctx context.Context, ev core.Event) (core.Event, bool, error) {
-	if err := ev.Validate(); err != nil {
+	ev, err := prepareEvent(ev)
+	if err != nil {
 		return core.Event{}, false, err
-	}
-
-	// A nil Attributes map and an empty one are semantically identical — both mean "no
-	// attributes" — but the attributes column is JSONB NOT NULL, and Postgres's DEFAULT
-	// only fires when a column is omitted from the INSERT list, never when NULL is bound
-	// explicitly, so a nil map reaches the constraint and fails. The NOT NULL constraint
-	// lives here, so this is where the contract is owned: normalising once at the store
-	// boundary covers every caller (ingress, CloudEvents mapping, a future egress seed,
-	// any other producer) instead of repairing them one at a time at their call sites.
-	if ev.Attributes == nil {
-		ev.Attributes = map[string]any{}
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -364,19 +354,85 @@ func (s *Store) AppendEvent(ctx context.Context, ev core.Event) (core.Event, boo
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if ev.IdempotencyKey != "" {
-		existing, found, err := findByIdemKey(ctx, tx, ev.Tenant, ev.IdempotencyKey)
-		if err != nil {
-			return core.Event{}, false, err
-		}
-		if found {
-			return existing, false, tx.Commit(ctx)
-		}
-		if afterIdemLookupHook != nil {
-			afterIdemLookupHook()
-		}
+	existing, found, err := findExistingDuplicate(ctx, tx, ev)
+	if err != nil {
+		return core.Event{}, false, err
 	}
+	if found {
+		return existing, false, tx.Commit(ctx)
+	}
+	return s.writeEvent(ctx, tx, ev)
+}
 
+// prepareEvent validates the event and normalises the fields the schema constrains.
+//
+// A nil Attributes map and an empty one are semantically identical — both mean "no
+// attributes" — but the attributes column is JSONB NOT NULL, and Postgres's DEFAULT only
+// fires when a column is omitted from the INSERT list, never when NULL is bound
+// explicitly, so a nil map reaches the constraint and fails. The NOT NULL constraint lives
+// here, so this is where the contract is owned: normalising once at the store boundary
+// covers every caller (ingress, CloudEvents mapping, a future egress seed, any other
+// producer) instead of repairing them one at a time at their call sites.
+func prepareEvent(ev core.Event) (core.Event, error) {
+	if err := ev.Validate(); err != nil {
+		return core.Event{}, err
+	}
+	if ev.Attributes == nil {
+		ev.Attributes = map[string]any{}
+	}
+	return ev, nil
+}
+
+// findExistingDuplicate returns the event already stored under ev's idempotency key, if
+// ev carries one and a stored event holds it. An event with no key can never be a
+// duplicate, so it reports found=false without a round trip.
+func findExistingDuplicate(
+	ctx context.Context, tx pgx.Tx, ev core.Event,
+) (core.Event, bool, error) {
+	if ev.IdempotencyKey == "" {
+		return core.Event{}, false, nil
+	}
+	existing, found, err := findByIdemKey(ctx, tx, ev.Tenant, ev.IdempotencyKey)
+	if err != nil {
+		return core.Event{}, false, err
+	}
+	if found {
+		return existing, true, nil
+	}
+	if afterIdemLookupHook != nil {
+		afterIdemLookupHook()
+	}
+	return core.Event{}, false, nil
+}
+
+// writeEvent inserts the event, folds it into the projection and commits, all on tx.
+//
+// The 23505 arm is the concurrent-retry path: the check in findExistingDuplicate and this
+// insert are not atomic, so two in-flight requests carrying one idempotency key both find
+// nothing and both insert. The loser lands on the unique index and must be given the
+// stored event rather than the constraint violation; see recoverConcurrentDuplicate.
+func (s *Store) writeEvent(
+	ctx context.Context, tx pgx.Tx, ev core.Event,
+) (core.Event, bool, error) {
+	if err := insertEvent(ctx, tx, ev); err != nil {
+		if isUniqueViolation(err, idemConstraint) {
+			return s.recoverConcurrentDuplicate(ctx, tx, ev)
+		}
+		return core.Event{}, false, err
+	}
+	if err := applyToProjection(ctx, tx, ev); err != nil {
+		return core.Event{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return core.Event{}, false, fmt.Errorf("commit event %q: %w", ev.ID, err)
+	}
+	return ev, true, nil
+}
+
+// insertEvent writes the immutable event row. An empty idempotency key is bound as NULL:
+// uq_event_idem is partial on idempotency_key IS NOT NULL, so binding "" instead would
+// make every keyless event collide with every other one.
+func insertEvent(ctx context.Context, tx pgx.Tx, ev core.Event) error {
 	var idem *string
 	if ev.IdempotencyKey != "" {
 		idem = &ev.IdempotencyKey
@@ -390,19 +446,9 @@ func (s *Store) AppendEvent(ctx context.Context, ev core.Event) (core.Event, boo
 		ev.Subject, ev.Actor, ev.Title, ev.OccurredAt.UTC(), ev.ReceivedAt.UTC(),
 		ev.CorrelationRef, ev.Attributes,
 	); err != nil {
-		if isUniqueViolation(err, idemConstraint) {
-			return s.recoverConcurrentDuplicate(ctx, tx, ev)
-		}
-		return core.Event{}, false, fmt.Errorf("insert event %q: %w", ev.ID, err)
+		return fmt.Errorf("insert event %q: %w", ev.ID, err)
 	}
-
-	if err := applyToProjection(ctx, tx, ev); err != nil {
-		return core.Event{}, false, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return core.Event{}, false, fmt.Errorf("commit event %q: %w", ev.ID, err)
-	}
-	return ev, true, nil
+	return nil
 }
 
 // isUniqueViolation reports whether err is the Postgres unique violation raised by the

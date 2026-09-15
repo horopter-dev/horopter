@@ -18,9 +18,10 @@ import (
 // duration or lifecycle. correlation_ref travels in data, which is what lets two
 // CloudEvents describe one interval.
 func (s *Server) postCloudEvent(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, MaxBodyBytes)
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "read request body: "+err.Error())
+		writeBodyError(w, err, "read request body: "+err.Error())
 		return
 	}
 	var ce cloudevents.Event
