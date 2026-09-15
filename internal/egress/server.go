@@ -13,6 +13,7 @@ package egress
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -46,6 +47,14 @@ const MaxLimit = 1000
 // without breaking any of them.
 const TruncatedHeader = "X-Horopter-Truncated"
 
+// MaxAnnotationBodyBytes caps a Grafana annotation POST body. The documented shape —
+// a time range plus a short "rangeRaw" and "annotation" echo — is a few hundred bytes;
+// 64 KiB is two orders of magnitude of headroom for an unusually long saved-query
+// name, and nowhere near enough to be a memory lever on this unauthenticated route.
+// Until this batch every egress route was a GET, so caller input was bounded by
+// http.Server.MaxHeaderBytes; this is the first route that reads a body at all.
+const MaxAnnotationBodyBytes = 1 << 16
+
 // Server is the egress HTTP surface.
 type Server struct {
 	store   *postgres.Store
@@ -67,6 +76,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /v1/events", s.listEvents)
 	mux.HandleFunc("GET /adapters/grafana/annotations", s.grafanaAnnotations)
 	mux.HandleFunc("POST /adapters/grafana/annotations", s.grafanaAnnotationsPOST)
+	mux.HandleFunc("POST /adapters/grafana/{tenant}/annotations", s.grafanaAnnotationsPOST)
 	mux.HandleFunc("GET /adapters/otlp/spans", s.otlpSpans)
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
@@ -89,7 +99,15 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
+// tenantOf resolves a request's tenant: a path {tenant} wildcard first — only the
+// path-scoped Grafana annotations route (see Routes) registers one — falling back to
+// the "tenant" query parameter every other route already used, and DefaultTenant if
+// neither is present. PathValue returns "" on a route whose pattern has no such
+// wildcard, so this is safe to call unconditionally from every handler.
 func tenantOf(r *http.Request) string {
+	if v := r.PathValue("tenant"); v != "" {
+		return v
+	}
 	if v := r.URL.Query().Get("tenant"); v != "" {
 		return v
 	}
@@ -177,7 +195,9 @@ func windowFromRFC3339(r *http.Request) (window, error) {
 }
 
 // windowFromEpochMillis reads from/to as epoch milliseconds and limit as an optional
-// bounded integer, matching Grafana's datasource contract.
+// bounded integer: the neutral epoch-millisecond query-parameter contract. This is
+// not Grafana's own contract — windowFromAnnotationBody, reading RFC3339 out of a
+// POST body, is the parser Grafana's datasource plugins actually drive.
 func windowFromEpochMillis(r *http.Request) (window, error) {
 	from, err := epochMillisParam(r, "from")
 	if err != nil {
@@ -194,11 +214,11 @@ func windowFromEpochMillis(r *http.Request) (window, error) {
 	return window{from: from, to: to, limit: limit}, nil
 }
 
-// grafanaAnnotationRequest is the JSON body Grafana's SimpleJson and JSON API
-// datasource plugins POST to an annotations endpoint. Grafana also sends
-// "rangeRaw" (the panel's relative range, e.g. "now-1h") and "annotation" (the
-// query config); this adapter's contract needs neither, only the resolved
-// range.
+// grafanaAnnotationRequest is the JSON body grafana/simple-json-datasource — an
+// archived Grafana datasource plugin, but the only one that implements this
+// transport — POSTs to an annotations endpoint. It also sends "rangeRaw" (the
+// panel's relative range, e.g. "now-1h") and "annotation" (the query config);
+// this adapter's contract needs neither, only the resolved range.
 type grafanaAnnotationRequest struct {
 	Range struct {
 		From string `json:"from"`
@@ -296,19 +316,41 @@ func (s *Server) grafanaAnnotations(w http.ResponseWriter, r *http.Request) {
 	s.render(w, r, win, s.grafana.Render)
 }
 
-// grafanaAnnotationsPOST serves the same annotations the GET route does, for
-// the callers that use it: Grafana's SimpleJson and JSON API datasource
-// plugins query annotations with a POST carrying a JSON body, not a GET with
-// query parameters, so without this route no such Grafana instance can call
-// this adapter at all. The renderer is unchanged — grafana.Renderer.Render is
-// identical either way — only how the time window arrives differs.
+// grafanaAnnotationsPOST serves the same annotations the GET route does, for the
+// caller that needs it: grafana/simple-json-datasource — an archived Grafana
+// datasource plugin, but the only one that speaks this transport — queries
+// annotations with a POST carrying a JSON body, not a GET with query parameters, so
+// without this route no such Grafana instance could call this adapter at all. The
+// renderer is unchanged — grafana.Renderer.Render is identical either way — only how
+// the time window, and now the tenant, arrive differs.
+//
+// Both the tenant-less route and the path-scoped "/{tenant}/annotations" route (see
+// Routes) reach this same handler: tenantOf reads the path wildcard when the matched
+// route registered one and falls back to DefaultTenant when it did not, so one
+// handler serves both without a branch here.
 func (s *Server) grafanaAnnotationsPOST(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, MaxAnnotationBodyBytes)
 	win, err := windowFromAnnotationBody(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeAnnotationBodyError(w, err)
 		return
 	}
 	s.render(w, r, win, s.grafana.Render)
+}
+
+// writeAnnotationBodyError answers a POST body that could not be read. An
+// over-sized body is 413, not 400: it may be well-formed JSON that is merely too
+// large, and http.MaxBytesReader surfaces the cap as a read error indistinguishable
+// from malformed JSON unless checked explicitly — see ingress's writeBodyError for
+// the same reasoning applied to the write side of this project.
+func writeAnnotationBodyError(w http.ResponseWriter, err error) {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf(
+			"request body exceeds the %d-byte limit", tooLarge.Limit))
+		return
+	}
+	writeError(w, http.StatusBadRequest, err.Error())
 }
 
 func (s *Server) otlpSpans(w http.ResponseWriter, r *http.Request) {

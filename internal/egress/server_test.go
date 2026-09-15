@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -219,8 +220,9 @@ func onlySpan(t *testing.T, envelope map[string]any) map[string]any {
 	return span
 }
 
-// postJSON POSTs a JSON body, the way Grafana's SimpleJson and JSON API
-// datasource plugins query annotations.
+// postJSON POSTs a JSON body, the way grafana/simple-json-datasource — an archived
+// Grafana datasource plugin, but the only one that speaks this transport — queries
+// annotations.
 func postJSON(t *testing.T, h http.Handler, url, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
@@ -300,6 +302,60 @@ func TestGrafanaAnnotationsPOSTSignalsTruncation(t *testing.T) {
 	require.Equal(t, http.StatusOK, cut.Code, cut.Body.String())
 	assert.Equal(t, "true", cut.Header().Get(egress.TruncatedHeader),
 		"rows were discarded and the caller has no other way to find out")
+}
+
+// TestGrafanaAnnotationsPOSTPathTenantIsScoped is F2's guard: a POST to the
+// path-scoped route must query that path's tenant, and the pre-existing
+// tenant-less route must still resolve to DefaultTenant — the mechanism a real
+// Grafana can actually reach, since both of its access modes discard a "?tenant="
+// query parameter baked into the configured datasource URL (see fix-c-report.md).
+//
+// This never seeds DefaultTenant itself: nothing else in this suite does either,
+// since the shared database is never truncated, and asserting "empty" against a
+// tenant this test never writes to is the one way to check that reliably across
+// repeated runs.
+func TestGrafanaAnnotationsPOSTPathTenantIsScoped(t *testing.T) {
+	h, s, tnA := newServer(t)
+	tnB := tnA + "-b"
+	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	seed(t, s, tnA, "dep-a", "deployment.started", at)
+	seed(t, s, tnB, "dep-b", "deployment.started", at)
+
+	body := annotationBody(
+		time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC),
+		time.Date(2026, 9, 14, 11, 0, 0, 0, time.UTC))
+
+	recA := postJSON(t, h, "/adapters/grafana/"+tnA+"/annotations", body)
+	require.Equal(t, http.StatusOK, recA.Code, recA.Body.String())
+	var annsA []map[string]any
+	require.NoError(t, json.Unmarshal(recA.Body.Bytes(), &annsA))
+	assert.Len(t, annsA, 1, "the path tenant must scope the query to tnA, not tnB or default")
+
+	recB := postJSON(t, h, "/adapters/grafana/"+tnB+"/annotations", body)
+	require.Equal(t, http.StatusOK, recB.Code, recB.Body.String())
+	var annsB []map[string]any
+	require.NoError(t, json.Unmarshal(recB.Body.Bytes(), &annsB))
+	assert.Len(t, annsB, 1, "the path tenant must scope the query to tnB, not tnA or default")
+
+	recDefault := postJSON(t, h, "/adapters/grafana/annotations", body)
+	require.Equal(t, http.StatusOK, recDefault.Code, recDefault.Body.String())
+	var annsDefault []map[string]any
+	require.NoError(t, json.Unmarshal(recDefault.Body.Bytes(), &annsDefault))
+	assert.Empty(t, annsDefault,
+		"the tenant-less route must resolve to DefaultTenant, not leak tnA or tnB's rows")
+}
+
+// TestGrafanaAnnotationsPOSTRejectsOversizedBody is F3's guard: an unauthenticated
+// caller must not be able to force an unbounded allocation through the first
+// request-body route on egress's open surface.
+func TestGrafanaAnnotationsPOSTRejectsOversizedBody(t *testing.T) {
+	h, _, tn := newServer(t)
+
+	oversized := `{"range":{"from":"` +
+		strings.Repeat("x", egress.MaxAnnotationBodyBytes) + `","to":"2026-09-14T11:00:00Z"}}`
+	rec := postJSON(t, h, "/adapters/grafana/annotations?tenant="+tn, oversized)
+	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "byte limit")
 }
 
 func TestEgressRejectsMalformedTimeParams(t *testing.T) {
@@ -412,20 +468,24 @@ func TestHealthzWorksWithNilStore(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "healthz must not require a database")
 }
 
-// postAnnotationsIsReadOnly is TestRoutesRegisterOnlyGETHandlers's one
-// documented exception to "every route is a GET": Grafana's SimpleJson and
-// JSON API datasource plugins POST the annotation query because the time
-// range travels in a JSON request body, not because the route writes
-// anything (see grafanaAnnotationsPOST's doc comment in server.go). Any other
-// POST/PUT/DELETE pattern this test discovers is exactly the write-route
-// regression it exists to catch.
-const postAnnotationsIsReadOnly = "POST /adapters/grafana/annotations"
+// readOnlyPOSTRoutes is TestRoutesRegisterOnlyGETHandlers's documented exception
+// list to "every route is a GET": grafana/simple-json-datasource — an archived
+// Grafana datasource plugin, but the only one that speaks this transport — POSTs
+// the annotation query because the time range travels in a JSON request body, not
+// because the route writes anything (see grafanaAnnotationsPOST's doc comment in
+// server.go). Both the tenant-less and the path-scoped "/{tenant}/annotations"
+// route reach that same read-only handler. Any other POST/PUT/DELETE pattern this
+// test discovers is exactly the write-route regression it exists to catch.
+var readOnlyPOSTRoutes = []string{
+	"POST /adapters/grafana/annotations",
+	"POST /adapters/grafana/{tenant}/annotations",
+}
 
 // TestRoutesRegisterOnlyGETHandlers asserts, with a general structural check, that
 // egress exposes no write route anywhere: it parses server.go, walks every
 // mux.Handle/mux.HandleFunc call inside Routes(), and asserts each pattern string
-// starts with "GET " — except postAnnotationsIsReadOnly, egress's one deliberate
-// read-only POST. A single HTTP probe against one path can only ever prove that
+// starts with "GET " — except readOnlyPOSTRoutes, egress's deliberate read-only
+// POSTs. A single HTTP probe against one path can only ever prove that
 // one path has no write twin; a write route registered at any other path —
 // POST /v1/ingest, PUT /v1/changes — would pass every HTTP-level test in this file
 // while never being exercised. Reading the source is what generalizes the property to
@@ -469,14 +529,16 @@ func TestRoutesRegisterOnlyGETHandlers(t *testing.T) {
 
 	require.NotEmpty(t, patterns, "Routes() must register at least one handler")
 	for _, p := range patterns {
-		if p == postAnnotationsIsReadOnly {
+		if slices.Contains(readOnlyPOSTRoutes, p) {
 			continue
 		}
 		assert.True(t, strings.HasPrefix(p, "GET "),
 			"route pattern %q is not a GET route; egress must expose no write route", p)
 	}
-	assert.Contains(t, patterns, postAnnotationsIsReadOnly,
-		"the Grafana annotations POST route must be registered exactly as documented")
+	for _, want := range readOnlyPOSTRoutes {
+		assert.Contains(t, patterns, want,
+			"the Grafana annotations POST routes must be registered exactly as documented")
+	}
 }
 
 // TestTruncationIsSignalledOnEveryReadEndpoint drives both directions of the signal
