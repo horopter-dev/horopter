@@ -12,3 +12,43 @@ services:
       interval: 2s
       timeout: 3s
       retries: 15
+
+  migrate:
+    build:
+      context: .
+      args:
+        BINARY: horopter-migrate
+    environment:
+      DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+
+  ingress:
+    build:
+      context: .
+      args:
+        BINARY: horopter-ingress
+    environment:
+      DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
+      HOROPTER_INGRESS_TOKEN: local-dev-token
+      HOROPTER_ADDR: 0.0.0.0:8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  egress:
+    build:
+      context: .
+      args:
+        BINARY: horopter-egress
+    environment:
+      DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
+      HOROPTER_ADDR: 0.0.0.0:8081
+    ports:
+      - "8081:8081"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully

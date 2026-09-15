@@ -1,0 +1,6 @@
+.git
+.superpowers
+docs
+*.md
+Taskfile.yml
+docker-compose.yml

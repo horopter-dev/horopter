@@ -16,7 +16,18 @@ tasks:
       - golangci-lint run ./...
   build:
     cmds:
-      - go build -o horopter ./cmd/horopter
+      - go build -o dist/horopter-ingress ./cmd/horopter-ingress
+      - go build -o dist/horopter-egress ./cmd/horopter-egress
+      - go build -o dist/horopter-migrate ./cmd/horopter-migrate
+  up:
+    cmds:
+      - docker compose up --build -d
+  down:
+    cmds:
+      - docker compose down -v
+  logs:
+    cmds:
+      - docker compose logs -f ingress egress
   fmt:
     cmds:
       - gofmt -l .
