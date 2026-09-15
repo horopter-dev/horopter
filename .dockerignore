@@ -1,6 +1,10 @@
 .git
+.github
 .superpowers
 docs
 *.md
+dist
 Taskfile.yml
 docker-compose.yml
+.golangci.yml
+.pre-commit-config.yaml
