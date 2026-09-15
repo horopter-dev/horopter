@@ -5,9 +5,13 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -340,4 +344,176 @@ func TestPostEventRejectsAnOversizedBody(t *testing.T) {
 				"the caller must be told the body was too large, not that it was malformed")
 		})
 	}
+}
+
+// unauthenticatedProbeRoutes is TestEveryNonProbeRouteRequiresTheBearerToken's
+// documented exception list to "every route is registered through s.auth": the
+// liveness and readiness probes. A probe that demanded a credential could not be
+// used by the orchestrator that has to call it, so these two are deliberately open.
+// The test asserts they are both registered AND unwrapped, which is what stops this
+// list quietly growing to cover a write route: adding a pattern here to silence a
+// failure then fails the other half of the same assertion.
+var unauthenticatedProbeRoutes = []string{
+	"GET /healthz",
+	"GET /readyz",
+}
+
+// routeRegistration is one mux.Handle/mux.HandleFunc call found in Routes(): the
+// pattern it registers, and whether the handler it registers is wrapped in s.auth.
+type routeRegistration struct {
+	pattern     string
+	authWrapped bool
+}
+
+// isAuthWrapper reports whether e is the expression s.auth(…) — the bearer-token
+// middleware every non-probe route must be registered through. It matches the call
+// syntactically rather than by behaviour because that is the point: a route can only
+// be checked for a credential if the registration puts the middleware in its path,
+// and no HTTP-level probe of one URL can show that some other URL did the same.
+func isAuthWrapper(e ast.Expr) bool {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "auth" {
+		return false
+	}
+	recv, ok := sel.X.(*ast.Ident)
+	return ok && recv.Name == "s"
+}
+
+// routeHandleCall reports the route a mux.Handle/mux.HandleFunc call registers, and
+// whether it is such a call at all. It exists so collectRoutes's walk can filter with
+// one call instead of the chained type assertions that recognizing a route
+// registration requires.
+func routeHandleCall(t *testing.T, call *ast.CallExpr) (routeRegistration, bool) {
+	t.Helper()
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Handle" && sel.Sel.Name != "HandleFunc" {
+		return routeRegistration{}, false
+	}
+	recv, ok := sel.X.(*ast.Ident)
+	if !ok || recv.Name != "mux" {
+		return routeRegistration{}, false
+	}
+	require.Len(t, call.Args, 2,
+		"mux.%s takes a pattern and a handler", sel.Sel.Name)
+	lit, ok := call.Args[0].(*ast.BasicLit)
+	require.True(t, ok && lit.Kind == token.STRING,
+		"mux.%s's first argument must be a string literal pattern", sel.Sel.Name)
+	pattern, err := strconv.Unquote(lit.Value)
+	require.NoError(t, err)
+	return routeRegistration{
+		pattern: pattern, authWrapped: isAuthWrapper(call.Args[1]),
+	}, true
+}
+
+// collectRoutes parses server.go and returns every route registered by a
+// mux.Handle/mux.HandleFunc call inside the Routes method — the route table
+// TestEveryNonProbeRouteRequiresTheBearerToken checks.
+func collectRoutes(t *testing.T) []routeRegistration {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "server.go", nil, parser.SkipObjectResolution)
+	require.NoError(t, err, "parse server.go to inspect Routes()")
+
+	var routes []routeRegistration
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "Routes" {
+			return true
+		}
+		ast.Inspect(fn.Body, func(inner ast.Node) bool {
+			call, ok := inner.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if route, matched := routeHandleCall(t, call); matched {
+				routes = append(routes, route)
+			}
+			return true
+		})
+		return false
+	})
+	return routes
+}
+
+// TestEveryNonProbeRouteRequiresTheBearerToken asserts, structurally, that the bearer
+// token guards every write route ingress exposes — not just the one an HTTP-level test
+// happens to send an unauthenticated request to.
+//
+// TestIngressRequiresBearerToken drives POST /v1/events without a token, which proves
+// that one path is guarded and says nothing about any other. POST /v1/events/cloudevents
+// was in exactly that position: it IS wrapped, but deleting s.auth from its registration
+// compiled and broke no test in this suite. Every other CloudEvents test sets
+// Authorization before sending, so none of them would ever have noticed, and the same
+// would be true of a write route nobody has added yet. Reading the registration is what
+// generalizes the property from "this URL requires the token" to "every non-probe route
+// does".
+//
+// It needs no database and runs unconditionally, like TestHealthzWorksWithNilStore: the
+// credential boundary on the write side of a system of record should not be a property
+// that only a CI leg with a live Postgres can check.
+func TestEveryNonProbeRouteRequiresTheBearerToken(t *testing.T) {
+	routes := collectRoutes(t)
+	require.NotEmpty(t, routes, "Routes() must register at least one handler")
+
+	patterns := make([]string, 0, len(routes))
+	for _, r := range routes {
+		patterns = append(patterns, r.pattern)
+		if slices.Contains(unauthenticatedProbeRoutes, r.pattern) {
+			assert.False(t, r.authWrapped,
+				"probe %q must stay unauthenticated; the orchestrator that calls it "+
+					"holds no token", r.pattern)
+			continue
+		}
+		assert.True(t, r.authWrapped,
+			"route %q is registered without s.auth, so no credential guards it; the "+
+				"bearer token is the only boundary on the write side of the log",
+			r.pattern)
+	}
+	for _, want := range unauthenticatedProbeRoutes {
+		assert.Contains(t, patterns, want,
+			"the probes must be registered exactly as documented")
+	}
+}
+
+// getUnauthenticated drives a GET with no Authorization header, which is how an
+// orchestrator calls a probe.
+func getUnauthenticated(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	return rec
+}
+
+// TestReadyzReportsReadyWithLiveDatabase and its 503 counterpart below are ingress's
+// readiness coverage, which did not exist: the daemon that accepts writes had no test
+// for the probe that decides whether it is in the load balancer at all.
+//
+// Neither sends an Authorization header, so both also pin that readyz is reachable
+// without a credential — an orchestrator holds no token.
+func TestReadyzReportsReadyWithLiveDatabase(t *testing.T) {
+	h, _ := newServer(t)
+	rec := getUnauthenticated(t, h, "/readyz")
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// TestReadyzReports503WhenTheDatabaseIsUnreachable is the half that matters. A readyz
+// that only ever answers 200 is worse than none: it keeps a daemon that cannot reach its
+// database in rotation, accepting writes it will then fail. The happy path above cannot
+// catch that, because a handler returning 200 unconditionally passes it.
+//
+// Closing the pool is a real outage rather than a faked error, the same technique
+// TestPostEventReturns503WhenTheStoreFails uses; pgxpool.Close is guarded by a sync.Once,
+// so newServer's own t.Cleanup close is still safe.
+func TestReadyzReports503WhenTheDatabaseIsUnreachable(t *testing.T) {
+	h, s := newServer(t)
+	s.Close()
+
+	rec := getUnauthenticated(t, h, "/readyz")
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "database unreachable",
+		"an operator reading the probe's body must be told what is wrong")
 }
