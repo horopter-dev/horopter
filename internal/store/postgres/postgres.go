@@ -22,6 +22,7 @@ import (
 	"github.com/yo61/horopter/internal/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -379,11 +380,24 @@ func trimToLimit[T any](rows []T, limit int) ([]T, bool) {
 // unbounded, held only by the winning transaction's own lifetime. That is precisely the
 // pinned-pool-connection hazard AppendLockTimeout exists to prevent, on the one statement
 // it did not cover.
-func (s *Store) AppendEvent(ctx context.Context, ev core.Event) (core.Event, bool, error) {
+func (s *Store) AppendEvent(
+	ctx context.Context, ev core.Event,
+) (stored core.Event, created bool, err error) {
 	ctx, span := tracer().Start(ctx, "AppendEvent")
 	defer span.End()
 
-	ev, err := prepareEvent(ev)
+	out := appendOutcome{dedupePath: dedupeNone}
+	defer func() {
+		out.created = created
+		out.errKind = errKindOf(err)
+		span.SetAttributes(out.attributes(ev)...)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, out.errKind)
+		}
+	}()
+
+	ev, err = prepareEvent(ev)
 	if err != nil {
 		return core.Event{}, false, err
 	}
@@ -394,7 +408,7 @@ func (s *Store) AppendEvent(ctx context.Context, ev core.Event) (core.Event, boo
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := setLockTimeout(ctx, tx, AppendLockTimeout, "append"); err != nil {
+	if err = setLockTimeout(ctx, tx, AppendLockTimeout, "append"); err != nil {
 		return core.Event{}, false, err
 	}
 
@@ -403,9 +417,10 @@ func (s *Store) AppendEvent(ctx context.Context, ev core.Event) (core.Event, boo
 		return core.Event{}, false, err
 	}
 	if found {
+		out.dedupePath = dedupeLookup
 		return existing, false, tx.Commit(ctx)
 	}
-	return s.writeEvent(ctx, tx, ev)
+	return s.writeEvent(ctx, tx, ev, &out)
 }
 
 // prepareEvent validates the event and normalises the fields the schema constrains.
@@ -456,15 +471,15 @@ func findExistingDuplicate(
 // nothing and both insert. The loser lands on the unique index and must be given the
 // stored event rather than the constraint violation; see recoverConcurrentDuplicate.
 func (s *Store) writeEvent(
-	ctx context.Context, tx pgx.Tx, ev core.Event,
+	ctx context.Context, tx pgx.Tx, ev core.Event, out *appendOutcome,
 ) (core.Event, bool, error) {
 	if err := insertEvent(ctx, tx, ev); err != nil {
 		if isUniqueViolation(err, idemConstraint) {
-			return s.recoverConcurrentDuplicate(ctx, tx, ev)
+			return s.recoverConcurrentDuplicate(ctx, tx, ev, out)
 		}
 		return core.Event{}, false, err
 	}
-	if err := applyToProjection(ctx, tx, ev); err != nil {
+	if err := applyToProjection(ctx, tx, ev, out); err != nil {
 		return core.Event{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -547,9 +562,10 @@ func setLockTimeout(ctx context.Context, tx pgx.Tx, d time.Duration, what string
 // raise 23505 only once it had committed, so the winner's row is visible to the fresh
 // snapshot this read takes.
 func (s *Store) recoverConcurrentDuplicate(
-	ctx context.Context, tx pgx.Tx, ev core.Event,
+	ctx context.Context, tx pgx.Tx, ev core.Event, out *appendOutcome,
 ) (core.Event, bool, error) {
 	_ = tx.Rollback(ctx)
+	out.dedupePath = dedupeUniqueViolation
 
 	existing, found, err := findByIdemKey(ctx, s.pool, ev.Tenant, ev.IdempotencyKey)
 	if err != nil {
@@ -608,9 +624,9 @@ var afterDeleteHook func()
 
 // applyToProjection folds one event onto its change, under the advisory locks that make
 // the read-modify-write a critical section.
-func applyToProjection(ctx context.Context, tx pgx.Tx, ev core.Event) error {
+func applyToProjection(ctx context.Context, tx pgx.Tx, ev core.Event, out *appendOutcome) error {
 	ref := core.RefFor(ev)
-	if err := lockProjectionWrite(ctx, tx, ev.Tenant, ref); err != nil {
+	if err := lockProjectionWrite(ctx, tx, ev.Tenant, ref, out); err != nil {
 		return err
 	}
 	cur, found, err := lockAndLoadChange(ctx, tx, ev.Tenant, ref)
@@ -624,7 +640,16 @@ func applyToProjection(ctx context.Context, tx pgx.Tx, ev core.Event) error {
 	if found {
 		prev = &cur
 	}
-	return upsertChange(ctx, tx, core.Fold(prev, ev))
+	folded := core.Fold(prev, ev)
+	out.foldStatus = folded.Status
+	out.foldClosed = folded.End != nil
+	// ev.ID sorting below the change's current watermark is exactly the condition under
+	// which a rebuild diverges from the live projection — the hazard RebuildProjection
+	// documents and defers fixing. Recording it turns a known-possible, never-measured
+	// risk into a rate that can be graphed, which is what decides whether fixing it is
+	// worth doing.
+	out.outOfOrder = found && ev.ID < cur.LastEventID
+	return upsertChange(ctx, tx, folded)
 }
 
 // lockProjectionWrite takes, in one round trip, the two advisory locks an append needs
@@ -660,11 +685,19 @@ func applyToProjection(ctx context.Context, tx pgx.Tx, ev core.Event) error {
 // connection that other tenants need — but this function does not set that bound.
 // AppendEvent does, as its transaction's first statement, so it covers the event INSERT
 // as well as these locks. See AppendLockTimeout for the reasoning.
-func lockProjectionWrite(ctx context.Context, tx pgx.Tx, tenantID, ref string) error {
-	if _, err := tx.Exec(ctx, `
+func lockProjectionWrite(
+	ctx context.Context, tx pgx.Tx, tenantID, ref string, out *appendOutcome,
+) error {
+	start := time.Now()
+	_, err := tx.Exec(ctx, `
 		SELECT pg_advisory_xact_lock_shared(hashtext($1)),
 		       pg_advisory_xact_lock(hashtext($1 || '/' || $2))`,
-		tenantID, ref); err != nil {
+		tenantID, ref)
+	out.lockWait = time.Since(start)
+	if err != nil {
+		if isLockTimeout(err) {
+			out.lockTimeout = true
+		}
 		if isLockTimeout(err) {
 			return fmt.Errorf(
 				"gave up after %s waiting for the projection lock on %q/%q: %w; the "+

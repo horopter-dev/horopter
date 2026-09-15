@@ -15,6 +15,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/yo61/horopter/internal/core"
 	"github.com/yo61/horopter/internal/store/postgres"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func newStore(t *testing.T) *postgres.Store {
@@ -260,6 +263,9 @@ func TestConcurrentAppendsToSameRefDoNotLoseUpdates(t *testing.T) {
 // recovery path the test is named for was never entered. Exactly two calls is proof both
 // goroutines really did get past the check before either inserted.
 func TestConcurrentDuplicateIdempotencyKeyReturnsTheOriginal(t *testing.T) {
+	rec, restore := recordSpans(t)
+	defer restore()
+
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
 	key := "retry-" + uniqueToken()
@@ -321,4 +327,112 @@ func TestConcurrentDuplicateIdempotencyKeyReturnsTheOriginal(t *testing.T) {
 		"both callers must have passed the idempotency check before either inserted; "+
 			"fewer calls means they serialised and the 23505 recovery path this test is "+
 			"named for was never exercised")
+
+	paths := spanAttrValues(rec, "AppendEvent", "horopter.append.dedupe_path")
+	assert.Contains(t, paths, "unique_violation",
+		"one of the two racers must lose on uq_event_idem and take the recovery path; this "+
+			"is the only test in the suite that reaches it")
+}
+
+// recordSpans installs a recording provider and returns it with a restore function.
+//
+// The restore is best-effort and deliberately named for what it attempts rather than what
+// it guarantees: OTel's global provider delegates ONE WAY, so a provider installed once
+// cannot be fully uninstalled within a process, and a later test can still record into a
+// recorder installed here. That is why every assertion below filters by span name and
+// attribute key — never write one that depends on the recorder being otherwise empty.
+func recordSpans(t *testing.T) (*tracetest.SpanRecorder, func()) {
+	t.Helper()
+	rec := tracetest.NewSpanRecorder()
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)))
+	return rec, func() { otel.SetTracerProvider(prev) }
+}
+
+// spanAttrValues returns key's value from every ended span named spanName, in the order
+// the spans ended. A span lacking the attribute is SKIPPED rather than contributing an
+// empty entry, so an exact-slice assertion reads "these spans carried it" instead of
+// "these spans existed". Pass "" as spanName to match every span.
+func spanAttrValues(rec *tracetest.SpanRecorder, spanName, key string) []string {
+	var out []string
+	for _, span := range rec.Ended() {
+		if spanName != "" && span.Name() != spanName {
+			continue
+		}
+		for _, kv := range span.Attributes() {
+			if string(kv.Key) == key {
+				out = append(out, kv.Value.String())
+			}
+		}
+	}
+	return out
+}
+
+func TestAppendRecordsTheDedupePath(t *testing.T) {
+	rec, restore := recordSpans(t)
+	defer restore()
+
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
+	ev := mkEvent(tn, eventID(t, "a"), "dup-key", "dep-1", "deployment.started", at)
+
+	_, created, err := s.AppendEvent(ctx, ev)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	second := mkEvent(tn, eventID(t, "b"), "dup-key", "dep-1", "deployment.started", at)
+	_, created, err = s.AppendEvent(ctx, second)
+	require.NoError(t, err)
+	require.False(t, created)
+
+	paths := spanAttrValues(rec, "AppendEvent", "horopter.append.dedupe_path")
+	assert.Equal(t, []string{"none", "lookup"}, paths,
+		"a first append takes no dedupe path; a retry is caught by the lookup")
+}
+
+func TestAppendRecordsAnOutOfOrderFold(t *testing.T) {
+	rec, restore := recordSpans(t)
+	defer restore()
+
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
+
+	// Append a high id first, then a lower one on the same ref: commit order and id
+	// order now disagree, which is the rebuild-divergence condition.
+	// Mint two fresh ids and order them, rather than hardcoding literals: event.id is
+	// the PRIMARY KEY and this suite never truncates its database, so a literal id
+	// passes once and then violates event_pkey forever. That violation is not on
+	// uq_event_idem, so recoverConcurrentDuplicate does not absorb it.
+	a, b := eventID(t, "x"), eventID(t, "y")
+	if a > b {
+		a, b = b, a
+	}
+	high := mkEvent(tn, b, "k1", "dep-2", "deployment.started", at)
+	low := mkEvent(tn, a, "k2", "dep-2", "deployment.completed", at)
+	_, _, err := s.AppendEvent(ctx, high)
+	require.NoError(t, err)
+	_, _, err = s.AppendEvent(ctx, low)
+	require.NoError(t, err)
+
+	flags := spanAttrValues(rec, "AppendEvent", "horopter.fold.out_of_order")
+	assert.Equal(t, []string{"false", "true"}, flags,
+		"the second append carries a lower id than the change's watermark")
+}
+
+func TestAppendRecordsTheErrorKindOnAFailure(t *testing.T) {
+	rec, restore := recordSpans(t)
+	defer restore()
+
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
+
+	// Subject is required, so Validate rejects this and wraps core.ErrInvalidEvent.
+	bad := mkEvent(tn, eventID(t, "bad"), "k1", "dep-3", "deployment.started", at)
+	bad.Subject = ""
+	_, _, err := s.AppendEvent(ctx, bad)
+	require.Error(t, err)
+
+	kinds := spanAttrValues(rec, "AppendEvent", "horopter.error.kind")
+	assert.Equal(t, []string{"invalid_event"}, kinds,
+		"a validation failure must be recorded as the caller's fault, not a store outage")
 }
