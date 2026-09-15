@@ -47,7 +47,7 @@ var daemonMainFiles = []string{
 }
 
 // TestDaemonsNeverMigrateOnStartup is the structural counterpart to
-// TestRoutesRegisterOnlyGETHandlers in internal/egress/server_test.go: no test
+// TestNoWriteRouteIsRegisteredAnywhere in internal/egress/server_test.go: no test
 // anywhere under cmd/ exercises a daemon's startup wiring against a real database, and
 // no configured linter has a rule against calling postgres.Open outside
 // horopter-migrate, so nothing previously caught a daemon being reverted to the

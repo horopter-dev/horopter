@@ -10,6 +10,17 @@ linters:
     - gosec
     - bodyclose
     - errorlint
+    - gocyclo
+    - funlen
+    - lll
+  settings:
+    gocyclo:
+      min-complexity: 8
+    funlen:
+      lines: 100
+      statements: -1
+    lll:
+      line-length: 100
 formatters:
   enable:
     - gofmt

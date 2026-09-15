@@ -468,7 +468,7 @@ func TestHealthzWorksWithNilStore(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "healthz must not require a database")
 }
 
-// readOnlyPOSTRoutes is TestRoutesRegisterOnlyGETHandlers's documented exception
+// readOnlyPOSTRoutes is TestNoWriteRouteIsRegisteredAnywhere's documented exception
 // list to "every route is a GET": grafana/simple-json-datasource — an archived
 // Grafana datasource plugin, but the only one that speaks this transport — POSTs
 // the annotation query because the time range travels in a JSON request body, not
@@ -481,17 +481,34 @@ var readOnlyPOSTRoutes = []string{
 	"POST /adapters/grafana/{tenant}/annotations",
 }
 
-// TestRoutesRegisterOnlyGETHandlers asserts, with a general structural check, that
-// egress exposes no write route anywhere: it parses server.go, walks every
-// mux.Handle/mux.HandleFunc call inside Routes(), and asserts each pattern string
-// starts with "GET " — except readOnlyPOSTRoutes, egress's deliberate read-only
-// POSTs. A single HTTP probe against one path can only ever prove that
-// one path has no write twin; a write route registered at any other path —
-// POST /v1/ingest, PUT /v1/changes — would pass every HTTP-level test in this file
-// while never being exercised. Reading the source is what generalizes the property to
-// "no write route anywhere", not just "no write route at this one URL". It needs no
-// database and runs unconditionally, like TestHealthzWorksWithNilStore.
-func TestRoutesRegisterOnlyGETHandlers(t *testing.T) {
+// routeHandleCall reports the mux.Handle/mux.HandleFunc pattern a call expression
+// registers, and whether it is such a call at all. It exists so
+// collectRoutePatterns's walk can filter with one call instead of the four chained
+// type assertions that recognizing a route-registration call requires.
+func routeHandleCall(t *testing.T, call *ast.CallExpr) (string, bool) {
+	t.Helper()
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Handle" && sel.Sel.Name != "HandleFunc" {
+		return "", false
+	}
+	recv, ok := sel.X.(*ast.Ident)
+	if !ok || recv.Name != "mux" {
+		return "", false
+	}
+	require.NotEmpty(t, call.Args, "mux.%s call with no arguments", sel.Sel.Name)
+	lit, ok := call.Args[0].(*ast.BasicLit)
+	require.True(t, ok && lit.Kind == token.STRING,
+		"mux.%s's first argument must be a string literal pattern", sel.Sel.Name)
+	pattern, err := strconv.Unquote(lit.Value)
+	require.NoError(t, err)
+	return pattern, true
+}
+
+// collectRoutePatterns parses server.go and returns the pattern string registered by
+// every mux.Handle/mux.HandleFunc call inside the Routes method — the route table
+// TestNoWriteRouteIsRegisteredAnywhere checks.
+func collectRoutePatterns(t *testing.T) []string {
+	t.Helper()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "server.go", nil, parser.SkipObjectResolution)
 	require.NoError(t, err, "parse server.go to inspect Routes()")
@@ -507,25 +524,27 @@ func TestRoutesRegisterOnlyGETHandlers(t *testing.T) {
 			if !ok {
 				return true
 			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "Handle" && sel.Sel.Name != "HandleFunc" {
-				return true
+			if pattern, matched := routeHandleCall(t, call); matched {
+				patterns = append(patterns, pattern)
 			}
-			recv, ok := sel.X.(*ast.Ident)
-			if !ok || recv.Name != "mux" {
-				return true
-			}
-			require.NotEmpty(t, call.Args, "mux.%s call with no arguments", sel.Sel.Name)
-			lit, ok := call.Args[0].(*ast.BasicLit)
-			require.True(t, ok && lit.Kind == token.STRING,
-				"mux.%s's first argument must be a string literal pattern", sel.Sel.Name)
-			pattern, err := strconv.Unquote(lit.Value)
-			require.NoError(t, err)
-			patterns = append(patterns, pattern)
 			return true
 		})
 		return false
 	})
+	return patterns
+}
+
+// TestNoWriteRouteIsRegisteredAnywhere asserts, with a general structural check, that
+// egress exposes no write route anywhere: it reads collectRoutePatterns's route table
+// and asserts each pattern string starts with "GET " — except readOnlyPOSTRoutes,
+// egress's deliberate read-only POSTs. A single HTTP probe against one path can only
+// ever prove that one path has no write twin; a write route registered at any other
+// path — POST /v1/ingest, PUT /v1/changes — would pass every HTTP-level test in this
+// file while never being exercised. Reading the source is what generalizes the
+// property to "no write route anywhere", not just "no write route at this one URL".
+// It needs no database and runs unconditionally, like TestHealthzWorksWithNilStore.
+func TestNoWriteRouteIsRegisteredAnywhere(t *testing.T) {
+	patterns := collectRoutePatterns(t)
 
 	require.NotEmpty(t, patterns, "Routes() must register at least one handler")
 	for _, p := range patterns {
