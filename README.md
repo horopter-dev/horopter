@@ -105,9 +105,11 @@ same-ref event committed before another that carries a lower id. That needs no u
 timing: an id is minted on the ingress replica that received the request, before its
 append starts, so with more than one replica the window is the clock skew between them,
 and even with one replica an append that minted a lower id can lose the race for the
-per-ref lock. Every field whose rule is "last event wins" — `status`, `end`,
-`last_event_id`, `type`, `title`, `actor`, `subject` and attributes — can come back
-different; a `deployment.completed` and a `deployment.failed` on one ref can swap. `start`,
+per-ref lock. Every field whose rule is "last event wins" — `last_event_id`, `type`,
+`title`, `actor`, `subject` and attributes — can come back different. `status` and `end`
+follow the narrower rule "last *terminal* event wins", so a `deployment.completed` and a
+`deployment.failed` on one ref can swap, but nothing that arrives later can reopen a change
+that has already closed. `start`,
 `started_at` and `first_seen_at` cannot: they are minima, so replay order does not reach
 them. Rebuilding twice gives the same answer both times — it is the live projection the
 replay may disagree with, not itself. If a change's outcome matters to you, read `GET
@@ -134,7 +136,7 @@ is supplied by the caller verbatim.
 
 Every read endpoint caps its result set at 1000 rows. When rows were discarded, the
 response carries **`X-Horopter-Truncated: true`**; when nothing was discarded the header
-is absent entirely. All five read routes set it:
+is absent entirely. All four read endpoints set it, across six registered routes:
 
 - `GET /v1/changes`
 - `GET /v1/events`

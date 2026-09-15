@@ -946,8 +946,12 @@ func scanChanges(rows pgx.Rows) ([]core.Change, error) {
 //     millisecond do not even tie-break by generation order.
 //
 // A rebuild can therefore produce a different Subject, Type, Title, Actor, attribute set,
-// LastEventID, End or Status than the one live folding produced — every field whose rule
-// is "the last event folded wins". Start, StartedAt and FirstSeenAt are NOT in that set:
+// LastEventID, End or Status than the one live folding produced. The first six are
+// assigned unconditionally, so their rule is "the last event folded wins". End and Status
+// follow a narrower one — core.Fold guards both on End being nil, so once a change has
+// closed only a terminal event moves them: "the last TERMINAL event folded wins".
+// Reordering two terminal events swaps the recorded outcome; a late annotation cannot
+// reopen a change that already closed. Start, StartedAt and FirstSeenAt are NOT in that set:
 // both start facts are minima (migration 0003, core.Fold), so they are commutative and the
 // two orders agree on them. Every event is still folded in, and the rebuild is still
 // deterministic — replaying the same log again gives the same answer — but "reproduces the

@@ -452,7 +452,7 @@ func changesToJSON(changes []core.Change) []map[string]any {
 		if c.StartedAt != nil {
 			m["started_at"] = c.StartedAt.UTC().Format(time.RFC3339Nano)
 		}
-		if c.End != nil {
+		if !c.IsOpen() {
 			m["end"] = c.End.UTC().Format(time.RFC3339Nano)
 		}
 		out = append(out, m)
