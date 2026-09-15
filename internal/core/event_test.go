@@ -31,13 +31,20 @@ func TestValidateAcceptsValidEvent(t *testing.T) {
 	require.NoError(t, validEvent().Validate())
 }
 
+// TestValidateRejectsMissingFields checks that each required field's failure names that
+// field back to the caller.
+//
+// want is the fragment the field's own branch produces, and for the id it is NOT the
+// word "id". "id" appears in ErrInvalidEvent's own text — inval·id — and in the
+// "not-a-ulid" fixture, so asserting on it passes whatever Validate reports and whichever
+// branch produced it. "26-character ULID" appears only in the id branch.
 func TestValidateRejectsMissingFields(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		mutate func(*core.Event)
 		want   string
 	}{
-		{"malformed id", func(e *core.Event) { e.ID = "not-a-ulid" }, "id"},
+		{"malformed id", func(e *core.Event) { e.ID = "not-a-ulid" }, "26-character ULID"},
 		{"no tenant", func(e *core.Event) { e.Tenant = "" }, "tenant"},
 		{"no type", func(e *core.Event) { e.Type = "" }, "type"},
 		{"no subject", func(e *core.Event) { e.Subject = "" }, "subject"},
@@ -71,6 +78,12 @@ func TestNewULIDIsSortableByTime(t *testing.T) {
 // answering it 503 and telling the producer to retry a body that can never be accepted.
 // Each case names a different required field so a single missing wrap is caught rather
 // than masked by the others.
+//
+// wantIn is carried separately from the subtest name because for the id they differ.
+// Asserting the message contains "id" asserts nothing: ErrInvalidEvent's own text is
+// "invalid event" — inval·id — and the fixture is "not-a-ulid", so that assertion holds
+// whichever branch fired and whatever it said. "26-character ULID" is produced by the id
+// branch alone.
 func TestValidateFailuresAreInvalidEvent(t *testing.T) {
 	valid := core.Event{
 		ID:     "01J0000000000000000000000A",
@@ -80,24 +93,27 @@ func TestValidateFailuresAreInvalidEvent(t *testing.T) {
 	}
 	require.NoError(t, valid.Validate(), "precondition: the base event is acceptable")
 
-	for name, breakIt := range map[string]func(e *core.Event){
-		"id":             func(e *core.Event) { e.ID = "not-a-ulid" },
-		"tenant":         func(e *core.Event) { e.Tenant = "" },
-		"source":         func(e *core.Event) { e.Source = "" },
-		"type":           func(e *core.Event) { e.Type = "" },
-		"subject":        func(e *core.Event) { e.Subject = "" },
-		"occurred_at":    func(e *core.Event) { e.OccurredAt = time.Time{} },
-		"schema_version": func(e *core.Event) { e.SchemaVersion = 99 },
+	for name, tc := range map[string]struct {
+		breakIt func(e *core.Event)
+		wantIn  string
+	}{
+		"id":             {func(e *core.Event) { e.ID = "not-a-ulid" }, "26-character ULID"},
+		"tenant":         {func(e *core.Event) { e.Tenant = "" }, "tenant"},
+		"source":         {func(e *core.Event) { e.Source = "" }, "source"},
+		"type":           {func(e *core.Event) { e.Type = "" }, "type"},
+		"subject":        {func(e *core.Event) { e.Subject = "" }, "subject"},
+		"occurred_at":    {func(e *core.Event) { e.OccurredAt = time.Time{} }, "occurred_at"},
+		"schema_version": {func(e *core.Event) { e.SchemaVersion = 99 }, "schema_version"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			bad := valid
-			breakIt(&bad)
+			tc.breakIt(&bad)
 			err := bad.Validate()
 			require.Error(t, err)
 			assert.ErrorIs(t, err, core.ErrInvalidEvent,
 				"a %s failure must wrap ErrInvalidEvent; without it ingress answers 503 "+
 					"and the producer retries a request that can never succeed", name)
-			assert.Contains(t, err.Error(), name,
+			assert.Contains(t, err.Error(), tc.wantIn,
 				"the message must still name the field the caller got wrong")
 		})
 	}

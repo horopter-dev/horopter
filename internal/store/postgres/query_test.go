@@ -255,8 +255,15 @@ func TestListEventsFindsAPointChangesEvents(t *testing.T) {
 	assert.Equal(t, "dep-9", correlated[0].CorrelationRef)
 }
 
-// TestListEventsIdArmIgnoresCorrelatedEvents pins the correlation_ref = ” qualifier in
-// ListEvents' id arm. Without it the predicate is "correlation_ref = ref OR id = ref",
+// TestListEventsIdArmIgnoresCorrelatedEvents pins this qualifier in ListEvents' id arm:
+//
+//	correlation_ref = ''
+//
+// It is written in a code block because gofmt rewrites two apostrophes into a closing
+// smart quote in running doc-comment text, which is how this comment came to spell a SQL
+// empty-string literal as a character SQL has no use for.
+//
+// Without the qualifier the predicate is "correlation_ref = ref OR id = ref",
 // which also matches any event whose own id happens to equal the ref — and since a
 // correlated event's id is an arbitrary ULID while a ref is producer-supplied, a producer
 // using event ids as correlation refs makes exactly that collision. The two events below
