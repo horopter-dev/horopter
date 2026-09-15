@@ -45,8 +45,9 @@ func TestFoldFinishedClosesChange(t *testing.T) {
 func TestFoldEventWithoutCorrelationRefIsAPoint(t *testing.T) {
 	c := core.Fold(nil, ev("01C", "", "config.changed", t10))
 	assert.Equal(t, "01C", c.Ref, "a point's ref is its own event id")
-	assert.True(t, c.IsPoint())
-	assert.Equal(t, core.StatusOccurred, c.Status)
+	assert.Equal(t, core.StatusOccurred, c.Status, "only the no-correlation-ref path sets it")
+	require.NotNil(t, c.End)
+	assert.True(t, c.End.Equal(c.Start), "a point's end coincides with its start")
 }
 
 func TestFoldOutOfOrderFinishBeforeStart(t *testing.T) {
@@ -191,7 +192,9 @@ func TestFoldZeroDurationClosedIntervalIsNotAPoint(t *testing.T) {
 
 	require.NotNil(t, c.End)
 	assert.True(t, c.End.Equal(c.Start), "precondition: start and end coincide")
-	assert.False(t, c.IsPoint(), "a same-timestamp start/complete is a closed interval, not a point")
+	assert.NotEqual(t, core.StatusOccurred, c.Status,
+		"a same-timestamp start/complete is a closed interval, not a point — "+
+			"status is what separates them, since End == Start holds for both")
 	assert.False(t, c.IsOpen())
 }
 
