@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/yo61/horopter/internal/store/postgres"
 )
@@ -89,4 +90,85 @@ func TestMigrationsAreIdempotentAndConcurrencySafe(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		require.NoError(t, <-errs, "concurrent migration must not fail")
 	}
+}
+
+// TestMigrationLedgerAppliesEachFileOnce is the guard that lets a non-idempotent
+// migration exist at all. Without the applied_migration ledger every file re-executes on
+// every run, which is harmless only while every migration is written with IF NOT EXISTS;
+// the first backfill UPDATE or schema transformation would error on the second run or,
+// worse, silently re-apply — data corruption in a system of record.
+//
+// The second Open SUCCEEDING is itself the proof, not a formality: 0002 adds a CHECK
+// constraint by name, which Postgres refuses to add twice. The subtest below runs that
+// statement again by hand to show the failure the ledger is preventing, so this test
+// cannot pass vacuously if the migrations ever all become idempotent again.
+func TestMigrationLedgerAppliesEachFileOnce(t *testing.T) {
+	ctx := context.Background()
+	d := isolatedSchemaDSN(t, dsn(t))
+
+	first, err := postgres.Open(ctx, d)
+	require.NoError(t, err)
+	t.Cleanup(first.Close)
+
+	applied := func() map[string]time.Time {
+		rows, err := first.Pool().Query(ctx,
+			`SELECT filename, applied_at FROM applied_migration ORDER BY filename`)
+		require.NoError(t, err)
+		defer rows.Close()
+		out := map[string]time.Time{}
+		for rows.Next() {
+			var (
+				name string
+				at   time.Time
+			)
+			require.NoError(t, rows.Scan(&name, &at))
+			out[name] = at
+		}
+		require.NoError(t, rows.Err())
+		return out
+	}
+
+	afterFirst := applied()
+	require.NotEmpty(t, afterFirst, "the ledger must record every migration it applied")
+	require.Contains(t, afterFirst, "0001_init.sql")
+	require.Contains(t, afterFirst, "0002_constrain_status_and_generate_end_effective.sql")
+
+	second, err := postgres.Open(ctx, d)
+	require.NoError(t, err,
+		"a second migration run must skip every recorded file; 0002 cannot be applied twice")
+	t.Cleanup(second.Close)
+
+	assert.Equal(t, afterFirst, applied(),
+		"a recorded migration must not re-execute, and its ledger row must not be rewritten")
+
+	t.Run("0002 is genuinely not idempotent", func(t *testing.T) {
+		_, err := second.Pool().Exec(ctx, `
+			ALTER TABLE change ADD CONSTRAINT change_status_vocabulary
+			    CHECK (status IN ('occurred', 'in_progress', 'completed', 'failed',
+			                      'rolled_back', 'cancelled'))`)
+		require.Error(t, err,
+			"if this statement were idempotent the ledger test above would prove nothing")
+	})
+}
+
+// TestSchemaVersionIsDerivedFromTheHighestMigration pins the version to the migrations
+// actually present. It used to be a literal INSERT inside 0001_init.sql, so adding a
+// migration without editing that literal left the database claiming a version its schema
+// no longer matched and nothing noticed.
+func TestSchemaVersionIsDerivedFromTheHighestMigration(t *testing.T) {
+	ctx := context.Background()
+	s, err := postgres.Open(ctx, isolatedSchemaDSN(t, dsn(t)))
+	require.NoError(t, err)
+	t.Cleanup(s.Close)
+
+	var highest string
+	require.NoError(t, s.Pool().QueryRow(ctx,
+		`SELECT max(filename) FROM applied_migration`).Scan(&highest))
+
+	v, err := s.SchemaVersion(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, postgres.ExpectedSchemaVersion, v,
+		"ExpectedSchemaVersion must be raised in the same change that adds a migration")
+	assert.Equal(t, fmt.Sprintf("%04d", v), highest[:4],
+		"the recorded version must be the numeric prefix of the highest applied migration")
 }

@@ -45,6 +45,3 @@ CREATE TABLE IF NOT EXISTS schema_version (
     singleton  BOOLEAN     NOT NULL DEFAULT TRUE,
     CONSTRAINT schema_version_singleton UNIQUE (singleton)
 );
-
-INSERT INTO schema_version (version) VALUES (1)
-ON CONFLICT (singleton) DO UPDATE SET version = 1, applied_at = now();

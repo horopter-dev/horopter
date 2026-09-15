@@ -21,8 +21,9 @@ func newStore(t *testing.T) *postgres.Store {
 	s, err := postgres.Open(ctx, dsn(t))
 	require.NoError(t, err)
 	t.Cleanup(s.Close)
-	// Each test owns its own tenant, so tests are isolated without truncating
-	// shared tables and can run in parallel.
+	// Each test owns its own tenant, so tests are isolated without truncating shared
+	// tables. They must still run sequentially: afterLoadHook and afterIdemLookupHook
+	// are package-level vars that the concurrency tests install and clear.
 	return s
 }
 
@@ -157,12 +158,20 @@ const concurrentAppends = 4
 // this is headroom, not a tuned value.
 const projectionWriteDelay = 200 * time.Millisecond
 
-// TestConcurrentAppendsToSameRefDoNotLoseUpdates is the reason the projection upsert
-// takes a row lock. Without SELECT ... FOR UPDATE, two ingress replicas folding two
-// events onto the same ref both read the same prior change and the second write
-// silently discards the first event's contribution — no error, nothing in the logs.
+// TestConcurrentAppendsToSameRefDoNotLoseUpdates is the reason applyToProjection takes
+// a per-ref advisory lock. Two ingress replicas folding two events onto the same ref
+// both read the same prior change and the second write silently discards the first
+// event's contribution — no error, nothing in the logs.
 //
-// Two things make that outcome deterministic rather than a matter of timing. A start
+// Nothing seeds the ref first, and that is deliberate: it is the row-ABSENT path that
+// was broken. SELECT ... FOR UPDATE can only lock rows visible to the transaction's
+// snapshot, so with no row yet every participant folds from nil and the last
+// INSERT ... ON CONFLICT DO UPDATE overwrites the rest wholesale. A seeded ref sends
+// every participant down the row-EXISTS path instead, where FOR UPDATE does serialise
+// them, and the broken path is never touched. Restoring a seed here would make this
+// test pass against the defect it exists to catch.
+//
+// Two things make the outcome deterministic rather than a matter of timing. A start
 // channel releases every goroutine at once, so they overlap instead of serialising in
 // spawn order; and afterLoadHook holds each transaction between its read and its write
 // long enough that all of them have read before any of them writes.
@@ -173,10 +182,6 @@ const projectionWriteDelay = 200 * time.Millisecond
 func TestConcurrentAppendsToSameRefDoNotLoseUpdates(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
-
-	_, _, err := s.AppendEvent(ctx,
-		mkEvent(tn, eventID(t, "seed"), "k0", "dep-7", "deployment.started", at))
-	require.NoError(t, err)
 
 	postgres.SetAfterLoadHook(func() { time.Sleep(projectionWriteDelay) })
 	t.Cleanup(func() { postgres.SetAfterLoadHook(nil) })
@@ -201,7 +206,7 @@ func TestConcurrentAppendsToSameRefDoNotLoseUpdates(t *testing.T) {
 	wg.Wait()
 
 	var attrs map[string]any
-	err = s.Pool().QueryRow(ctx,
+	err := s.Pool().QueryRow(ctx,
 		`SELECT attributes FROM change WHERE tenant = $1 AND ref = $2`, tn, "dep-7").Scan(&attrs)
 	require.NoError(t, err)
 
@@ -209,4 +214,68 @@ func TestConcurrentAppendsToSameRefDoNotLoseUpdates(t *testing.T) {
 		assert.Contains(t, attrs, fmt.Sprintf("attr%d", i),
 			"every concurrent event's contribution must survive; a missing key is a lost update")
 	}
+}
+
+// TestConcurrentDuplicateIdempotencyKeyReturnsTheOriginal covers a CI retry that fires
+// while the first attempt is still in flight. The check-then-insert is not atomic, so
+// both callers find nothing and both insert; the loser violates uq_event_idem. The spec
+// calls duplicates normal traffic, not an error condition, so the loser must get the
+// stored event back exactly as the non-concurrent duplicate path returns it.
+//
+// The hook is a two-party rendezvous, not a sleep: both goroutines block there until
+// both have finished their idempotency lookup, so BOTH are guaranteed past the check
+// before either inserts, and one of them therefore MUST take the 23505 recovery path.
+// A sleep would only make that likely. The rendezvous is safe here — unlike
+// afterLoadHook, which must be a sleep — because the lookup is a plain SELECT that
+// takes no lock, so neither participant holds anything the other is waiting for.
+func TestConcurrentDuplicateIdempotencyKeyReturnsTheOriginal(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	key := "retry-" + uniqueToken()
+
+	var rendezvous sync.WaitGroup
+	rendezvous.Add(2)
+	postgres.SetAfterIdemLookupHook(func() { rendezvous.Done(); rendezvous.Wait() })
+	t.Cleanup(func() { postgres.SetAfterIdemLookupHook(nil) })
+
+	type result struct {
+		ev      core.Event
+		created bool
+		err     error
+	}
+	results := make(chan result, 2)
+	start := make(chan struct{})
+	for i := range 2 {
+		ev := mkEvent(tn, eventID(t, fmt.Sprintf("racer%d", i)), key, "dep-7",
+			"deployment.started", at)
+		go func(ev core.Event) {
+			<-start
+			got, created, err := s.AppendEvent(ctx, ev)
+			results <- result{got, created, err}
+		}(ev)
+	}
+	close(start)
+
+	var (
+		got      [2]result
+		creates  int
+		returned = map[string]bool{}
+	)
+	for i := range 2 {
+		got[i] = <-results
+		require.NoError(t, got[i].err,
+			"a concurrent retry of the same idempotency key is normal traffic, not an error")
+		if got[i].created {
+			creates++
+		}
+		returned[got[i].ev.ID] = true
+	}
+
+	assert.Equal(t, 1, creates, "exactly one of the two callers may have created the event")
+	assert.Len(t, returned, 1, "both callers must be told about the same stored event")
+
+	evs, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn})
+	require.NoError(t, err)
+	require.Len(t, evs, 1, "a concurrent retry must not duplicate the event")
+	assert.True(t, returned[evs[0].ID], "the id both callers got must be the id that was stored")
 }

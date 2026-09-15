@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/yo61/horopter/internal/core"
 	"github.com/yo61/horopter/internal/store/postgres"
 )
 
@@ -164,4 +165,92 @@ func TestQueryChangesIsTenantScoped(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Empty(t, got, "queries must never cross tenants")
+}
+
+// TestChangeStatusVocabularyIsEnforced proves the CHECK migration 0002 adds is real. An
+// empty status made a change both unqueryable — QueryChanges reads an empty Status as
+// "no filter" — and, with end_at NULL, an open interval matching every overlap query
+// until the year 9999. The constraint is what stops that class of row ever being written
+// again, whatever a future code path forgets.
+func TestChangeStatusVocabularyIsEnforced(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	for _, bad := range []string{"", "in-progress", "IN_PROGRESS", "pending"} {
+		t.Run("status="+bad, func(t *testing.T) {
+			_, err := s.Pool().Exec(ctx, `
+				INSERT INTO change (tenant, ref, subject, type, title, actor, start_at,
+				                    end_at, status, attributes, last_event_id)
+				VALUES ($1,$2,'acme/prod','deployment.annotated','','ci-bot',$3,NULL,
+				        $4,'{}'::jsonb,'seed')`,
+				tn, eventID(t, "bad-status"), at, bad)
+			require.Error(t, err, "a status outside internal/core's vocabulary must be rejected")
+			assert.Contains(t, err.Error(), "change_status_vocabulary")
+		})
+	}
+
+	var valid int
+	require.NoError(t, s.Pool().QueryRow(ctx, `
+		INSERT INTO change (tenant, ref, subject, type, title, actor, start_at,
+		                    end_at, status, attributes, last_event_id)
+		VALUES ($1,$2,'acme/prod','deployment.annotated','','ci-bot',$3,NULL,
+		        'in_progress','{}'::jsonb,'seed')
+		RETURNING 1`, tn, eventID(t, "good-status"), at).Scan(&valid),
+		"the constraint must still admit every status internal/core can produce")
+}
+
+// TestEndEffectiveIsGeneratedFromEndAt pins the one remaining copy of the open-change
+// sentinel. end_effective is the overlap index's key; it used to be computed in Go and
+// written alongside end_at, so the two could drift and the index would answer overlap
+// queries from a value no longer implied by the data. Postgres owns it now, and this
+// asserts its generated value against core.OpenSentinel so the SQL literal in 0002 and
+// the Go constant cannot diverge unnoticed.
+func TestEndEffectiveIsGeneratedFromEndAt(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	endEffective := func(ref string) time.Time {
+		var v time.Time
+		require.NoError(t, s.Pool().QueryRow(ctx,
+			`SELECT end_effective FROM change WHERE tenant = $1 AND ref = $2`, tn, ref).Scan(&v))
+		return v
+	}
+
+	_, _, err := s.AppendEvent(ctx,
+		mkEvent(tn, eventID(t, "start"), "k1", "gen-1", "deployment.started", at))
+	require.NoError(t, err)
+	assert.True(t, endEffective("gen-1").Equal(core.OpenSentinel),
+		"an open change's end_effective must be core.OpenSentinel, generated from a NULL end_at")
+
+	done := at.Add(20 * time.Minute)
+	_, _, err = s.AppendEvent(ctx,
+		mkEvent(tn, eventID(t, "done"), "k2", "gen-1", "deployment.completed", done))
+	require.NoError(t, err)
+	assert.True(t, endEffective("gen-1").Equal(done),
+		"closing a change must move end_effective to end_at without Go writing it")
+}
+
+// TestListEventsFindsAPointChangesEvents covers the ref of a change with no correlation
+// ref. core.RefFor makes such a change's ref its own event id, so filtering the event log
+// on correlation_ref alone returned nothing for every point change the read side serves.
+func TestListEventsFindsAPointChangesEvents(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	pointID := eventID(t, "point")
+	_, _, err := s.AppendEvent(ctx, mkEvent(tn, pointID, "k1", "", "config.changed", at))
+	require.NoError(t, err)
+	_, _, err = s.AppendEvent(ctx,
+		mkEvent(tn, eventID(t, "correlated"), "k2", "dep-9", "deployment.started", at))
+	require.NoError(t, err)
+
+	point, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn, Ref: pointID})
+	require.NoError(t, err)
+	require.Len(t, point, 1, "a point change's ref is its own event id, and must list that event")
+	assert.Equal(t, pointID, point[0].ID)
+
+	correlated, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn, Ref: "dep-9"})
+	require.NoError(t, err)
+	require.Len(t, correlated, 1, "a correlated ref must still list only its own events")
+	assert.Equal(t, "dep-9", correlated[0].CorrelationRef)
 }

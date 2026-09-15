@@ -107,12 +107,14 @@ func seedManyChanges(t *testing.T, s *postgres.Store, tn string, n int) {
 	batch := &pgx.Batch{}
 	for range n {
 		ref := fmt.Sprintf("bulk-%s-%s-%d", t.Name(), procToken, tenantSeq.Add(1))
+		// end_effective is omitted deliberately: Postgres generates it from end_at, and
+		// a generated column rejects any value an INSERT supplies for it.
 		batch.Queue(`
 			INSERT INTO change (tenant, ref, subject, type, title, actor, start_at,
-			                     end_at, end_effective, status, attributes, last_event_id)
-			VALUES ($1,$2,'acme/prod','deployment.started','','ci-bot',$3,NULL,$4,
+			                     end_at, status, attributes, last_event_id)
+			VALUES ($1,$2,'acme/prod','deployment.started','','ci-bot',$3,NULL,
 			        'in_progress','{}'::jsonb,'seed')`,
-			tn, ref, at, core.OpenSentinel)
+			tn, ref, at)
 	}
 	br := s.Pool().SendBatch(context.Background(), batch)
 	defer func() { require.NoError(t, br.Close()) }()

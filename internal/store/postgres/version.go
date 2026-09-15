@@ -8,7 +8,12 @@ import (
 // ExpectedSchemaVersion is the schema this build understands. Ingress and egress ship
 // as separate images and can therefore be deployed at different versions; each asserts
 // this at startup so a skewed rollout fails loudly instead of corrupting data quietly.
-const ExpectedSchemaVersion = 1
+//
+// Migrate derives the recorded version from the highest migration filename, so this
+// constant must be raised in the same change that adds a migration. It is deliberately
+// not read from the SQL: a daemon has to be able to refuse a schema newer than the one
+// its binary was built against.
+const ExpectedSchemaVersion = 2
 
 // SchemaVersion reads the version recorded by the migration.
 func (s *Store) SchemaVersion(ctx context.Context) (int, error) {

@@ -77,8 +77,13 @@ func Fold(cur *Change, ev Event) Change {
 	if out.Title == "" {
 		out.Title = ev.Type
 	}
-	if out.Start.IsZero() {
-		out.Start = ev.OccurredAt // fallback; a later .started overwrites it
+	// Spec §7: until the real start arrives, start falls back to the EARLIEST
+	// occurred_at seen for the ref, not the first one folded. The two differ when a
+	// later event carries an earlier timestamp, and keeping the earliest is also what
+	// makes the fallback insensitive to fold order, so a rebuild (id order) and a live
+	// append (arrival order) agree on it.
+	if out.Start.IsZero() || ev.OccurredAt.Before(out.Start) {
+		out.Start = ev.OccurredAt
 	}
 
 	switch {
@@ -96,6 +101,15 @@ func Fold(cur *Change, ev Event) Change {
 			at := ev.OccurredAt
 			out.End = &at
 			out.Status = status
+		} else if out.End == nil {
+			// A correlated event that neither starts nor ends the change —
+			// incident.declared, deployment.triggered, maintenance.scheduled,
+			// deployment.annotated. The spec's three shapes admit no fourth state, so
+			// this is in flight; leaving Status empty wrote a row that no status filter
+			// could ever select and that rendered as an interval growing to the year
+			// 9999. The End guard is why a late annotation cannot reopen a change that
+			// has already reached a terminal status.
+			out.Status = StatusInProgress
 		}
 	}
 

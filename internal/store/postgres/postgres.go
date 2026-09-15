@@ -10,10 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/yo61/horopter/internal/core"
 )
@@ -24,6 +26,24 @@ var migrationFS embed.FS
 // migrationLockKey is an arbitrary but fixed application id for pg_advisory_xact_lock.
 // Every process that migrates uses this same key, which is what serialises them.
 const migrationLockKey int64 = 8145209847321
+
+// uniqueViolation is the SQLSTATE Postgres raises for a unique constraint or unique
+// index violation. github.com/jackc/pgerrcode names every code, but it is a separate
+// module and this store needs exactly one of them.
+const uniqueViolation = "23505"
+
+// idemConstraint is the unique index enforcing one event per (tenant, idempotency_key).
+// A 23505 is matched against this name rather than against the error text, so a
+// different unique violation — a duplicate event id, say — is still reported as the
+// error it is instead of being mistaken for a retry.
+const idemConstraint = "uq_event_idem"
+
+// querier is the QueryRow subset that both pgx.Tx and *pgxpool.Pool provide, so
+// findByIdemKey can run either inside the append transaction or on the pool once a
+// unique violation has aborted that transaction.
+type querier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
 
 // Store is the PostgreSQL-backed event store.
 type Store struct{ pool *pgxpool.Pool }
@@ -67,8 +87,8 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 	return &Store{pool: pool}, nil
 }
 
-// Migrate applies every embedded migration inside one transaction, guarded by a
-// transaction-scoped advisory lock.
+// Migrate applies the embedded migrations a database has not seen yet, inside one
+// transaction, guarded by a transaction-scoped advisory lock.
 //
 // The lock is what makes this safe when several daemons start at once, as they do on
 // every rolling deploy: without it, concurrent CREATE INDEX statements race and can
@@ -81,6 +101,14 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 // transactional, so wrapping every migration statement in the same transaction is also
 // what makes a mid-file failure roll back cleanly instead of leaving a partially applied
 // schema.
+//
+// applied_migration is the ledger that makes "has not seen yet" meaningful. Without it
+// every file re-executes on every run, which happens to be harmless only while every
+// migration is written with IF NOT EXISTS; the first backfill UPDATE, RENAME COLUMN or
+// data transformation would either error on the second run or, in a system of record,
+// silently corrupt data by re-applying. A database migrated before the ledger existed
+// simply has an empty one: those files re-execute once, which is safe precisely because
+// they are the IF NOT EXISTS ones, and are recorded thereafter.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -91,18 +119,83 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, migrationLockKey); err != nil {
 		return fmt.Errorf("take migration advisory lock: %w", err)
 	}
+	if _, err := tx.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS applied_migration (
+		    filename   TEXT PRIMARY KEY,
+		    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`); err != nil {
+		return fmt.Errorf("create the applied_migration ledger: %w", err)
+	}
 
+	names, err := migrationNames()
+	if err != nil {
+		return err
+	}
+	if err := applyPendingMigrations(ctx, tx, names); err != nil {
+		return err
+	}
+	if err := recordSchemaVersion(ctx, tx, names[len(names)-1]); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit migration transaction: %w", err)
+	}
+	return nil
+}
+
+// migrationNames lists the embedded migration filenames in the order they must run.
+func migrationNames() ([]string, error) {
 	entries, err := migrationFS.ReadDir("migrations")
 	if err != nil {
-		return fmt.Errorf("read embedded migrations: %w", err)
+		return nil, fmt.Errorf("read embedded migrations: %w", err)
+	}
+	if len(entries) == 0 {
+		return nil, errors.New(
+			"no embedded migrations found; migrations/*.sql must ship inside the binary")
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
 		names = append(names, e.Name())
 	}
 	sort.Strings(names)
+	return names, nil
+}
+
+// readLedger returns the set of migration filenames the database has already applied.
+func readLedger(ctx context.Context, tx pgx.Tx) (map[string]bool, error) {
+	rows, err := tx.Query(ctx, `SELECT filename FROM applied_migration`)
+	if err != nil {
+		return nil, fmt.Errorf("read the applied_migration ledger: %w", err)
+	}
+	defer rows.Close()
+
+	applied := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan the applied_migration ledger: %w", err)
+		}
+		applied[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate the applied_migration ledger: %w", err)
+	}
+	return applied, nil
+}
+
+// applyPendingMigrations executes, in order, every named migration the ledger does not
+// already record, adding each to the ledger as it goes.
+func applyPendingMigrations(ctx context.Context, tx pgx.Tx, names []string) error {
+	applied, err := readLedger(ctx, tx)
+	if err != nil {
+		return err
+	}
 
 	for _, name := range names {
+		if applied[name] {
+			continue
+		}
 		stmt, err := migrationFS.ReadFile("migrations/" + name)
 		if err != nil {
 			return fmt.Errorf("read migration %q: %w", name, err)
@@ -110,12 +203,47 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		if _, err := tx.Exec(ctx, string(stmt)); err != nil {
 			return fmt.Errorf("apply migration %q: %w", name, err)
 		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit migration transaction: %w", err)
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO applied_migration (filename) VALUES ($1)`, name); err != nil {
+			return fmt.Errorf("record migration %q in the ledger: %w", name, err)
+		}
 	}
 	return nil
+}
+
+// recordSchemaVersion writes the version implied by the highest migration filename.
+//
+// Deriving it here is what stops it drifting: the version used to be a literal INSERT
+// inside 0001_init.sql, so adding a migration without editing that literal left the
+// database claiming a version the schema no longer matched, and nothing would have
+// noticed. ExpectedSchemaVersion stays a Go constant precisely so a daemon can assert
+// against this value and refuse to run on a schema it does not understand.
+func recordSchemaVersion(ctx context.Context, tx pgx.Tx, latest string) error {
+	v, err := schemaVersionFromFilename(latest)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO schema_version (version) VALUES ($1)
+		ON CONFLICT (singleton) DO UPDATE SET version = $1, applied_at = now()`, v); err != nil {
+		return fmt.Errorf("record schema version %d: %w", v, err)
+	}
+	return nil
+}
+
+// schemaVersionFromFilename reads the leading digits of a migration filename.
+func schemaVersionFromFilename(name string) (int, error) {
+	digits := name
+	if i := strings.IndexFunc(name, func(r rune) bool { return r < '0' || r > '9' }); i >= 0 {
+		digits = name[:i]
+	}
+	v, err := strconv.Atoi(digits)
+	if err != nil || v <= 0 {
+		return 0, fmt.Errorf(
+			"migration %q has no positive numeric prefix; name migrations "+
+				"NNNN_description.sql so the schema version can be derived from them", name)
+	}
+	return v, nil
 }
 
 // ChangeQuery selects changes overlapping a time window.
@@ -139,7 +267,9 @@ type EventQuery struct {
 // AppendEvent stores an event and folds it into the projection in one transaction.
 //
 // A duplicate idempotency key is not an error: CI retries are normal traffic, so the
-// stored event is returned with created=false.
+// stored event is returned with created=false. That holds whether the retry arrives
+// after the first attempt finished — the lookup below finds it — or while it is still
+// in flight, which lands on the unique index instead; see recoverConcurrentDuplicate.
 func (s *Store) AppendEvent(ctx context.Context, ev core.Event) (core.Event, bool, error) {
 	if err := ev.Validate(); err != nil {
 		return core.Event{}, false, err
@@ -170,6 +300,9 @@ func (s *Store) AppendEvent(ctx context.Context, ev core.Event) (core.Event, boo
 		if found {
 			return existing, false, tx.Commit(ctx)
 		}
+		if afterIdemLookupHook != nil {
+			afterIdemLookupHook()
+		}
 	}
 
 	var idem *string
@@ -185,6 +318,9 @@ func (s *Store) AppendEvent(ctx context.Context, ev core.Event) (core.Event, boo
 		ev.Subject, ev.Actor, ev.Title, ev.OccurredAt.UTC(), ev.ReceivedAt.UTC(),
 		ev.CorrelationRef, ev.Attributes,
 	); err != nil {
+		if isUniqueViolation(err, idemConstraint) {
+			return s.recoverConcurrentDuplicate(ctx, tx, ev)
+		}
 		return core.Event{}, false, fmt.Errorf("insert event %q: %w", ev.ID, err)
 	}
 
@@ -197,15 +333,54 @@ func (s *Store) AppendEvent(ctx context.Context, ev core.Event) (core.Event, boo
 	return ev, true, nil
 }
 
+// isUniqueViolation reports whether err is the Postgres unique violation raised by the
+// named constraint or unique index.
+func isUniqueViolation(err error, constraint string) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == uniqueViolation && pgErr.ConstraintName == constraint
+}
+
+// recoverConcurrentDuplicate returns the stored event after this caller lost a race for
+// an idempotency key, which is the same result the non-concurrent duplicate path gives.
+//
+// Two in-flight requests carrying the same (tenant, idempotency_key) — a CI retry firing
+// while the first attempt is still running — both find nothing at the check above and
+// both insert. The spec calls duplicates normal traffic, not an error condition, so the
+// loser must not surface 23505 to its caller.
+//
+// The lookup runs on the pool, not on tx: Postgres aborts a transaction on any error, so
+// no further statement can run on tx. That is also why the lookup is guaranteed to find
+// the row — the unique index made the losing INSERT wait on the winning transaction and
+// raise 23505 only once it had committed, so the winner's row is visible to the fresh
+// snapshot this read takes.
+func (s *Store) recoverConcurrentDuplicate(
+	ctx context.Context, tx pgx.Tx, ev core.Event,
+) (core.Event, bool, error) {
+	_ = tx.Rollback(ctx)
+
+	existing, found, err := findByIdemKey(ctx, s.pool, ev.Tenant, ev.IdempotencyKey)
+	if err != nil {
+		return core.Event{}, false, err
+	}
+	if !found {
+		return core.Event{}, false, fmt.Errorf(
+			"event %q: idempotency key %q/%q collided with a concurrent write but no "+
+				"stored event carries it; retry the append",
+			ev.ID, ev.Tenant, ev.IdempotencyKey)
+	}
+	return existing, false, nil
+}
+
 // findByIdemKey returns the previously stored event for (tenant, idempotencyKey), if any.
 func findByIdemKey(
-	ctx context.Context, tx pgx.Tx, tenantID, idempotencyKey string,
+	ctx context.Context, q querier, tenantID, idempotencyKey string,
 ) (core.Event, bool, error) {
 	var (
 		ev   core.Event
 		idem *string
 	)
-	err := tx.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		SELECT id, tenant, idempotency_key, schema_version, source, type, subject,
 		       actor, title, occurred_at, received_at, correlation_ref, attributes
 		FROM event WHERE tenant = $1 AND idempotency_key = $2`,
@@ -230,14 +405,22 @@ func findByIdemKey(
 // of dependent on machine timing.
 var afterLoadHook func()
 
-// applyToProjection folds one event onto its change, holding a row lock for the
-// duration of the read-modify-write.
-//
-// The lock is load-bearing: ingress runs with several replicas, and without it two
-// events for the same ref can be read, folded and written concurrently, with the
-// later write discarding the earlier event's contribution and raising no error.
+// afterIdemLookupHook is nil in production. Tests set it to widen the window between
+// the idempotency-key lookup and the event insert, making the concurrent-duplicate race
+// deterministic instead of dependent on machine timing.
+var afterIdemLookupHook func()
+
+// afterDeleteHook is nil in production. Tests set it to hold a rebuild open between its
+// DELETE and its re-insert, which is the window an append must not be able to enter.
+var afterDeleteHook func()
+
+// applyToProjection folds one event onto its change, under the advisory locks that make
+// the read-modify-write a critical section.
 func applyToProjection(ctx context.Context, tx pgx.Tx, ev core.Event) error {
 	ref := core.RefFor(ev)
+	if err := lockProjectionWrite(ctx, tx, ev.Tenant, ref); err != nil {
+		return err
+	}
 	cur, found, err := lockAndLoadChange(ctx, tx, ev.Tenant, ref)
 	if err != nil {
 		return err
@@ -252,9 +435,65 @@ func applyToProjection(ctx context.Context, tx pgx.Tx, ev core.Event) error {
 	return upsertChange(ctx, tx, core.Fold(prev, ev))
 }
 
-// lockAndLoadChange reads a change FOR UPDATE, serialising concurrent folds of the
-// same ref. Returns found=false when the row does not exist yet; the subsequent
-// INSERT ... ON CONFLICT then resolves the insert race.
+// lockProjectionWrite takes, in one round trip, the two advisory locks an append needs
+// before it may read and rewrite a change row.
+//
+// The per-ref exclusive lock is what makes the fold correct. SELECT ... FOR UPDATE can
+// only lock rows already visible to the transaction's snapshot, so when two transactions
+// append the first events for a NEW ref they both see nothing, both compute Fold(nil, ev)
+// and both run INSERT ... ON CONFLICT DO UPDATE; the second takes the DO UPDATE branch
+// with its own EXCLUDED values, Postgres does not re-run the Go-side fold, and the first
+// event's contribution is overwritten wholesale with no error raised. Locking the ref's
+// *identity* rather than a row that may not exist yet removes that whole class of bug.
+// The reasoning, and the alternatives rejected, are in
+// decisions/2026-09-15-projection-write-concurrency.md.
+//
+// The tenant-scoped SHARED lock is the other half of RebuildProjection's exclusion. A
+// rebuild deletes and re-inserts every row a tenant has, including refs no appender
+// currently holds, so per-ref locks alone cannot keep the two apart: a rebuild would
+// take no lock any appender waits on. Appenders share this lock with each other, so
+// two appends to different refs still never contend on it; only a rebuild, which takes
+// it exclusively, waits for them and makes them wait for it.
+//
+// pg_advisory_xact_lock, rather than pg_advisory_lock, matches Migrate and for the same
+// reason: Postgres releases it when the transaction commits or rolls back, so there is
+// no manual unlock call a cancelled context or a swallowed error can skip, leaving the
+// lock held by a connection quietly returned to the pool.
+//
+// hashtext is 32-bit, so two unrelated refs can collide and briefly serialise against
+// each other. That costs throughput, never correctness.
+func lockProjectionWrite(ctx context.Context, tx pgx.Tx, tenantID, ref string) error {
+	if _, err := tx.Exec(ctx, `
+		SELECT pg_advisory_xact_lock_shared(hashtext($1)),
+		       pg_advisory_xact_lock(hashtext($1 || '/' || $2))`,
+		tenantID, ref); err != nil {
+		return fmt.Errorf(
+			"take projection lock for %q/%q: %w; nothing was written, so the append "+
+				"can be retried", tenantID, ref, err)
+	}
+	return nil
+}
+
+// lockRebuildWrite takes the tenant-scoped advisory lock exclusively, excluding every
+// append for that tenant — see lockProjectionWrite for why the granularity is the tenant
+// and not the ref.
+func lockRebuildWrite(ctx context.Context, tx pgx.Tx, tenantID string) error {
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext($1))`, tenantID); err != nil {
+		return fmt.Errorf(
+			"take rebuild lock for tenant %q: %w; nothing was written, so the rebuild "+
+				"can be retried", tenantID, err)
+	}
+	return nil
+}
+
+// lockAndLoadChange reads a change FOR UPDATE and reports found=false when the row does
+// not exist yet.
+//
+// The advisory lock taken in lockProjectionWrite is what serialises the fold; FOR UPDATE
+// alone cannot, because it can only lock a row the transaction can already see. It is
+// kept as the row-level guard against a writer that has not taken the advisory lock —
+// that lock is a convention this package must keep, not something the schema enforces.
 func lockAndLoadChange(
 	ctx context.Context, tx pgx.Tx, tenantID, ref string,
 ) (core.Change, bool, error) {
@@ -281,19 +520,21 @@ func lockAndLoadChange(
 	return c, true, nil
 }
 
+// upsertChange writes a folded change. end_effective is absent from the column list
+// because Postgres generates it from end_at (migration 0002): it is the overlap index's
+// key, and one writer of it cannot drift from another.
 func upsertChange(ctx context.Context, tx pgx.Tx, c core.Change) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO change (tenant, ref, subject, type, title, actor, start_at, end_at,
-		                    end_effective, status, attributes, last_event_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		                    status, attributes, last_event_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		ON CONFLICT (tenant, ref) DO UPDATE SET
 		  subject=EXCLUDED.subject, type=EXCLUDED.type, title=EXCLUDED.title,
 		  actor=EXCLUDED.actor, start_at=EXCLUDED.start_at, end_at=EXCLUDED.end_at,
-		  end_effective=EXCLUDED.end_effective, status=EXCLUDED.status,
-		  attributes=EXCLUDED.attributes, last_event_id=EXCLUDED.last_event_id`,
+		  status=EXCLUDED.status, attributes=EXCLUDED.attributes,
+		  last_event_id=EXCLUDED.last_event_id`,
 		c.Tenant, c.Ref, c.Subject, c.Type, c.Title, c.Actor,
-		c.Start.UTC(), c.End, c.EndEffective().UTC(), string(c.Status),
-		c.Attributes, c.LastEventID,
+		c.Start.UTC(), c.End, string(c.Status), c.Attributes, c.LastEventID,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert change %q/%q: %w", c.Tenant, c.Ref, err)
@@ -301,8 +542,16 @@ func upsertChange(ctx context.Context, tx pgx.Tx, c core.Change) error {
 	return nil
 }
 
-// ListEvents selects raw events for a tenant, optionally scoped to one correlation
-// ref, ordered by id ascending (which is chronological, since ids are ULIDs).
+// ListEvents selects raw events for a tenant, optionally scoped to one change's ref,
+// ordered by id ascending (which is chronological, since ids are ULIDs).
+//
+// q.Ref is a projection ref, matched the way core.RefFor forms one: a correlated
+// event's correlation_ref, or an uncorrelated event's own id. Filtering on
+// correlation_ref alone made listing a point change's events always return nothing,
+// even though that change is in every query result the egress read side serves. The id
+// arm is restricted to rows with no correlation_ref so it can only ever match the point
+// that owns the ref, never an unrelated event whose id happens to equal some other
+// change's correlation_ref.
 func (s *Store) ListEvents(ctx context.Context, q EventQuery) ([]core.Event, error) {
 	query := `
 		SELECT id, tenant, idempotency_key, schema_version, source, type, subject,
@@ -312,7 +561,9 @@ func (s *Store) ListEvents(ctx context.Context, q EventQuery) ([]core.Event, err
 
 	if q.Ref != "" {
 		args = append(args, q.Ref)
-		query += fmt.Sprintf(" AND correlation_ref = $%d", len(args))
+		query += fmt.Sprintf(
+			" AND (correlation_ref = $%d OR (correlation_ref = '' AND id = $%d))",
+			len(args), len(args))
 	}
 	query += " ORDER BY id ASC"
 	if q.Limit != 0 {
@@ -408,12 +659,27 @@ func (s *Store) QueryChanges(ctx context.Context, q ChangeQuery) ([]core.Change,
 }
 
 // RebuildProjection discards a tenant's projection and replays its event log in ULID
-// order.
+// order, holding the tenant's advisory lock exclusively so no append can interleave
+// with the delete-and-reinsert.
 //
-// Because Fold is pure and ids are time-sortable, this reproduces the projection
-// exactly — which is what makes the read side safe to evolve. Note the accumulator
-// passes a nil *Change for the first event of each ref, matching how AppendEvent
-// applies events incrementally; Fold is written so both spellings converge.
+// Without that lock an appender blocked on a row this transaction deleted re-checks,
+// finds nothing, folds from nil and overwrites the rebuilt row — the same lost-update
+// mechanism the per-ref lock exists to stop. A per-ref lock is the wrong granularity
+// here because a rebuild touches refs no appender is holding, including refs that do
+// not exist yet; see lockProjectionWrite for how the two locks compose.
+//
+// What it reproduces is the id-ordered fold, which is not always the projection
+// production holds. Live appends fold in ARRIVAL order, and core.NewULID draws entropy
+// from crypto/rand rather than ulid.MonotonicEntropy, so two ids minted in the same
+// millisecond do not sort by generation order. Two same-ref events inside one
+// millisecond can therefore rebuild to a different Title, Type, Actor, attribute set or
+// LastEventID than the one live folding produced. Every event is still folded in, and
+// the rebuild is still deterministic — replaying the same log again gives the same
+// answer — but "reproduces the projection exactly" is only true up to that ordering.
+//
+// Note the accumulator passes a nil *Change for the first event of each ref, matching
+// how AppendEvent applies events incrementally; Fold is written so both spellings
+// converge.
 func (s *Store) RebuildProjection(ctx context.Context, tenantID string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -421,8 +687,14 @@ func (s *Store) RebuildProjection(ctx context.Context, tenantID string) error {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if err := lockRebuildWrite(ctx, tx, tenantID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM change WHERE tenant = $1`, tenantID); err != nil {
 		return fmt.Errorf("clear projection for tenant %q: %w", tenantID, err)
+	}
+	if afterDeleteHook != nil {
+		afterDeleteHook()
 	}
 
 	rows, err := tx.Query(ctx, `

@@ -222,3 +222,58 @@ func TestStatusForTypeTerminalVocabulary(t *testing.T) {
 		})
 	}
 }
+
+// F6: a correlated event that is neither a start nor a terminal type must still leave a
+// queryable status. Before this, neither branch fired and Status stayed "", which wrote
+// a row QueryChanges could not select (it reads an empty Status as "no filter") and
+// which, with End nil, rendered as an interval growing to the year 9999. The spec's
+// three shapes admit no fourth state, so such an event means "in flight".
+func TestFoldCorrelatedNonTerminalIsInProgress(t *testing.T) {
+	for _, typ := range []string{
+		"incident.declared",
+		"deployment.triggered",
+		"maintenance.scheduled",
+		"deployment.annotated",
+	} {
+		t.Run(typ, func(t *testing.T) {
+			c := core.Fold(nil, ev("01A", "dep-7", typ, t10))
+			assert.Equal(t, core.StatusInProgress, c.Status,
+				"a correlated non-terminal event must leave a queryable status")
+			assert.True(t, c.IsOpen(), "it ends nothing, so the change stays open")
+			assert.Equal(t, t10, c.Start)
+		})
+	}
+}
+
+// F7: the in-progress default must not reopen a change that already reached a terminal
+// status. A late annotation on a finished deployment is ordinary traffic, and rewriting
+// its outcome to in_progress while End stays set would be a worse corruption than the
+// empty status it replaced.
+func TestFoldNonTerminalAfterTerminalKeepsTheOutcome(t *testing.T) {
+	c := core.Fold(nil, ev("01A", "dep-7", "deployment.started", t10))
+	c = core.Fold(&c, ev("01B", "dep-7", "deployment.completed", t20))
+	c = core.Fold(&c, ev("01C", "dep-7", "deployment.annotated", t30))
+
+	assert.Equal(t, core.StatusCompleted, c.Status,
+		"a later annotation must not reopen a completed change")
+	require.NotNil(t, c.End)
+	assert.Equal(t, t20, *c.End, "the recorded end must survive the annotation")
+}
+
+// F8: spec §7 says start falls back to the EARLIEST occurred_at seen for the ref. The
+// implementation used to keep the FIRST FOLDED one, which differs precisely when a
+// later non-start, non-terminal event carries an earlier timestamp — the case below.
+func TestFoldStartFallsBackToTheEarliestOccurredAt(t *testing.T) {
+	c := core.Fold(nil, ev("01B", "dep-7", "deployment.completed", t20))
+	require.Equal(t, t20, c.Start, "precondition: the only event so far sets the fallback")
+
+	c = core.Fold(&c, ev("01A", "dep-7", "deployment.annotated", t10))
+	assert.Equal(t, t10, c.Start,
+		"a later event with an earlier occurred_at must lower the fallback start")
+	require.NotNil(t, c.End)
+	assert.Equal(t, t20, *c.End, "the recorded end must survive")
+
+	// A real start still wins outright, even when it is later than the fallback.
+	c = core.Fold(&c, ev("01C", "dep-7", "deployment.started", t30))
+	assert.Equal(t, t30, c.Start, "the real start must overwrite the fallback, not be min'd with it")
+}

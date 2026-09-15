@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -87,4 +88,61 @@ func TestRebuildIsTenantScoped(t *testing.T) {
 	assert.True(t, got[0].Start.Equal(at),
 		"other's change must keep its own Start, not tn's earlier same-ref event's — "+
 			"a leaked cross-tenant read would merge them under one accumulator key")
+}
+
+// TestRebuildDoesNotLoseConcurrentAppends is the reason RebuildProjection takes the
+// tenant's advisory lock exclusively and applyToProjection takes it shared.
+//
+// The rebuild's DELETE and the appender's read are the dangerous pair. An appender that
+// blocks on a row the rebuild has deleted re-checks after the rebuild commits, finds
+// nothing — the rebuilt row is not in its snapshot — folds from nil and overwrites the
+// rebuilt row, destroying every earlier event's contribution. It is the same lost-update
+// mechanism as TestConcurrentAppendsToSameRefDoNotLoseUpdates, reached from the other
+// side. A per-ref lock cannot prevent it: a rebuild touches refs no appender holds, so
+// there is no per-ref lock for it to contend on.
+//
+// afterDeleteHook makes the ordering exact rather than probable: it releases the
+// appender only once the DELETE has run, so the append provably starts inside the
+// window, and then holds the rebuild there long enough for the append to reach its lock.
+// Like afterLoadHook it must be a sleep, not a rendezvous — with the fix in place the
+// appender cannot get past the tenant lock until the rebuild commits, so a hook that
+// waited for it would deadlock in exactly the case that must pass.
+func TestRebuildDoesNotLoseConcurrentAppends(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	seeded := mkEvent(tn, eventID(t, "seed"), "k0", "dep-7", "deployment.started", at)
+	seeded.Attributes = map[string]any{"attr.seeded": "set"}
+	_, _, err := s.AppendEvent(ctx, seeded)
+	require.NoError(t, err)
+
+	released := make(chan struct{})
+	var once sync.Once
+	postgres.SetAfterDeleteHook(func() {
+		once.Do(func() { close(released) })
+		time.Sleep(projectionWriteDelay)
+	})
+	t.Cleanup(func() { postgres.SetAfterDeleteHook(nil) })
+
+	appended := make(chan error, 1)
+	go func() {
+		<-released
+		ev := mkEvent(tn, eventID(t, "concurrent"), "k1", "dep-7", "deployment.annotated",
+			at.Add(time.Minute))
+		ev.Attributes = map[string]any{"attr.concurrent": "set"}
+		_, _, err := s.AppendEvent(ctx, ev)
+		appended <- err
+	}()
+
+	require.NoError(t, s.RebuildProjection(ctx, tn))
+	require.NoError(t, <-appended)
+
+	var attrs map[string]any
+	err = s.Pool().QueryRow(ctx,
+		`SELECT attributes FROM change WHERE tenant = $1 AND ref = $2`, tn, "dep-7").Scan(&attrs)
+	require.NoError(t, err)
+	assert.Contains(t, attrs, "attr.seeded",
+		"the rebuilt row's contents must survive the concurrent append; losing them means "+
+			"the append folded from nil over the rebuild")
+	assert.Contains(t, attrs, "attr.concurrent", "the concurrent append must survive too")
 }
