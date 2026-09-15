@@ -34,16 +34,31 @@ func (s *Store) Pool() *pgxpool.Pool { return s.pool }
 // Close releases the pool.
 func (s *Store) Close() { s.pool.Close() }
 
-// Open connects to dsn and applies all migrations.
-func Open(ctx context.Context, dsn string) (*Store, error) {
+// connect opens a pool for dsn and confirms it is reachable, closing the pool again if
+// the ping fails. Open and OpenNoMigrate both need exactly this sequence before they
+// diverge, so it lives here once rather than as two copies that a later change (a
+// timeout, a retry, a pool setting) could silently update on only one path.
+//
+// connectErrHint is the caller-specific, operator-facing suggestion appended to a
+// connect failure; the ping failure message is identical for both callers, so it is
+// not parameterised.
+func connect(ctx context.Context, dsn, connectErrHint string) (*pgxpool.Pool, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
-		return nil, fmt.Errorf("connect to postgres: %w; check the dsn is a valid "+
-			"postgres connection string", err)
+		return nil, fmt.Errorf("connect to postgres: %w; %s", err, connectErrHint)
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("ping postgres: %w; is the database reachable?", err)
+	}
+	return pool, nil
+}
+
+// Open connects to dsn and applies all migrations.
+func Open(ctx context.Context, dsn string) (*Store, error) {
+	pool, err := connect(ctx, dsn, "check the dsn is a valid postgres connection string")
+	if err != nil {
+		return nil, err
 	}
 	if err := Migrate(ctx, pool); err != nil {
 		pool.Close()

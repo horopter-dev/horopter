@@ -55,6 +55,8 @@ func TestValidateRejectsMissingFields(t *testing.T) {
 }
 
 func TestNewULIDIsSortableByTime(t *testing.T) {
+	//nolint:gosec // G404: the fixed seed is what makes this determinism test deterministic;
+	// crypto/rand would defeat the assertion. Test-only, never reached by production code.
 	src := rand.New(rand.NewSource(1))
 	early := core.NewULID(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), src)
 	late := core.NewULID(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC), src)

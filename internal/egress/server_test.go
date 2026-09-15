@@ -90,7 +90,7 @@ func seedManyEvents(t *testing.T, s *postgres.Store, tn string, n int) {
 			id, tn, id, at)
 	}
 	br := s.Pool().SendBatch(context.Background(), batch)
-	defer br.Close()
+	defer func() { require.NoError(t, br.Close()) }()
 	for range n {
 		_, err := br.Exec()
 		require.NoError(t, err)
@@ -115,7 +115,7 @@ func seedManyChanges(t *testing.T, s *postgres.Store, tn string, n int) {
 			tn, ref, at, core.OpenSentinel)
 	}
 	br := s.Pool().SendBatch(context.Background(), batch)
-	defer br.Close()
+	defer func() { require.NoError(t, br.Close()) }()
 	for range n {
 		_, err := br.Exec()
 		require.NoError(t, err)

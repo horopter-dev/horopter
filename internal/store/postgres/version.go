@@ -3,8 +3,6 @@ package postgres
 import (
 	"context"
 	"fmt"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ExpectedSchemaVersion is the schema this build understands. Ingress and egress ship
@@ -39,13 +37,9 @@ func (s *Store) AssertSchemaVersion(ctx context.Context) error {
 // OpenNoMigrate connects without applying migrations, for daemons that must not
 // migrate. Only horopter-migrate changes the schema.
 func OpenNoMigrate(ctx context.Context, dsn string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := connect(ctx, dsn, "check DATABASE_URL")
 	if err != nil {
-		return nil, fmt.Errorf("connect to postgres: %w; check DATABASE_URL", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("ping postgres: %w; is the database reachable?", err)
+		return nil, err
 	}
 	return &Store{pool: pool}, nil
 }

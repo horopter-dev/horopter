@@ -5,6 +5,11 @@ import "time"
 // Status is the lifecycle state of a change.
 type Status string
 
+// The Status values are the lifecycle a change can pass through. StatusOccurred marks
+// an instantaneous change with no correlation ref (a point, never an interval).
+// StatusInProgress, StatusCompleted, StatusFailed, StatusRolledBack and StatusCancelled
+// are the possible outcomes of a correlated change that has a start and, once one of
+// the terminal statuses is folded in, an end.
 const (
 	StatusOccurred   Status = "occurred"
 	StatusInProgress Status = "in_progress"
