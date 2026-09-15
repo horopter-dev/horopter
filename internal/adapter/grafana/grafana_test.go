@@ -84,6 +84,39 @@ func TestRenderGoldenJSON(t *testing.T) {
 	}]`, string(b))
 }
 
+// TestTextForReadsNamespacedDescriptionOnly is C4's guard: it pins that
+// horopter.description populates the annotation body, and that an
+// unnamespaced "description" attribute — the invented, unnamespaced key the
+// spec's attribute vocabulary does not define — no longer does, even when
+// both are present on the same change.
+func TestTextForReadsNamespacedDescriptionOnly(t *testing.T) {
+	out, err := grafana.New().Render([]core.Change{{
+		Ref: "dep-11", Start: start, End: &start, Status: core.StatusOccurred,
+		Attributes: map[string]any{
+			"description":          "unnamespaced, must be ignored",
+			"horopter.description": "namespaced, must populate the annotation",
+		},
+	}}, now)
+	require.NoError(t, err)
+
+	anns := out.([]grafana.Annotation)
+	assert.Equal(t, "namespaced, must populate the annotation", anns[0].Text)
+}
+
+// TestTextForIsEmptyWithoutNamespacedDescription is the other half of the
+// same guard: a bare "description" attribute, with no namespaced sibling,
+// must render an empty annotation body rather than leaking into it.
+func TestTextForIsEmptyWithoutNamespacedDescription(t *testing.T) {
+	out, err := grafana.New().Render([]core.Change{{
+		Ref: "dep-12", Start: start, End: &start, Status: core.StatusOccurred,
+		Attributes: map[string]any{"description": "must not leak into text"},
+	}}, now)
+	require.NoError(t, err)
+
+	anns := out.([]grafana.Annotation)
+	assert.Empty(t, anns[0].Text)
+}
+
 // Render(nil, now) must marshal to a JSON array, never null: Grafana's
 // JSON-datasource contract expects an array, and a bare null can break panels.
 func TestRenderNilChangesMarshalsToEmptyArray(t *testing.T) {

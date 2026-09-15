@@ -70,8 +70,23 @@ func tagsFor(c core.Change) []string {
 	return tags
 }
 
+// textFor returns the annotation body text.
+//
+// horopter.description is a Horopter extension, not an OTel semantic
+// convention — no spec vocabulary names an annotation-body concept. It is
+// namespaced under "horopter." the same way otlp.Render's horopter.subject,
+// horopter.ref and horopter.status are (internal/adapter/otlp), which is what
+// keeps a project-specific extension point consistent with "attribute keys
+// follow OTel semantic conventions rather than an invented vocabulary": the
+// vocabulary itself stays OTel-only, and this is a clearly namespaced
+// addition layered on it, not a second invented vocabulary competing with it.
+//
+// Reading a bare, unnamespaced "description" previously captured whatever
+// attribute a producer happened to give that name into the annotation body as
+// a side effect nobody asked for. A producer that wants annotation body text
+// now sets horopter.description explicitly.
 func textFor(c core.Change) string {
-	if v, ok := c.Attributes["description"]; ok {
+	if v, ok := c.Attributes["horopter.description"]; ok {
 		return fmt.Sprintf("%v", v)
 	}
 	return ""
