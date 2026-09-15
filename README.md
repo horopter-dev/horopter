@@ -58,6 +58,21 @@ read side. If you deploy this anywhere it is reachable by anyone you would not t
 the full change log, put a network boundary or a reverse proxy with its own
 authentication in front of port 8081 — Horopter provides neither.
 
+**`docker-compose.yml` also publishes Postgres itself (5432) on the host, with the
+username and password both `horopter`.** That is direct read and write access to the
+event log, past every check either daemon makes, for anyone who can reach the port. The
+compose file is a local development stack and nothing else: do not run it anywhere its
+ports are reachable from outside the machine, and do not reuse its credentials.
+
+### Container health checks
+
+The images carry no `HEALTHCHECK`, and will not. They are built `FROM
+gcr.io/distroless/static-debian12`, which has no shell, no `curl` and no `wget`, so a
+`HEALTHCHECK` would have to be a probe subcommand compiled into each binary — new
+surface on the write daemon to duplicate a check an orchestrator already makes against
+`/readyz` over the network. Point your orchestrator's liveness probe at `/healthz` and
+its readiness probe at `/readyz`.
+
 ## Upgrading
 
 `horopter-migrate` is the only binary permitted to apply schema DDL. Run it to completion
@@ -84,6 +99,20 @@ exactly what the previous model destroyed. The migration records `first_seen_at 
 and `started_at = NULL`, meaning "we do not know". A rebuild is what replaces that with the
 real values from the event log.
 
+**A rebuild can change a change's recorded outcome.** It replays the log in event-id
+order, while live appends folded it in commit order, and the two differ whenever a
+same-ref event committed before another that carries a lower id. That needs no unusual
+timing: an id is minted on the ingress replica that received the request, before its
+append starts, so with more than one replica the window is the clock skew between them,
+and even with one replica an append that minted a lower id can lose the race for the
+per-ref lock. Every field whose rule is "last event wins" — `status`, `end`,
+`last_event_id`, `type`, `title`, `actor`, `subject` and attributes — can come back
+different; a `deployment.completed` and a `deployment.failed` on one ref can swap. `start`,
+`started_at` and `first_seen_at` cannot: they are minima, so replay order does not reach
+them. Rebuilding twice gives the same answer both times — it is the live projection the
+replay may disagree with, not itself. If a change's outcome matters to you, read `GET
+/v1/events?ref=<ref>` (the log is immutable and is never reordered) before and after.
+
 ### v0.1 pre-release: the CloudEvents idempotency key format changed
 
 The key `POST /v1/events/cloudevents` dedupes on was the CloudEvents `id` alone. It is now
@@ -100,6 +129,28 @@ For v0.1 pre-release, with no production data, that is accepted rather than work
 If you are carrying data you care about, quiesce producers across the upgrade, or accept
 and later reconcile the duplicates. `POST /v1/events` is unaffected — its `idempotency_key`
 is supplied by the caller verbatim.
+
+## Truncated responses
+
+Every read endpoint caps its result set at 1000 rows. When rows were discarded, the
+response carries **`X-Horopter-Truncated: true`**; when nothing was discarded the header
+is absent entirely. All five read routes set it:
+
+- `GET /v1/changes`
+- `GET /v1/events`
+- `GET /adapters/grafana/annotations` and `POST /adapters/grafana/annotations`
+  (including the `/adapters/grafana/{tenant}/annotations` variant)
+- `GET /adapters/otlp/spans`
+
+Act on it. Changes are returned oldest first, so truncation discards the **most recent**
+rows — during an incident, exactly the ones being looked for — and a truncated response
+is otherwise indistinguishable from a complete one. Narrow the time window, or filter by
+`subject`, `type` or `status`, and repeat the query until the header is gone. A `limit`
+query parameter below 1000 asks for fewer rows; it cannot raise the cap.
+
+The signal is a header rather than a field in the body because two of these routes render
+vendor-owned shapes — Grafana annotations and OTLP spans — that cannot carry a Horopter
+envelope.
 
 ## Attributes
 

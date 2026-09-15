@@ -74,6 +74,17 @@ func (s *Server) postCloudEvent(w http.ResponseWriter, r *http.Request) {
 //
 // A NUL separator would be injective too and is deliberately not used: PostgreSQL TEXT
 // cannot store 0x00, so such a key would fail at the INSERT rather than dedupe anything.
+//
+// The key SHARES one namespace with POST /v1/events, whose idempotency_key is whatever
+// the caller sent, verbatim. Both land in the same event.idempotency_key column under the
+// same uq_event_idem index, so a native caller who sends exactly "24:/buildkite/pipelines/
+// api/build-7" collides with the CloudEvent that derives that string, and one of the two
+// events is answered 200 {"created": false} without being stored. This is known and
+// accepted for v0.1 rather than fixed: closing it means prefixing the namespaces, and the
+// stored key is caller-visible — eventsToJSON emits idempotency_key — so a native caller
+// sending "abc" would read back "n:abc". A visible API wart, or strip-on-read complexity,
+// in exchange for a collision that a caller has to construct our internal encoding by
+// hand to reach.
 func idempotencyKey(source, id string) string {
 	return strconv.Itoa(len(source)) + ":" + source + "/" + id
 }
