@@ -63,6 +63,16 @@ func (c Change) IsOpen() bool { return c.End == nil }
 // same-second start/complete pair, common in backfills and idempotent
 // producers), so IsPoint also requires StatusOccurred, which only the
 // no-correlation-ref path ever sets.
+//
+// Unlike IsOpen it has no production caller, and that is deliberate rather
+// than an oversight waiting to be tidied away. Neither render adapter needs
+// to branch on point-ness: a point's End equals its Start, so it already
+// renders as a zero-duration span and a Grafana annotation whose timeEnd
+// equals its time, without either adapter asking. What IsPoint carries is the
+// rule above — that the third of spec §5.3's three shapes is identified by
+// status and not by timestamp equality — which nothing else in this package
+// states and which core.Fold's tests assert through this method. Deleting it
+// would delete the rule, not just an unused function.
 func (c Change) IsPoint() bool {
 	return c.Status == StatusOccurred && c.End != nil && c.End.Equal(c.Start)
 }
