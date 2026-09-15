@@ -81,6 +81,21 @@ If you are carrying data you care about, quiesce producers across the upgrade, o
 and later reconcile the duplicates. `POST /v1/events` is unaffected — its `idempotency_key`
 is supplied by the caller verbatim.
 
+## Attributes
+
+Attribute keys follow OpenTelemetry semantic conventions rather than an invented
+vocabulary — see `docs/superpowers/specs/2026-09-14-horopter-design.md` §5.4 for the
+`service.*`, `deployment.*`, `cicd.*` and `cloudevents.*` keys every producer should aim
+for.
+
+One key is a Horopter-specific extension, not an OTel convention, because nothing in
+that vocabulary covers it: **`horopter.description`**. The Grafana annotations adapter
+(`GET`/`POST /adapters/grafana/annotations`) reads it as the annotation body text. It is
+namespaced under `horopter.` the same way the OTLP adapter's own `horopter.subject`,
+`horopter.ref` and `horopter.status` attributes are, to keep it distinct from a
+producer's own attributes — a bare, unnamespaced `description` attribute is not read for
+this purpose.
+
 ## Licence
 
 TBD
