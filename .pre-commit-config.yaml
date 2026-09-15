@@ -21,7 +21,7 @@ repos:
         stages: [pre-commit]
       - id: go-fmt
         name: gofmt
-        entry: bash -c 'f=$(gofmt -l .); if [ -n "$f" ]; then echo "gofmt needed:"; echo "$f"; exit 1; fi'
+        entry: task fmt
         language: system
         pass_filenames: false
         stages: [pre-commit]
