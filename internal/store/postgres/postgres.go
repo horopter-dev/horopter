@@ -138,8 +138,17 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 // migration is written with IF NOT EXISTS; the first backfill UPDATE, RENAME COLUMN or
 // data transformation would either error on the second run or, in a system of record,
 // silently corrupt data by re-applying. A database migrated before the ledger existed
-// simply has an empty one: those files re-execute once, which is safe precisely because
-// they are the IF NOT EXISTS ones, and are recorded thereafter.
+// simply has an empty one, so every file re-executes once and is recorded thereafter.
+//
+// That recovery is safe for 0001 alone, and only because every statement in it is written
+// IF NOT EXISTS. 0001 is also the only file that predates the ledger — 0002 shipped in the
+// same commit as applied_migration, so no database has ever held 0002 without a ledger
+// row for it. Neither 0002 nor 0003 is idempotent: 0002's ADD CONSTRAINT
+// change_status_vocabulary fails outright on a second run, which is what
+// TestMigrationLedgerAppliesEachFileOnce demonstrates. So restoring a backup taken before
+// the ledger, or dropping applied_migration to "start again", produces a database whose
+// migration cannot start: the operator has to insert a row for every file the schema
+// already carries before running this again, not let them replay.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -344,6 +353,13 @@ func trimToLimit[T any](rows []T, limit int) ([]T, bool) {
 // stored event is returned with created=false. That holds whether the retry arrives
 // after the first attempt finished — the lookup below finds it — or while it is still
 // in flight, which lands on the unique index instead; see recoverConcurrentDuplicate.
+//
+// lock_timeout is set as the transaction's FIRST statement, before anything that can
+// wait. It used to be set inside lockProjectionWrite, which an append only reaches after
+// insertEvent — so the INSERT's wait on uq_event_idem's speculative-insertion lock was
+// unbounded, held only by the winning transaction's own lifetime. That is precisely the
+// pinned-pool-connection hazard AppendLockTimeout exists to prevent, on the one statement
+// it did not cover.
 func (s *Store) AppendEvent(ctx context.Context, ev core.Event) (core.Event, bool, error) {
 	ev, err := prepareEvent(ev)
 	if err != nil {
@@ -355,6 +371,10 @@ func (s *Store) AppendEvent(ctx context.Context, ev core.Event) (core.Event, boo
 		return core.Event{}, false, fmt.Errorf("begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := setLockTimeout(ctx, tx, AppendLockTimeout, "append"); err != nil {
+		return core.Event{}, false, err
+	}
 
 	existing, found, err := findExistingDuplicate(ctx, tx, ev)
 	if err != nil {
@@ -477,9 +497,12 @@ func isLockTimeout(err error) bool {
 // how the Go constant stays the single source of truth for the value. lock_timeout reads a
 // bare number as milliseconds.
 //
-// The bound covers everything the transaction does after this call, not just the advisory
-// locks that follow it: the row-level FOR UPDATE and the change upsert are waits on
-// another transaction too, and pinning a connection on either is the same hazard.
+// The bound covers everything the transaction does after this call and nothing before it,
+// which is why both callers issue it as their transaction's first statement rather than
+// alongside the advisory locks. The event INSERT waits on uq_event_idem's
+// speculative-insertion lock, the row-level FOR UPDATE and the change upsert wait on
+// another transaction, and the advisory locks wait on whoever holds them: pinning a pool
+// connection on any of them is the same hazard, so the bound has to precede all of them.
 func setLockTimeout(ctx context.Context, tx pgx.Tx, d time.Duration, what string) error {
 	if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true)`,
 		strconv.FormatInt(d.Milliseconds(), 10)); err != nil {
@@ -610,13 +633,12 @@ func applyToProjection(ctx context.Context, tx pgx.Tx, ev core.Event) error {
 // hashtext is 32-bit, so two unrelated refs can collide and briefly serialise against
 // each other. That costs throughput, never correctness.
 //
-// The wait is bounded first, by AppendLockTimeout: a rebuild holds the tenant lock
+// The wait here is bounded by AppendLockTimeout — a rebuild holds the tenant lock
 // exclusively for its whole duration, and an unbounded wait behind it pins a pool
-// connection that other tenants need. See AppendLockTimeout for the reasoning.
+// connection that other tenants need — but this function does not set that bound.
+// AppendEvent does, as its transaction's first statement, so it covers the event INSERT
+// as well as these locks. See AppendLockTimeout for the reasoning.
 func lockProjectionWrite(ctx context.Context, tx pgx.Tx, tenantID, ref string) error {
-	if err := setLockTimeout(ctx, tx, AppendLockTimeout, "append"); err != nil {
-		return err
-	}
 	if _, err := tx.Exec(ctx, `
 		SELECT pg_advisory_xact_lock_shared(hashtext($1)),
 		       pg_advisory_xact_lock(hashtext($1 || '/' || $2))`,
@@ -644,6 +666,11 @@ func lockProjectionWrite(ctx context.Context, tx pgx.Tx, tenantID, ref string) e
 // The wait is bounded by RebuildLockTimeout so a rebuild that cannot get the lock promptly
 // gives up and says so, rather than queueing behind a stream of appends while holding a
 // connection of its own.
+//
+// Setting that bound is still the FIRST thing the rebuild transaction does, because this
+// call is RebuildProjection's first statement after Begin — the property AppendEvent had
+// to hoist setLockTimeout out of lockProjectionWrite to obtain, and which a rebuild
+// already had. Nothing may be added to RebuildProjection above this call.
 func lockRebuildWrite(ctx context.Context, tx pgx.Tx, tenantID string) error {
 	if err := setLockTimeout(ctx, tx, RebuildLockTimeout, "rebuild"); err != nil {
 		return err
@@ -899,16 +926,40 @@ func scanChanges(rows pgx.Rows) ([]core.Change, error) {
 // not exist yet; see lockProjectionWrite for how the two locks compose.
 //
 // What it reproduces is the id-ordered fold, which is not always the projection
-// production holds. Live appends fold in ARRIVAL order, and core.NewULID draws entropy
-// from crypto/rand rather than ulid.MonotonicEntropy, so two ids minted in the same
-// millisecond do not sort by generation order. Two same-ref events inside one
-// millisecond can therefore rebuild to a different Subject, Type, Title, Actor,
-// attribute set, LastEventID, End or Status than the one live folding produced — every
-// field whose rule is "the last event folded wins". Start, StartedAt and FirstSeenAt are
-// NOT in that set: both start facts are minima (migration 0003, core.Fold), so they are
-// commutative and the two orders agree on them. Every event is still folded in, and the
-// rebuild is still deterministic — replaying the same log again gives the same answer —
-// but "reproduces the projection exactly" is only true up to that ordering.
+// production holds. Live appends fold in COMMIT order — the order in which append
+// transactions take the per-ref advisory lock — and a rebuild folds in id order. The two
+// diverge for ANY pair of same-ref events whose commit order differs from their id order.
+// No sub-millisecond coincidence is needed for that, because an event's id is minted from
+// s.clock() on the receiving ingress replica BEFORE its append transaction starts, and
+// nothing afterwards keeps the two orders aligned:
+//
+//   - Across replicas the divergence window is the CLOCK SKEW between them, not one
+//     millisecond. A deployment.completed handled by replica B can carry a lower id than a
+//     deployment.started handled by replica A that arrived earlier, and then folds second.
+//   - Within a single replica the per-ref advisory lock itself reorders: a request that
+//     minted a lower id can lose the race for the lock while one holding a higher id folds
+//     first. The window is everything between minting the id and taking that lock — Begin,
+//     the idempotency lookup, the event INSERT, and the lock wait, which AppendLockTimeout
+//     bounds at seconds.
+//   - Only then, as the narrowest of the three, does entropy matter: core.NewULID draws
+//     from crypto/rand rather than ulid.MonotonicEntropy, so two ids minted inside one
+//     millisecond do not even tie-break by generation order.
+//
+// A rebuild can therefore produce a different Subject, Type, Title, Actor, attribute set,
+// LastEventID, End or Status than the one live folding produced — every field whose rule
+// is "the last event folded wins". Start, StartedAt and FirstSeenAt are NOT in that set:
+// both start facts are minima (migration 0003, core.Fold), so they are commutative and the
+// two orders agree on them. Every event is still folded in, and the rebuild is still
+// deterministic — replaying the same log again gives the same answer — but "reproduces the
+// projection exactly" is only true up to that ordering.
+//
+// This is reachable by following the documentation: --rebuild-tenant is the README's
+// stated remedy for migration 0003, so an operator running it can flip a change's recorded
+// outcome from completed to failed, or back. The remedy, deferred to v0.2 and deliberately
+// not attempted here, is to make every field's rule commutative or to detect ev.ID <
+// cur.LastEventID during an append and re-fold that ref from the log. Until then the
+// README's rebuild section carries the same caveat, where an operator will actually meet
+// it.
 //
 // Operational exposure, which v0.1 does not remove: the exclusive lock blocks every
 // append for this tenant for the rebuild's whole duration. Blocked appends fail after
