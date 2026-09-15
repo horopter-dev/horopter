@@ -57,8 +57,13 @@ func eventFromCloudEvent(
 	attrs := map[string]any{}
 	if len(ce.Data()) > 0 {
 		if err := json.Unmarshal(ce.Data(), &attrs); err != nil {
+			// Wrapped with core.ErrInvalidEvent because it is the same class of fact as
+			// a missing required field: the caller's own body is wrong, and no retry of
+			// it will ever succeed. Without the wrap it would fall through to 503 and a
+			// producer would retry a body that can never be accepted.
 			return core.Event{}, fmt.Errorf(
-				"CloudEvent %q: data is not a JSON object: %w", ce.ID(), err)
+				"%w: CloudEvent %q: data is not a JSON object: %w",
+				core.ErrInvalidEvent, ce.ID(), err)
 		}
 	}
 	pull := func(key string) string {

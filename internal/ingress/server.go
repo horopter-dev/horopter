@@ -13,7 +13,9 @@ package ingress
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -126,7 +128,7 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 func (s *Server) append(w http.ResponseWriter, r *http.Request, ev core.Event) {
 	stored, created, err := s.store.AppendEvent(r.Context(), ev)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		appendFailed(w, r, ev, err)
 		return
 	}
 	status := http.StatusOK
@@ -136,6 +138,33 @@ func (s *Server) append(w http.ResponseWriter, r *http.Request, ev core.Event) {
 	writeJSON(w, status, map[string]any{
 		"id": stored.ID, "ref": core.RefFor(stored), "created": created,
 	})
+}
+
+// appendFailed answers a failed append, and the distinction it draws is the whole point
+// of core.ErrInvalidEvent. Producers treat 4xx as "do not retry", so answering a
+// connection failure, a commit failure or a lock timeout with 400 — as this handler used
+// to do for every error alike — permanently loses every event posted during a database
+// blip, with nothing in any log showing a hole exists. That is the worst failure a system
+// of record can have.
+//
+// 400 is returned only for a validation failure, and its body carries the error text
+// because that text describes the caller's own input back to them. Everything else is
+// transient from the caller's point of view and gets 503: not 500, because 503 is what
+// tells the producer to retry, which is what turns a lost event into a delayed one.
+//
+// The 503 body is generic on purpose. The underlying text names tables, constraint names
+// and connection strings, and ingress's callers are not operators; the full detail goes to
+// the server log instead, where an operator can correlate it with the request.
+func appendFailed(w http.ResponseWriter, r *http.Request, ev core.Event, err error) {
+	if errors.Is(err, core.ErrInvalidEvent) {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	slog.ErrorContext(r.Context(), "append failed", "error", err,
+		"tenant", ev.Tenant, "type", ev.Type, "subject", ev.Subject)
+	writeError(w, http.StatusServiceUnavailable,
+		"could not append the event; the store is temporarily unavailable — "+
+			"this request may be retried")
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

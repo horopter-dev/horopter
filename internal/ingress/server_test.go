@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -219,4 +220,33 @@ func TestCloudEventDuplicateIsIdempotent(t *testing.T) {
 	second := send()
 	assert.Equal(t, http.StatusOK, second.Code, second.Body.String(),
 		"a redelivered CloudEvent must not create a second event")
+}
+
+// TestPostEventReturns503WhenTheStoreFails is the counterpart to
+// TestPostInvalidEventReturns400WithReason, and the pair is the reason core.ErrInvalidEvent
+// exists. Every AppendEvent failure used to be answered 400 with the raw error text.
+// Producers treat 4xx as "do not retry", so a thirty-second database blip permanently lost
+// every event posted during it, silently — and the raw text leaked connection strings,
+// table names and constraint names to callers who are not operators.
+//
+// Closing the pool is a real transient store failure rather than a faked error: every
+// subsequent AppendEvent fails inside pool.Begin, which is exactly where a database outage
+// lands. pgxpool.Close is guarded by a sync.Once, so newServer's own t.Cleanup close is
+// still safe.
+func TestPostEventReturns503WhenTheStoreFails(t *testing.T) {
+	h, s := newServer(t)
+	s.Close()
+
+	body := fmt.Sprintf(`{"tenant":%q,"source":"ci","type":"deployment.started",
+		"subject":"acme/prod","occurred_at":"2026-09-14T10:00:00Z",
+		"correlation_ref":"dep-7","idempotency_key":%q}`, tenant(t), idemKey(t, "down"))
+	rec := post(t, h, "/v1/events", body, testToken)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "retried",
+		"the body must tell the producer this is transient, which is the whole point of 503")
+	assert.NotContains(t, rec.Body.String(), "closed pool",
+		"the internal error text must not reach the caller")
+	assert.NotContains(t, strings.ToLower(rec.Body.String()), "postgres",
+		"the response must not name the store or leak its connection detail")
 }

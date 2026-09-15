@@ -63,3 +63,39 @@ func TestNewULIDIsSortableByTime(t *testing.T) {
 	assert.Less(t, early, late, "ULIDs must sort lexicographically by time")
 	assert.Len(t, early, 26)
 }
+
+// TestValidateFailuresAreInvalidEvent pins the taxonomy every caller branches on. A
+// validation failure that forgets to wrap ErrInvalidEvent is not a compile error and
+// changes no message, so nothing else would notice — but ingress would silently start
+// answering it 503 and telling the producer to retry a body that can never be accepted.
+// Each case names a different required field so a single missing wrap is caught rather
+// than masked by the others.
+func TestValidateFailuresAreInvalidEvent(t *testing.T) {
+	valid := core.Event{
+		Tenant: "default", SchemaVersion: core.CurrentSchemaVersion,
+		Source: "ci", Type: "deployment.started", Subject: "acme/prod",
+		OccurredAt: time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC),
+	}
+	require.NoError(t, valid.Validate(), "precondition: the base event is acceptable")
+
+	for name, breakIt := range map[string]func(e *core.Event){
+		"tenant":         func(e *core.Event) { e.Tenant = "" },
+		"source":         func(e *core.Event) { e.Source = "" },
+		"type":           func(e *core.Event) { e.Type = "" },
+		"subject":        func(e *core.Event) { e.Subject = "" },
+		"occurred_at":    func(e *core.Event) { e.OccurredAt = time.Time{} },
+		"schema_version": func(e *core.Event) { e.SchemaVersion = 99 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := valid
+			breakIt(&bad)
+			err := bad.Validate()
+			require.Error(t, err)
+			assert.ErrorIs(t, err, core.ErrInvalidEvent,
+				"a %s failure must wrap ErrInvalidEvent; without it ingress answers 503 "+
+					"and the producer retries a request that can never succeed", name)
+			assert.Contains(t, err.Error(), name,
+				"the message must still name the field the caller got wrong")
+		})
+	}
+}
