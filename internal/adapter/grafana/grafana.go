@@ -74,12 +74,13 @@ func tagsFor(c core.Change) []string {
 //
 // horopter.description is a Horopter extension, not an OTel semantic
 // convention — no spec vocabulary names an annotation-body concept. It is
-// namespaced under "horopter." the same way otlp.Render's horopter.subject,
-// horopter.ref and horopter.status are (internal/adapter/otlp), which is what
-// keeps a project-specific extension point consistent with "attribute keys
-// follow OTel semantic conventions rather than an invented vocabulary": the
-// vocabulary itself stays OTel-only, and this is a clearly namespaced
-// addition layered on it, not a second invented vocabulary competing with it.
+// namespaced under "horopter." the same way otlp.mergedAttributes sets
+// horopter.subject, horopter.ref and horopter.status (internal/adapter/otlp),
+// which is what keeps a project-specific extension point consistent with
+// "attribute keys follow OTel semantic conventions rather than an invented
+// vocabulary": the vocabulary itself stays OTel-only, and this is a clearly
+// namespaced addition layered on it, not a second invented vocabulary
+// competing with it.
 //
 // Reading a bare, unnamespaced "description" previously captured whatever
 // attribute a producer happened to give that name into the annotation body as
