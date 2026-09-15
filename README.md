@@ -38,6 +38,26 @@ Each service is configured with environment variables:
 - `HOROPTER_ADDR` — listen address for `horopter-ingress` and `horopter-egress`
   (defaults to `0.0.0.0:8080` and `0.0.0.0:8081` respectively).
 
+## Security
+
+**`horopter-egress` has no authentication in v0.1, and `docker-compose.yml` publishes its
+port (8081) on the host.** Every route it serves — `GET /v1/changes`, `GET /v1/events`,
+`GET`/`POST /adapters/grafana/annotations` and its `/{tenant}/annotations` path variant,
+and `GET /adapters/otlp/spans` — answers anyone who can reach that port, with no
+credential check of any kind. A caller can list a tenant's full change history and raw
+event log: subjects, actors, titles, correlation refs, and every attribute a producer
+attached, including whatever was put in `horopter.description`.
+
+Egress also relays raw store errors verbatim in its HTTP responses, so a failure can
+surface internal detail — a Postgres error message, a query shape — to that same
+unauthenticated caller.
+
+Both are deliberate decisions for v0.1, not oversights. `horopter-ingress` does require a
+bearer token (`HOROPTER_INGRESS_TOKEN`) on writes, so this exposure is specific to the
+read side. If you deploy this anywhere it is reachable by anyone you would not trust with
+the full change log, put a network boundary or a reverse proxy with its own
+authentication in front of port 8081 — Horopter provides neither.
+
 ## Upgrading
 
 `horopter-migrate` is the only binary permitted to apply schema DDL. Run it to completion
