@@ -66,6 +66,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /v1/changes", s.queryChanges)
 	mux.HandleFunc("GET /v1/events", s.listEvents)
 	mux.HandleFunc("GET /adapters/grafana/annotations", s.grafanaAnnotations)
+	mux.HandleFunc("POST /adapters/grafana/annotations", s.grafanaAnnotationsPOST)
 	mux.HandleFunc("GET /adapters/otlp/spans", s.otlpSpans)
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
@@ -193,6 +194,47 @@ func windowFromEpochMillis(r *http.Request) (window, error) {
 	return window{from: from, to: to, limit: limit}, nil
 }
 
+// grafanaAnnotationRequest is the JSON body Grafana's SimpleJson and JSON API
+// datasource plugins POST to an annotations endpoint. Grafana also sends
+// "rangeRaw" (the panel's relative range, e.g. "now-1h") and "annotation" (the
+// query config); this adapter's contract needs neither, only the resolved
+// range.
+type grafanaAnnotationRequest struct {
+	Range struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	} `json:"range"`
+}
+
+// windowFromAnnotationBody reads a Grafana annotation POST body's time range.
+// This is the third window parser alongside windowFromRFC3339 and
+// windowFromEpochMillis, feeding the same render path — Grafana's POST body
+// carries RFC3339 timestamps with fractional seconds (e.g.
+// "2016-04-15T13:44:39.070Z"), not the epoch milliseconds its GET query
+// parameters use: a different contract from the same vendor, not a
+// duplicate of one already handled. time.Parse(time.RFC3339, …) already
+// accepts the fractional-second form, so no new parsing helper is needed for
+// it.
+func windowFromAnnotationBody(r *http.Request) (window, error) {
+	var body grafanaAnnotationRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		return window{}, fmt.Errorf("request body is not valid JSON: %w", err)
+	}
+	from, err := time.Parse(time.RFC3339, body.Range.From)
+	if err != nil {
+		return window{}, fmt.Errorf("range.from=%q is not RFC3339: %w", body.Range.From, err)
+	}
+	to, err := time.Parse(time.RFC3339, body.Range.To)
+	if err != nil {
+		return window{}, fmt.Errorf("range.to=%q is not RFC3339: %w", body.Range.To, err)
+	}
+	limit, err := limitParam(r)
+	if err != nil {
+		return window{}, err
+	}
+	return window{from: from, to: to, limit: limit}, nil
+}
+
 func (s *Server) changesFor(r *http.Request, win window) ([]core.Change, bool, error) {
 	return s.store.QueryChanges(r.Context(), postgres.ChangeQuery{
 		Tenant:  tenantOf(r),
@@ -247,6 +289,21 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) grafanaAnnotations(w http.ResponseWriter, r *http.Request) {
 	win, err := windowFromEpochMillis(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.render(w, r, win, s.grafana.Render)
+}
+
+// grafanaAnnotationsPOST serves the same annotations the GET route does, for
+// the callers that use it: Grafana's SimpleJson and JSON API datasource
+// plugins query annotations with a POST carrying a JSON body, not a GET with
+// query parameters, so without this route no such Grafana instance can call
+// this adapter at all. The renderer is unchanged — grafana.Renderer.Render is
+// identical either way — only how the time window arrives differs.
+func (s *Server) grafanaAnnotationsPOST(w http.ResponseWriter, r *http.Request) {
+	win, err := windowFromAnnotationBody(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

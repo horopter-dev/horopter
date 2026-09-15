@@ -193,11 +193,113 @@ func TestOTLPAdapterUsesNanoseconds(t *testing.T) {
 		"&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	var spans []map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &spans))
+	var envelope map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &envelope))
+	span := onlySpan(t, envelope)
+	assert.Equal(t, strconv.FormatInt(start.UnixNano(), 10), span["startTimeUnixNano"],
+		"OTLP uses nanoseconds where Grafana uses milliseconds, encoded as a decimal "+
+			"string — the unit and the string encoding both live in the adapter")
+}
+
+// onlySpan reaches through the OTLP envelope to the single span a test's fixture
+// produces.
+func onlySpan(t *testing.T, envelope map[string]any) map[string]any {
+	t.Helper()
+	resourceSpans, ok := envelope["resourceSpans"].([]any)
+	require.True(t, ok, "resourceSpans must be a JSON array")
+	require.Len(t, resourceSpans, 1)
+	scopeSpans, ok := resourceSpans[0].(map[string]any)["scopeSpans"].([]any)
+	require.True(t, ok, "scopeSpans must be a JSON array")
+	require.Len(t, scopeSpans, 1)
+	spans, ok := scopeSpans[0].(map[string]any)["spans"].([]any)
+	require.True(t, ok, "spans must be a JSON array")
 	require.Len(t, spans, 1)
-	assert.EqualValues(t, start.UnixNano(), spans[0]["StartUnixNano"],
-		"OTLP uses nanoseconds where Grafana uses milliseconds — the unit lives in the adapter")
+	span, ok := spans[0].(map[string]any)
+	require.True(t, ok)
+	return span
+}
+
+// postJSON POSTs a JSON body, the way Grafana's SimpleJson and JSON API
+// datasource plugins query annotations.
+func postJSON(t *testing.T, h http.Handler, url, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// annotationBody is a Grafana annotation-query POST body: the shape
+// documented at https://github.com/grafana/simple-json-datasource#annotation-api,
+// trimmed to the "range" field this adapter's contract reads.
+func annotationBody(from, to time.Time) string {
+	return fmt.Sprintf(`{"range":{"from":%q,"to":%q}}`,
+		from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano))
+}
+
+// TestGrafanaAnnotationsPOSTUsesRequestBodyRange is C2's guard: it drives the
+// new POST route with a Grafana-shaped JSON body and pins that the time range
+// comes from range.from/range.to in the body, not from query parameters —
+// the GET route's contract, which this route deliberately does not share.
+func TestGrafanaAnnotationsPOSTUsesRequestBodyRange(t *testing.T) {
+	h, s, tn := newServer(t)
+	seed(t, s, tn, "dep-13", "deployment.started",
+		time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC))
+
+	body := annotationBody(
+		time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC),
+		time.Date(2026, 9, 14, 11, 0, 0, 0, time.UTC))
+	rec := postJSON(t, h, "/adapters/grafana/annotations?tenant="+tn, body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var anns []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &anns))
+	require.Len(t, anns, 1)
+	assert.EqualValues(t, 1789380000000, anns[0]["time"])
+}
+
+// TestGrafanaAnnotationsPOSTRejectsMalformedBody pins the error path for both
+// invalid JSON and a non-RFC3339 range value, naming the field so a caller
+// can tell this apart from every other malformed-input error in this file.
+func TestGrafanaAnnotationsPOSTRejectsMalformedBody(t *testing.T) {
+	h, _, tn := newServer(t)
+
+	rec := postJSON(t, h, "/adapters/grafana/annotations?tenant="+tn, `not json`)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "not valid JSON")
+
+	rec = postJSON(t, h, "/adapters/grafana/annotations?tenant="+tn,
+		`{"range":{"from":"not-a-time","to":"2026-09-14T11:00:00Z"}}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "range.from",
+		"the response must name the field, not just say the request was bad")
+}
+
+// TestGrafanaAnnotationsPOSTSignalsTruncation is C2's other guard: the new
+// route must signal truncation the same way every other read endpoint does
+// (batch B, item B5b) — an endpoint that silently truncates is the finding
+// B5b existed to fix, and adding a route to the open surface must not
+// reopen it.
+func TestGrafanaAnnotationsPOSTSignalsTruncation(t *testing.T) {
+	h, s, tn := newServer(t)
+	const seeded = 3
+	seedManyChanges(t, s, tn, seeded)
+	body := annotationBody(
+		time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC),
+		time.Date(2026, 9, 14, 11, 0, 0, 0, time.UTC))
+
+	full := postJSON(t, h, fmt.Sprintf(
+		"/adapters/grafana/annotations?tenant=%s&limit=%d", tn, seeded), body)
+	require.Equal(t, http.StatusOK, full.Code, full.Body.String())
+	assert.Empty(t, full.Header().Get(egress.TruncatedHeader),
+		"a result of exactly the limit with nothing behind it is NOT truncated")
+
+	cut := postJSON(t, h, fmt.Sprintf(
+		"/adapters/grafana/annotations?tenant=%s&limit=%d", tn, seeded-1), body)
+	require.Equal(t, http.StatusOK, cut.Code, cut.Body.String())
+	assert.Equal(t, "true", cut.Header().Get(egress.TruncatedHeader),
+		"rows were discarded and the caller has no other way to find out")
 }
 
 func TestEgressRejectsMalformedTimeParams(t *testing.T) {
@@ -310,10 +412,20 @@ func TestHealthzWorksWithNilStore(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "healthz must not require a database")
 }
 
+// postAnnotationsIsReadOnly is TestRoutesRegisterOnlyGETHandlers's one
+// documented exception to "every route is a GET": Grafana's SimpleJson and
+// JSON API datasource plugins POST the annotation query because the time
+// range travels in a JSON request body, not because the route writes
+// anything (see grafanaAnnotationsPOST's doc comment in server.go). Any other
+// POST/PUT/DELETE pattern this test discovers is exactly the write-route
+// regression it exists to catch.
+const postAnnotationsIsReadOnly = "POST /adapters/grafana/annotations"
+
 // TestRoutesRegisterOnlyGETHandlers asserts, with a general structural check, that
 // egress exposes no write route anywhere: it parses server.go, walks every
 // mux.Handle/mux.HandleFunc call inside Routes(), and asserts each pattern string
-// starts with "GET ". A single HTTP probe against one path can only ever prove that
+// starts with "GET " — except postAnnotationsIsReadOnly, egress's one deliberate
+// read-only POST. A single HTTP probe against one path can only ever prove that
 // one path has no write twin; a write route registered at any other path —
 // POST /v1/ingest, PUT /v1/changes — would pass every HTTP-level test in this file
 // while never being exercised. Reading the source is what generalizes the property to
@@ -357,9 +469,14 @@ func TestRoutesRegisterOnlyGETHandlers(t *testing.T) {
 
 	require.NotEmpty(t, patterns, "Routes() must register at least one handler")
 	for _, p := range patterns {
+		if p == postAnnotationsIsReadOnly {
+			continue
+		}
 		assert.True(t, strings.HasPrefix(p, "GET "),
 			"route pattern %q is not a GET route; egress must expose no write route", p)
 	}
+	assert.Contains(t, patterns, postAnnotationsIsReadOnly,
+		"the Grafana annotations POST route must be registered exactly as documented")
 }
 
 // TestTruncationIsSignalledOnEveryReadEndpoint drives both directions of the signal
