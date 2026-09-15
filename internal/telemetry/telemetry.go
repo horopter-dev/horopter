@@ -88,7 +88,7 @@ func Setup(ctx context.Context, serviceName string) (func(context.Context) error
 		sdktrace.WithBatcher(exporter),
 		sdktrace.WithResource(res),
 	)
-	otel.SetTracerProvider(provider)
+	otel.SetTracerProvider(filtered(provider, cfg.disabled))
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{}, propagation.Baggage{},
 	))
