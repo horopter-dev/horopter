@@ -82,11 +82,11 @@ func run(ctx context.Context, dsn, rebuildTenant string) error {
 
 // flushTelemetry drains buffered spans during shutdown.
 //
-// It deliberately uses a fresh context rather than the one the signal handler has
-// already cancelled: the spans still in the batch processor are the ones describing
-// whatever caused the shutdown, and flushing them on a cancelled context drops
-// exactly the evidence worth keeping. The timeout bounds a collector that is itself
-// unreachable, which is a normal way for a shutdown to go wrong.
+// horopter-migrate has no signal handler and nothing else that cancels a context —
+// main passes context.Background() straight through to run — so there is no
+// cancelled context here to avoid reusing. A fresh context with its own timeout is
+// still the right defensive default: what actually goes wrong during a flush is a
+// collector that has become unreachable, and the timeout bounds exactly that.
 func flushTelemetry(shutdown func(context.Context) error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
