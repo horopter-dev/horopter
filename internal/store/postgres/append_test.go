@@ -107,7 +107,7 @@ func TestAppendEventIsIdempotent(t *testing.T) {
 	assert.False(t, created, "a duplicate idempotency key must not create a second event")
 	assert.Equal(t, first.ID, second.ID, "the originally stored event must be returned")
 
-	evs, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn})
+	evs, _, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn})
 	require.NoError(t, err)
 	assert.Len(t, evs, 1, "CI retries must not duplicate events")
 }
@@ -138,7 +138,7 @@ func TestAppendEventNormalizesNilAttributes(t *testing.T) {
 	require.NoError(t, err, "a nil Attributes map must not violate the NOT NULL column")
 	assert.True(t, created)
 
-	evs, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn})
+	evs, _, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn})
 	require.NoError(t, err)
 	require.Len(t, evs, 1)
 	assert.NotNil(t, evs[0].Attributes,
@@ -274,7 +274,7 @@ func TestConcurrentDuplicateIdempotencyKeyReturnsTheOriginal(t *testing.T) {
 	assert.Equal(t, 1, creates, "exactly one of the two callers may have created the event")
 	assert.Len(t, returned, 1, "both callers must be told about the same stored event")
 
-	evs, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn})
+	evs, _, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn})
 	require.NoError(t, err)
 	require.Len(t, evs, 1, "a concurrent retry must not duplicate the event")
 	assert.True(t, returned[evs[0].ID], "the id both callers got must be the id that was stored")

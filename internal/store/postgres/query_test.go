@@ -40,7 +40,7 @@ func TestOverlapPredicate(t *testing.T) {
 	seed("onendboundary", base.Add(-2*time.Hour), at(0))
 	// at(0) == winFrom exactly, so end_effective == From exactly.
 
-	got, err := s.QueryChanges(ctx, postgres.ChangeQuery{
+	got, _, err := s.QueryChanges(ctx, postgres.ChangeQuery{
 		Tenant: tn, From: winFrom, To: winTo,
 	})
 	require.NoError(t, err)
@@ -84,21 +84,21 @@ func TestQueryChangesFiltersBySubjectTypeAndStatus(t *testing.T) {
 		mkEvent(tn, eventID(t, "d2-started"), "k3", "d2", "deployment.started", at))
 	require.NoError(t, err)
 
-	byStatus, err := s.QueryChanges(ctx, postgres.ChangeQuery{
+	byStatus, _, err := s.QueryChanges(ctx, postgres.ChangeQuery{
 		Tenant: tn, From: at.Add(-time.Hour), To: at.Add(time.Hour), Status: "failed",
 	})
 	require.NoError(t, err)
 	require.Len(t, byStatus, 1, "the in_progress d2 must be excluded by the status filter")
 	assert.Equal(t, "d1", byStatus[0].Ref)
 
-	byType, err := s.QueryChanges(ctx, postgres.ChangeQuery{
+	byType, _, err := s.QueryChanges(ctx, postgres.ChangeQuery{
 		Tenant: tn, From: at.Add(-time.Hour), To: at.Add(time.Hour), Type: "deployment.started",
 	})
 	require.NoError(t, err)
 	require.Len(t, byType, 1, "d1's type moved on to deployment.failed; only d2 must match")
 	assert.Equal(t, "d2", byType[0].Ref)
 
-	none, err := s.QueryChanges(ctx, postgres.ChangeQuery{
+	none, _, err := s.QueryChanges(ctx, postgres.ChangeQuery{
 		Tenant: tn, From: at.Add(-time.Hour), To: at.Add(time.Hour), Subject: "other/stack",
 	})
 	require.NoError(t, err)
@@ -132,7 +132,7 @@ func TestQueryChangesCombinesFiltersAndLimit(t *testing.T) {
 			"deployment.started", at.Add(20*time.Minute)))
 	require.NoError(t, err)
 
-	combined, err := s.QueryChanges(ctx, postgres.ChangeQuery{
+	combined, _, err := s.QueryChanges(ctx, postgres.ChangeQuery{
 		Tenant: tn, From: at.Add(-time.Hour), To: at.Add(time.Hour),
 		Subject: "acme/prod", Type: "deployment.completed", Status: "completed",
 	})
@@ -143,7 +143,7 @@ func TestQueryChangesCombinesFiltersAndLimit(t *testing.T) {
 		"ORDER BY start_at ASC must list the earlier row first")
 	assert.Equal(t, "multi-b", combined[1].Ref)
 
-	limited, err := s.QueryChanges(ctx, postgres.ChangeQuery{
+	limited, _, err := s.QueryChanges(ctx, postgres.ChangeQuery{
 		Tenant: tn, From: at.Add(-time.Hour), To: at.Add(time.Hour),
 		Subject: "acme/prod", Type: "deployment.completed", Status: "completed", Limit: 1,
 	})
@@ -160,7 +160,7 @@ func TestQueryChangesIsTenantScoped(t *testing.T) {
 		"deployment.started", at))
 	require.NoError(t, err)
 
-	got, err := s.QueryChanges(ctx, postgres.ChangeQuery{
+	got, _, err := s.QueryChanges(ctx, postgres.ChangeQuery{
 		Tenant: tn, From: at.Add(-time.Hour), To: at.Add(time.Hour),
 	})
 	require.NoError(t, err)
@@ -244,12 +244,12 @@ func TestListEventsFindsAPointChangesEvents(t *testing.T) {
 		mkEvent(tn, eventID(t, "correlated"), "k2", "dep-9", "deployment.started", at))
 	require.NoError(t, err)
 
-	point, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn, Ref: pointID})
+	point, _, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn, Ref: pointID})
 	require.NoError(t, err)
 	require.Len(t, point, 1, "a point change's ref is its own event id, and must list that event")
 	assert.Equal(t, pointID, point[0].ID)
 
-	correlated, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn, Ref: "dep-9"})
+	correlated, _, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn, Ref: "dep-9"})
 	require.NoError(t, err)
 	require.Len(t, correlated, 1, "a correlated ref must still list only its own events")
 	assert.Equal(t, "dep-9", correlated[0].CorrelationRef)

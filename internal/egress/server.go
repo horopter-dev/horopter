@@ -33,6 +33,19 @@ const DefaultTenant = "default"
 // event log or change history in a single request.
 const MaxLimit = 1000
 
+// TruncatedHeader is set to "true" on a response whose result set was cut short by the
+// limit, and is absent otherwise. Without it a caller cannot tell a result of exactly
+// MaxLimit rows from one where more exist — and since the ordering is start_at ASC,
+// truncation discards the most RECENT rows, which during an incident are exactly the ones
+// that matter. Silently returning the cap as if it were the whole answer is the failure
+// this closes.
+//
+// A header rather than a flag in the body: two of the four read endpoints render
+// vendor-owned response shapes (Grafana annotations, OTLP spans) that cannot carry a
+// Horopter envelope, so a header is the only signal that works uniformly across all four
+// without breaking any of them.
+const TruncatedHeader = "X-Horopter-Truncated"
+
 // Server is the egress HTTP surface.
 type Server struct {
 	store   *postgres.Store
@@ -180,7 +193,7 @@ func windowFromEpochMillis(r *http.Request) (window, error) {
 	return window{from: from, to: to, limit: limit}, nil
 }
 
-func (s *Server) changesFor(r *http.Request, win window) ([]core.Change, error) {
+func (s *Server) changesFor(r *http.Request, win window) ([]core.Change, bool, error) {
 	return s.store.QueryChanges(r.Context(), postgres.ChangeQuery{
 		Tenant:  tenantOf(r),
 		From:    win.from,
@@ -198,23 +211,28 @@ func (s *Server) queryChanges(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	changes, err := s.changesFor(r, win)
+	changes, truncated, err := s.changesFor(r, win)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	markTruncated(w, truncated)
 	writeJSON(w, http.StatusOK, changesToJSON(changes))
 }
 
-// listEvents returns the raw event log for a tenant, optionally scoped to one
-// correlation ref, for audit and export. It reads only — no write path exists here.
+// listEvents returns the raw event log for a tenant, optionally scoped to one change's
+// ref, for audit and export. It reads only — no write path exists here.
+//
+// "ref" is a projection ref, matched the way core.RefFor forms one: a correlated event's
+// correlation_ref, or an uncorrelated point change's own event id. See the store's
+// ListEvents for why the id arm is restricted to rows carrying no correlation_ref.
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 	limit, err := limitParam(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	events, err := s.store.ListEvents(r.Context(), postgres.EventQuery{
+	events, truncated, err := s.store.ListEvents(r.Context(), postgres.EventQuery{
 		Tenant: tenantOf(r),
 		Ref:    r.URL.Query().Get("ref"),
 		Limit:  limit,
@@ -223,6 +241,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	markTruncated(w, truncated)
 	writeJSON(w, http.StatusOK, eventsToJSON(events))
 }
 
@@ -248,7 +267,7 @@ func (s *Server) render(
 	w http.ResponseWriter, r *http.Request, win window,
 	render func([]core.Change, time.Time) (any, error),
 ) {
-	changes, err := s.changesFor(r, win)
+	changes, truncated, err := s.changesFor(r, win)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -258,6 +277,7 @@ func (s *Server) render(
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	markTruncated(w, truncated)
 	writeJSON(w, http.StatusOK, payload)
 }
 
@@ -306,6 +326,15 @@ func eventsToJSON(events []core.Event) []map[string]any {
 		})
 	}
 	return out
+}
+
+// markTruncated sets TruncatedHeader when the result set was cut short. It must run
+// before writeJSON: WriteHeader flushes the header block, and anything set after it is
+// silently dropped.
+func markTruncated(w http.ResponseWriter, truncated bool) {
+	if truncated {
+		w.Header().Set(TruncatedHeader, "true")
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

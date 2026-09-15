@@ -250,3 +250,40 @@ func TestPostEventReturns503WhenTheStoreFails(t *testing.T) {
 	assert.NotContains(t, strings.ToLower(rec.Body.String()), "postgres",
 		"the response must not name the store or leak its connection detail")
 }
+
+// TestCloudEventsFromDifferentSourcesSharingAnIDAreDistinct pins the composite
+// idempotency key. CloudEvents guarantees uniqueness of source + id, not id alone, so a
+// build number or a bare "1" is a conformant id — and two producers sharing one used to
+// mean the second, genuinely distinct event was silently swallowed and answered
+// 200 {"created": false}. A dropped fact reported as a successful retry is the worst shape
+// that failure can take in a system of record.
+func TestCloudEventsFromDifferentSourcesSharingAnIDAreDistinct(t *testing.T) {
+	h, s := newServer(t)
+	tn := tenant(t)
+	sharedID := idemKey(t, "shared-across-sources")
+
+	send := func(source string) *httptest.ResponseRecorder {
+		body := fmt.Sprintf(`{"specversion":"1.0","id":%q,"source":%q,
+			"type":"deployment.started","subject":"acme/prod","time":"2026-09-14T10:00:00Z",
+			"datacontenttype":"application/json",
+			"data":{"tenant":%q,"correlation_ref":"dep-7"}}`, sharedID, source, tn)
+		req := httptest.NewRequest(http.MethodPost, "/v1/events/cloudevents",
+			bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/cloudevents+json")
+		req.Header.Set("Authorization", "Bearer "+testToken)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	first := send("/buildkite/pipelines/api")
+	require.Equal(t, http.StatusCreated, first.Code, first.Body.String())
+	second := send("/github/actions/api")
+	require.Equal(t, http.StatusCreated, second.Code, second.Body.String(),
+		"two sources sharing a CloudEvents id are two distinct events; keying on the id "+
+			"alone swallows the second and reports it as a retry")
+
+	evs, _, err := s.ListEvents(context.Background(), postgres.EventQuery{Tenant: tn})
+	require.NoError(t, err)
+	assert.Len(t, evs, 2, "both events must be in the log, not one")
+}

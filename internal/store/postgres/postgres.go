@@ -314,6 +314,28 @@ type EventQuery struct {
 	Limit  int
 }
 
+// overFetch returns the LIMIT to send for a caller-requested limit, and reports whether a
+// limit applies at all. It is the caller's limit plus one: fetching a row beyond what was
+// asked for is what makes truncation DETECTABLE, because counting to the limit alone
+// cannot tell a result set of exactly Limit rows from one with more behind it. A limit of
+// zero or less means "no limit", for which no LIMIT clause is emitted.
+func overFetch(limit int) (int, bool) {
+	if limit <= 0 {
+		return 0, false
+	}
+	return limit + 1, true
+}
+
+// trimToLimit discards the over-fetched row and reports that the result was truncated.
+// The extra row never reaches the caller, so ChangeQuery.Limit and EventQuery.Limit still
+// mean exactly what the caller asked for.
+func trimToLimit[T any](rows []T, limit int) ([]T, bool) {
+	if limit <= 0 || len(rows) <= limit {
+		return rows, false
+	}
+	return rows[:limit], true
+}
+
 // AppendEvent stores an event and folds it into the projection in one transaction.
 //
 // A duplicate idempotency key is not an error: CI retries are normal traffic, so the
@@ -655,7 +677,9 @@ func upsertChange(ctx context.Context, tx pgx.Tx, c core.Change) error {
 }
 
 // ListEvents selects raw events for a tenant, optionally scoped to one change's ref,
-// ordered by id ascending (which is chronological, since ids are ULIDs).
+// ordered by id ascending (which is chronological, since ids are ULIDs). It also reports
+// whether more rows matched than q.Limit allowed through; the over-fetch that detects that
+// is invisible to the caller, so q.Limit still means what it says.
 //
 // q.Ref is a projection ref, matched the way core.RefFor forms one: a correlated
 // event's correlation_ref, or an uncorrelated event's own id. Filtering on
@@ -664,7 +688,7 @@ func upsertChange(ctx context.Context, tx pgx.Tx, c core.Change) error {
 // arm is restricted to rows with no correlation_ref so it can only ever match the point
 // that owns the ref, never an unrelated event whose id happens to equal some other
 // change's correlation_ref.
-func (s *Store) ListEvents(ctx context.Context, q EventQuery) ([]core.Event, error) {
+func (s *Store) ListEvents(ctx context.Context, q EventQuery) ([]core.Event, bool, error) {
 	query := `
 		SELECT id, tenant, idempotency_key, schema_version, source, type, subject,
 		       actor, title, occurred_at, received_at, correlation_ref, attributes
@@ -678,17 +702,28 @@ func (s *Store) ListEvents(ctx context.Context, q EventQuery) ([]core.Event, err
 			len(args), len(args))
 	}
 	query += " ORDER BY id ASC"
-	if q.Limit != 0 {
-		args = append(args, q.Limit)
+	if limit, bounded := overFetch(q.Limit); bounded {
+		args = append(args, limit)
 		query += fmt.Sprintf(" LIMIT $%d", len(args))
 	}
 
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list events for tenant %q: %w", q.Tenant, err)
+		return nil, false, fmt.Errorf("list events for tenant %q: %w", q.Tenant, err)
 	}
 	defer rows.Close()
 
+	evs, err := scanEvents(rows, q.Tenant)
+	if err != nil {
+		return nil, false, err
+	}
+	evs, truncated := trimToLimit(evs, q.Limit)
+	return evs, truncated, nil
+}
+
+// scanEvents reads every event row, naming tenantID in any error so a failure identifies
+// the query it came from.
+func scanEvents(rows pgx.Rows, tenantID string) ([]core.Event, error) {
 	var evs []core.Event
 	for rows.Next() {
 		var (
@@ -698,7 +733,7 @@ func (s *Store) ListEvents(ctx context.Context, q EventQuery) ([]core.Event, err
 		if err := rows.Scan(&ev.ID, &ev.Tenant, &idem, &ev.SchemaVersion, &ev.Source, &ev.Type,
 			&ev.Subject, &ev.Actor, &ev.Title, &ev.OccurredAt, &ev.ReceivedAt,
 			&ev.CorrelationRef, &ev.Attributes); err != nil {
-			return nil, fmt.Errorf("scan event row for tenant %q: %w", q.Tenant, err)
+			return nil, fmt.Errorf("scan event row for tenant %q: %w", tenantID, err)
 		}
 		if idem != nil {
 			ev.IdempotencyKey = *idem
@@ -706,49 +741,75 @@ func (s *Store) ListEvents(ctx context.Context, q EventQuery) ([]core.Event, err
 		evs = append(evs, ev)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate events for tenant %q: %w", q.Tenant, err)
+		return nil, fmt.Errorf("iterate events for tenant %q: %w", tenantID, err)
 	}
 	return evs, nil
 }
 
-// QueryChanges returns changes overlapping [q.From, q.To].
+// QueryChanges returns changes overlapping [q.From, q.To], and reports whether more rows
+// matched than q.Limit allowed through.
 //
 // The predicate is overlap, not start-containment. Filtering on start alone would hide
 // a change that began before the window and is still running — precisely the change
 // someone most needs to see when zooming into a spike.
-func (s *Store) QueryChanges(ctx context.Context, q ChangeQuery) ([]core.Change, error) {
+//
+// The ordering is start_at ASC unconditionally, so truncation discards the most recent
+// rows. That is why the truncated flag matters rather than being a nicety: a caller
+// otherwise cannot tell a result set of exactly q.Limit rows from one that dropped the
+// changes it most needed. The over-fetch that detects it is invisible to the caller —
+// q.Limit still means what it says.
+func (s *Store) QueryChanges(ctx context.Context, q ChangeQuery) ([]core.Change, bool, error) {
 	sb := strings.Builder{}
 	sb.WriteString(`
 		SELECT tenant, ref, subject, type, title, actor, start_at, started_at,
 		       first_seen_at, end_at, status, attributes, last_event_id
 		FROM change
 		WHERE tenant = $1 AND start_at <= $2 AND end_effective >= $3`)
-	args := []any{q.Tenant, q.To.UTC(), q.From.UTC()}
+	args := appendChangeFilters(&sb, []any{q.Tenant, q.To.UTC(), q.From.UTC()}, q)
 
-	if q.Subject != "" {
-		args = append(args, q.Subject)
-		fmt.Fprintf(&sb, " AND subject = $%d", len(args))
-	}
-	if q.Type != "" {
-		args = append(args, q.Type)
-		fmt.Fprintf(&sb, " AND type = $%d", len(args))
-	}
-	if q.Status != "" {
-		args = append(args, q.Status)
-		fmt.Fprintf(&sb, " AND status = $%d", len(args))
-	}
 	sb.WriteString(" ORDER BY start_at ASC, ref ASC")
-	if q.Limit > 0 {
-		args = append(args, q.Limit)
+	if limit, bounded := overFetch(q.Limit); bounded {
+		args = append(args, limit)
 		fmt.Fprintf(&sb, " LIMIT $%d", len(args))
 	}
 
 	rows, err := s.pool.Query(ctx, sb.String(), args...)
 	if err != nil {
-		return nil, fmt.Errorf("query changes for tenant %q: %w", q.Tenant, err)
+		return nil, false, fmt.Errorf("query changes for tenant %q: %w", q.Tenant, err)
 	}
 	defer rows.Close()
 
+	out, err := scanChanges(rows)
+	if err != nil {
+		return nil, false, err
+	}
+	out, truncated := trimToLimit(out, q.Limit)
+	return out, truncated, nil
+}
+
+// appendChangeFilters adds the optional equality filters to the query and returns the
+// extended argument list. The placeholders are numbered from the argument list's own
+// length, so the two must grow together — which is why they are built in one place.
+func appendChangeFilters(sb *strings.Builder, args []any, q ChangeQuery) []any {
+	if q.Subject != "" {
+		args = append(args, q.Subject)
+		fmt.Fprintf(sb, " AND subject = $%d", len(args))
+	}
+	if q.Type != "" {
+		args = append(args, q.Type)
+		fmt.Fprintf(sb, " AND type = $%d", len(args))
+	}
+	if q.Status != "" {
+		args = append(args, q.Status)
+		fmt.Fprintf(sb, " AND status = $%d", len(args))
+	}
+	return args
+}
+
+// scanChanges reads every change row. start_at is read as well as the two facts it is
+// generated from, so a loaded Change carries the same start the database holds rather than
+// one recomputed from them.
+func scanChanges(rows pgx.Rows) ([]core.Change, error) {
 	var out []core.Change
 	for rows.Next() {
 		var (

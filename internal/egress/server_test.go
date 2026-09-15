@@ -256,6 +256,9 @@ func TestListEventsIsCappedAtMaxLimit(t *testing.T) {
 	var events []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &events))
 	assert.Len(t, events, egress.MaxLimit, "the default limit must cap the result set")
+	assert.Equal(t, "true", rec.Header().Get(egress.TruncatedHeader),
+		"a result cut short at exactly the cap must say so; a caller cannot otherwise "+
+			"distinguish it from a complete answer of exactly MaxLimit rows")
 
 	recBig := get(t, h, "/v1/events?tenant="+tn+"&limit=5000")
 	require.Equal(t, http.StatusOK, recBig.Code, recBig.Body.String())
@@ -263,6 +266,7 @@ func TestListEventsIsCappedAtMaxLimit(t *testing.T) {
 	require.NoError(t, json.Unmarshal(recBig.Body.Bytes(), &eventsBig))
 	assert.Len(t, eventsBig, egress.MaxLimit,
 		"a caller-supplied limit above the cap must still be clamped to it")
+	assert.Equal(t, "true", recBig.Header().Get(egress.TruncatedHeader))
 }
 
 // TestQueryChangesIsCappedAtMaxLimit is TestListEventsIsCappedAtMaxLimit's
@@ -279,6 +283,8 @@ func TestQueryChangesIsCappedAtMaxLimit(t *testing.T) {
 	var changes []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &changes))
 	assert.Len(t, changes, egress.MaxLimit, "the default limit must cap the result set")
+	assert.Equal(t, "true", rec.Header().Get(egress.TruncatedHeader),
+		"a result cut short at exactly the cap must say so")
 }
 
 func TestReadyzReportsReadyWithLiveDatabase(t *testing.T) {
@@ -353,5 +359,43 @@ func TestRoutesRegisterOnlyGETHandlers(t *testing.T) {
 	for _, p := range patterns {
 		assert.True(t, strings.HasPrefix(p, "GET "),
 			"route pattern %q is not a GET route; egress must expose no write route", p)
+	}
+}
+
+// TestTruncationIsSignalledOnEveryReadEndpoint drives both directions of the signal
+// through all four read endpoints. Three of them read changes and one reads events, and
+// two render vendor-owned shapes that could not carry an envelope flag — which is why the
+// signal is a header, and why one endpoint's coverage says nothing about the other three.
+//
+// The untruncated case is the one that matters most: it asks for exactly as many rows as
+// exist, which is precisely the case a "did we hit the limit?" count cannot tell apart
+// from a truncated one. Only the over-fetch can, so a mechanism that marked every
+// at-the-limit result as truncated would fail here.
+func TestTruncationIsSignalledOnEveryReadEndpoint(t *testing.T) {
+	h, s, tn := newServer(t)
+	const seeded = 3
+	seedManyChanges(t, s, tn, seeded)
+	seedManyEvents(t, s, tn, seeded)
+
+	window := "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
+	for name, base := range map[string]string{
+		"/v1/changes":          "/v1/changes?tenant=" + tn + window,
+		"/v1/events":           "/v1/events?tenant=" + tn,
+		"/adapters/otlp/spans": "/adapters/otlp/spans?tenant=" + tn + window,
+		"/adapters/grafana/annotations": "/adapters/grafana/annotations?tenant=" + tn +
+			"&from=1789376400000&to=1789383600000",
+	} {
+		t.Run(name, func(t *testing.T) {
+			full := get(t, h, fmt.Sprintf("%s&limit=%d", base, seeded))
+			require.Equal(t, http.StatusOK, full.Code, full.Body.String())
+			assert.Empty(t, full.Header().Get(egress.TruncatedHeader),
+				"a result of exactly Limit rows with nothing behind it is NOT truncated; "+
+					"marking it so would make the header meaningless")
+
+			cut := get(t, h, fmt.Sprintf("%s&limit=%d", base, seeded-1))
+			require.Equal(t, http.StatusOK, cut.Code, cut.Body.String())
+			assert.Equal(t, "true", cut.Header().Get(egress.TruncatedHeader),
+				"rows were discarded and the caller has no other way to find out")
+		})
 	}
 }

@@ -38,13 +38,13 @@ func TestRebuildReproducesProjectionExactly(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	before, err := s.QueryChanges(ctx, win)
+	before, _, err := s.QueryChanges(ctx, win)
 	require.NoError(t, err)
 	require.Len(t, before, 3)
 
 	require.NoError(t, s.RebuildProjection(ctx, tn))
 
-	after, err := s.QueryChanges(ctx, win)
+	after, _, err := s.QueryChanges(ctx, win)
 	require.NoError(t, err)
 	assert.Equal(t, before, after, "a rebuild must reproduce the projection exactly")
 }
@@ -82,7 +82,7 @@ func TestRebuildIsTenantScoped(t *testing.T) {
 
 	require.NoError(t, s.RebuildProjection(ctx, tn))
 
-	got, err := s.QueryChanges(ctx, postgres.ChangeQuery{
+	got, _, err := s.QueryChanges(ctx, postgres.ChangeQuery{
 		Tenant: other, From: at.Add(-time.Hour), To: at.Add(time.Hour),
 	})
 	require.NoError(t, err)

@@ -29,12 +29,12 @@ func (s *Server) postCloudEvent(w http.ResponseWriter, r *http.Request) {
 			"; expected application/cloudevents+json")
 		return
 	}
-	// The CloudEvents id becomes the idempotency key below, so an unvalidated envelope
-	// with a missing id would silently get IdempotencyKey "" — core.Event.Validate does
-	// not check it, and AppendEvent only dedupes a non-empty key — meaning every retry
-	// of that envelope creates a new event instead of being recognised as a duplicate.
-	// ce.Validate() enforces the spec's REQUIRED fields (id, source, type), catching
-	// that before it can happen rather than after it silently has.
+	// source and id together become the idempotency key below, so an unvalidated
+	// envelope missing either would silently get a half-empty key — core.Event.Validate
+	// does not check it, and AppendEvent only dedupes a non-empty key — meaning every
+	// retry of that envelope creates a new event instead of being recognised as a
+	// duplicate. ce.Validate() enforces the spec's REQUIRED fields (id, source, type),
+	// catching that before it can happen rather than after it silently has.
 	if err := ce.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid CloudEvent: "+
 			strings.TrimSpace(err.Error()))
@@ -49,8 +49,14 @@ func (s *Server) postCloudEvent(w http.ResponseWriter, r *http.Request) {
 	s.append(w, r, ev)
 }
 
-// eventFromCloudEvent maps a CloudEvent onto the internal Event. The CloudEvents id
-// becomes the idempotency key, which makes producer retries safe for free.
+// eventFromCloudEvent maps a CloudEvent onto the internal Event. The CloudEvents source
+// and id together become the idempotency key, which makes producer retries safe for free.
+//
+// Both, not the id alone: CloudEvents guarantees uniqueness of source + id, so ids like
+// "1" or a bare build number are entirely conformant. Keying on the id alone meant two
+// producers that happened to share one silently swallowed the second, genuinely distinct
+// event and answered it 200 {"created": false} — a dropped fact in a system of record,
+// reported as a successful retry.
 func eventFromCloudEvent(
 	ce cloudevents.Event, now time.Time, id string,
 ) (core.Event, error) {
@@ -87,7 +93,7 @@ func eventFromCloudEvent(
 	return core.Event{
 		ID:             id,
 		Tenant:         tenantID,
-		IdempotencyKey: ce.ID(),
+		IdempotencyKey: ce.Source() + "/" + ce.ID(),
 		SchemaVersion:  core.CurrentSchemaVersion,
 		Source:         ce.Source(),
 		Type:           ce.Type(),
