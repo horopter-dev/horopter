@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"strconv"
 	"sync"
@@ -53,13 +54,21 @@ func tenant(t *testing.T) string {
 	return "test-" + t.Name() + "-" + uniqueToken()
 }
 
-// eventID returns an event id unique to this call. event.id is a bare primary key with
-// no tenant in it, so ids must be unique across every tenant and every execution, not
-// merely within the tenant that writes them. suffix names the event for traceability
-// and plays no part in uniqueness.
+// eventID returns a fresh, valid ULID for use as an event id. event.id is a bare
+// primary key with no tenant in it, so ids must be unique across every tenant and every
+// execution, not merely within the tenant that writes them; crypto/rand entropy gives
+// that guarantee the same way core.NewULID does in production, rather than relying on
+// uniqueToken's counter (see the identical reasoning in
+// internal/ingress/server_test.go's newServer).
+//
+// core.Event.Validate rejects anything that is not a syntactically valid ULID, which
+// rules out embedding suffix in the id text the way this helper used to; suffix is
+// logged instead so a failing test's -v output still names the call that built the id.
 func eventID(t *testing.T, suffix string) string {
 	t.Helper()
-	return uniqueToken() + "-" + t.Name() + "-" + suffix
+	id := core.NewULID(time.Now(), rand.Reader)
+	t.Logf("eventID %q -> %s", suffix, id)
+	return id
 }
 
 func mkEvent(tn, id, idem, corr, typ string, at time.Time) core.Event {

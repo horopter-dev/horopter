@@ -37,6 +37,7 @@ func TestValidateRejectsMissingFields(t *testing.T) {
 		mutate func(*core.Event)
 		want   string
 	}{
+		{"malformed id", func(e *core.Event) { e.ID = "not-a-ulid" }, "id"},
 		{"no tenant", func(e *core.Event) { e.Tenant = "" }, "tenant"},
 		{"no type", func(e *core.Event) { e.Type = "" }, "type"},
 		{"no subject", func(e *core.Event) { e.Subject = "" }, "subject"},
@@ -72,6 +73,7 @@ func TestNewULIDIsSortableByTime(t *testing.T) {
 // than masked by the others.
 func TestValidateFailuresAreInvalidEvent(t *testing.T) {
 	valid := core.Event{
+		ID:     "01J0000000000000000000000A",
 		Tenant: "default", SchemaVersion: core.CurrentSchemaVersion,
 		Source: "ci", Type: "deployment.started", Subject: "acme/prod",
 		OccurredAt: time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC),
@@ -79,6 +81,7 @@ func TestValidateFailuresAreInvalidEvent(t *testing.T) {
 	require.NoError(t, valid.Validate(), "precondition: the base event is acceptable")
 
 	for name, breakIt := range map[string]func(e *core.Event){
+		"id":             func(e *core.Event) { e.ID = "not-a-ulid" },
 		"tenant":         func(e *core.Event) { e.Tenant = "" },
 		"source":         func(e *core.Event) { e.Source = "" },
 		"type":           func(e *core.Event) { e.Type = "" },

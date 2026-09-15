@@ -2,6 +2,7 @@ package egress_test
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"go/ast"
@@ -51,16 +52,15 @@ func newServer(t *testing.T) (http.Handler, *postgres.Store, string) {
 	return egress.New(s, func() time.Time { return fixed }).Routes(), s, tn
 }
 
-// seed writes directly through the store: egress has no write path of its own. id
-// includes procToken as well as a counter because event.id is a GLOBAL primary key: a
-// counter alone resets to zero on every new `go test` process, so two separate
-// invocations against the same never-truncated database would both mint
-// "seed-TestX-1" and collide on the second run. procToken (set once at package init
-// from the wall clock) is what makes the id unique across process invocations, not
-// just within one.
+// seed writes directly through the store: egress has no write path of its own.
+// core.Event.Validate requires event.id to be a syntactically valid ULID, so id comes
+// from core.NewULID with crypto/rand entropy — the same source production uses — rather
+// than a counter-built string; crypto/rand's 80 bits of entropy per millisecond is what
+// keeps ids unique across every tenant and every execution of this never-truncated
+// database, the same guarantee production relies on.
 func seed(t *testing.T, s *postgres.Store, tn, ref, typ string, at time.Time) {
 	t.Helper()
-	id := fmt.Sprintf("seed-%s-%s-%d", t.Name(), procToken, seedSeq.Add(1))
+	id := core.NewULID(time.Now(), rand.Reader)
 	_, _, err := s.AppendEvent(context.Background(), core.Event{
 		ID: id, Tenant: tn, IdempotencyKey: id, SchemaVersion: 1,
 		Source: "ci", Type: typ, Subject: "acme/prod", Actor: "ci-bot",

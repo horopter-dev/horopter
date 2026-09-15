@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"os"
 	"strconv"
@@ -36,12 +37,14 @@ func TestRunRebuildsATenantsProjection(t *testing.T) {
 	t.Cleanup(store.Close)
 
 	// The test database is never truncated, so the tenant and the event id must be ones
-	// no other test or earlier run has used: event.id is a global primary key.
+	// no other test or earlier run has used: event.id is a global primary key, and
+	// Validate requires it to be a syntactically valid ULID, so it comes from
+	// core.NewULID rather than the token embedded in the tenant id below.
 	token := strconv.FormatInt(time.Now().UnixNano(), 36)
 	tn := "migrate-rebuild-" + token
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	_, _, err = store.AppendEvent(ctx, core.Event{
-		ID: "migrate-rebuild-ev-" + token, Tenant: tn, SchemaVersion: 1,
+		ID: core.NewULID(time.Now(), rand.Reader), Tenant: tn, SchemaVersion: 1,
 		Source: "ci", Type: "deployment.started", Subject: "acme/prod", Actor: "ci-bot",
 		Title: "from the event log", OccurredAt: at, ReceivedAt: at,
 		CorrelationRef: "dep-1", Attributes: map[string]any{},
@@ -86,7 +89,7 @@ func TestRunWithoutRebuildTenantLeavesTheProjectionAlone(t *testing.T) {
 	tn := "migrate-norebuild-" + token
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	_, _, err = store.AppendEvent(ctx, core.Event{
-		ID: "migrate-norebuild-ev-" + token, Tenant: tn, SchemaVersion: 1,
+		ID: core.NewULID(time.Now(), rand.Reader), Tenant: tn, SchemaVersion: 1,
 		Source: "ci", Type: "deployment.started", Subject: "acme/prod", Actor: "ci-bot",
 		OccurredAt: at, ReceivedAt: at, CorrelationRef: "dep-1",
 		Attributes: map[string]any{},

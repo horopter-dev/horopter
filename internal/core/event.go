@@ -48,7 +48,21 @@ type Event struct {
 // Validate reports whether the event may be appended to the log. Every failure wraps
 // ErrInvalidEvent, which is what lets a caller answer it as the caller's own fault rather
 // than as a transient store failure.
+//
+// The id check only catches a malformed id, never a colliding one: ParseStrict rejects
+// anything that is not a syntactically valid 26-character ULID, but two distinct events
+// can still present the same well-formed id, and this is not where that would be caught.
+// Every write reaches the store through AppendEvent, which calls Validate first, so this
+// is the only enforcement point the id format has — there is no database CHECK
+// constraint for it. That leaves a second writer bypassing this package as the residual
+// risk; none exists today, and adding a migration to guard against one has a real cost
+// (a schema version bump, daemon coordination) for a hazard that is currently
+// hypothetical.
 func (e Event) Validate() error {
+	if _, err := ulid.ParseStrict(e.ID); err != nil {
+		return fmt.Errorf("%w %q: id must be a 26-character ULID: %w",
+			ErrInvalidEvent, e.ID, err)
+	}
 	if e.Tenant == "" {
 		return fmt.Errorf(
 			"%w %q: tenant is required; set it to \"default\" for "+
