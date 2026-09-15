@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build, lint and test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: horopter
+          POSTGRES_PASSWORD: horopter
+          POSTGRES_DB: horopter
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U horopter"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      HOROPTER_TEST_DSN: postgres://horopter:horopter@localhost:5432/horopter
+      DATABASE_URL: postgres://horopter:horopter@localhost:5432/horopter
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          go build ./...
+
+      - name: Vet
+        run: |
+          set -euo pipefail
+          go vet ./...
+
+      - name: Check formatting
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9.3.0
+        with:
+          version: v2.13.2
+
+      - name: Apply database migrations
+        run: |
+          set -euo pipefail
+          go run ./cmd/horopter-migrate -dsn "$DATABASE_URL"
+
+      - name: Test
+        run: |
+          set -euo pipefail
+          go test -race -count=1 ./...
