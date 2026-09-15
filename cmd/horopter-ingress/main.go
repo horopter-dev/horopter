@@ -16,6 +16,7 @@ import (
 
 	"github.com/yo61/horopter/internal/ingress"
 	"github.com/yo61/horopter/internal/store/postgres"
+	"github.com/yo61/horopter/internal/telemetry"
 )
 
 func main() {
@@ -36,6 +37,12 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	shutdownTelemetry, err := telemetry.Setup(ctx, "horopter-ingress")
+	if err != nil {
+		return err
+	}
+	defer flushTelemetry(shutdownTelemetry)
 
 	store, err := postgres.OpenNoMigrate(ctx, *dsn)
 	if err != nil {
@@ -102,4 +109,19 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// flushTelemetry drains buffered spans during shutdown.
+//
+// It deliberately uses a fresh context rather than the one the signal handler has
+// already cancelled: the spans still in the batch processor are the ones describing
+// whatever caused the shutdown, and flushing them on a cancelled context drops
+// exactly the evidence worth keeping. The timeout bounds a collector that is itself
+// unreachable, which is a normal way for a shutdown to go wrong.
+func flushTelemetry(shutdown func(context.Context) error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := shutdown(ctx); err != nil {
+		slog.Warn("flushing telemetry failed; some spans were lost", "error", err)
+	}
 }

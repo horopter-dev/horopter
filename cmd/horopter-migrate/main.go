@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/yo61/horopter/internal/store/postgres"
+	"github.com/yo61/horopter/internal/telemetry"
 )
 
 // rebuildHelp is the flag's help text. It states the operational cost up front because
@@ -39,6 +41,13 @@ func run(ctx context.Context, dsn, rebuildTenant string) error {
 		return errors.New("DATABASE_URL is required, e.g. " +
 			"postgres://user:pass@host:5432/horopter")
 	}
+
+	shutdownTelemetry, err := telemetry.Setup(ctx, "horopter-migrate")
+	if err != nil {
+		return err
+	}
+	defer flushTelemetry(shutdownTelemetry)
+
 	store, err := postgres.Open(ctx, dsn) // Open applies migrations under an advisory lock
 	if err != nil {
 		return err
@@ -69,4 +78,19 @@ func run(ctx context.Context, dsn, rebuildTenant string) error {
 	}
 	slog.Info("projection rebuilt from the event log", "tenant", rebuildTenant)
 	return nil
+}
+
+// flushTelemetry drains buffered spans during shutdown.
+//
+// It deliberately uses a fresh context rather than the one the signal handler has
+// already cancelled: the spans still in the batch processor are the ones describing
+// whatever caused the shutdown, and flushing them on a cancelled context drops
+// exactly the evidence worth keeping. The timeout bounds a collector that is itself
+// unreachable, which is a normal way for a shutdown to go wrong.
+func flushTelemetry(shutdown func(context.Context) error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := shutdown(ctx); err != nil {
+		slog.Warn("flushing telemetry failed; some spans were lost", "error", err)
+	}
 }

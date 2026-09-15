@@ -15,6 +15,7 @@ import (
 
 	"github.com/yo61/horopter/internal/egress"
 	"github.com/yo61/horopter/internal/store/postgres"
+	"github.com/yo61/horopter/internal/telemetry"
 )
 
 func main() {
@@ -37,15 +38,17 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	store, err := postgres.OpenNoMigrate(ctx, *dsn)
+	shutdownTelemetry, err := telemetry.Setup(ctx, "horopter-egress")
+	if err != nil {
+		return err
+	}
+	defer flushTelemetry(shutdownTelemetry)
+
+	store, err := openStore(ctx, *dsn)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-
-	if err := store.AssertSchemaVersion(ctx); err != nil {
-		return err
-	}
 
 	srv := &http.Server{
 		Addr:    *addr,
@@ -62,11 +65,31 @@ func run() error {
 		IdleTimeout:       120 * time.Second,
 	}
 
+	return serve(ctx, srv)
+}
+
+// openStore connects without migrating and refuses a schema this build does not
+// understand. Only horopter-migrate changes the schema.
+func openStore(ctx context.Context, dsn string) (*postgres.Store, error) {
+	store, err := postgres.OpenNoMigrate(ctx, dsn)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.AssertSchemaVersion(ctx); err != nil {
+		store.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+// serve runs srv until ctx is cancelled or it fails, then drains in-flight requests
+// rather than cutting them mid-write on every rollout.
+func serve(ctx context.Context, srv *http.Server) error {
 	errCh := make(chan error, 1)
 	go func() {
-		slog.Info("horopter-egress listening", "addr", *addr)
+		slog.Info("horopter-egress listening", "addr", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- fmt.Errorf("serve on %s: %w", *addr, err)
+			errCh <- fmt.Errorf("serve on %s: %w", srv.Addr, err)
 		}
 	}()
 
@@ -77,7 +100,6 @@ func run() error {
 		slog.Info("shutting down")
 	}
 
-	// Drain in-flight requests rather than cutting them mid-read on every rollout.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
@@ -88,4 +110,19 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// flushTelemetry drains buffered spans during shutdown.
+//
+// It deliberately uses a fresh context rather than the one the signal handler has
+// already cancelled: the spans still in the batch processor are the ones describing
+// whatever caused the shutdown, and flushing them on a cancelled context drops
+// exactly the evidence worth keeping. The timeout bounds a collector that is itself
+// unreachable, which is a normal way for a shutdown to go wrong.
+func flushTelemetry(shutdown func(context.Context) error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := shutdown(ctx); err != nil {
+		slog.Warn("flushing telemetry failed; some spans were lost", "error", err)
+	}
 }
