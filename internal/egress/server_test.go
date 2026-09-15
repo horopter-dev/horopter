@@ -304,45 +304,82 @@ func TestGrafanaAnnotationsPOSTSignalsTruncation(t *testing.T) {
 		"rows were discarded and the caller has no other way to find out")
 }
 
+// closedTypeFor returns an event type unique to this call whose last dot-separated
+// segment is "completed", so core.Fold gives the change a terminal status and an end.
+//
+// Both halves matter to TestGrafanaAnnotationsPOSTPathTenantIsScoped. Uniqueness is how
+// a row is recognised in a Grafana annotation, which carries neither tenant nor ref: its
+// title falls back to the event type. Terminal is what bounds the row in time — an open
+// change's end_effective is core.OpenSentinel, so it would match every later query
+// window however narrow, and rows seeded in tenant "default" outlive the test that wrote
+// them.
+func closedTypeFor(t *testing.T, suffix string) string {
+	t.Helper()
+	return fmt.Sprintf("horopter.scoped-%s-%s-%s.completed",
+		procToken, strconv.FormatUint(seedSeq.Add(1), 36), suffix)
+}
+
+// annotationTitles returns the title of every annotation in a rendered response.
+func annotationTitles(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var anns []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &anns))
+	titles := make([]string, 0, len(anns))
+	for _, a := range anns {
+		title, ok := a["title"].(string)
+		require.True(t, ok, "every annotation must carry a string title")
+		titles = append(titles, title)
+	}
+	return titles
+}
+
 // TestGrafanaAnnotationsPOSTPathTenantIsScoped is F2's guard: a POST to the
 // path-scoped route must query that path's tenant, and the pre-existing
 // tenant-less route must still resolve to DefaultTenant — the mechanism a real
 // Grafana can actually reach, since both of its access modes discard a "?tenant="
 // query parameter baked into the configured datasource URL (see fix-c-report.md).
 //
-// This never seeds DefaultTenant itself: nothing else in this suite does either,
-// since the shared database is never truncated, and asserting "empty" against a
-// tenant this test never writes to is the one way to check that reliably across
-// repeated runs.
+// The tenant-less leg used to assert the response was EMPTY, having seeded nothing in
+// DefaultTenant. That is satisfied by every wrong answer as well as the right one: a
+// route resolving to "", to a typo, or to a tenant that happens not to exist returns an
+// empty list too. So DefaultTenant is now seeded with a row of its own and the assertion
+// is that the response CONTAINS it — which only the correct resolution produces.
+//
+// Contains, never a count: this database is never truncated, so tenant "default"
+// accumulates a row per execution, and no count of it is stable. The three rows share an
+// instant taken from the wall clock and the window is a second either side of it, which
+// keeps earlier runs' rows — terminal, so bounded by their own end — out of range and the
+// result well clear of MaxLimit. A concurrent run landing inside that window adds rows
+// this test simply does not name, which is why every assertion is by unique title.
 func TestGrafanaAnnotationsPOSTPathTenantIsScoped(t *testing.T) {
 	h, s, tnA := newServer(t)
 	tnB := tnA + "-b"
-	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
-	seed(t, s, tnA, "dep-a", "deployment.started", at)
-	seed(t, s, tnB, "dep-b", "deployment.started", at)
+	at := time.Now().UTC()
+	typeA, typeB := closedTypeFor(t, "a"), closedTypeFor(t, "b")
+	typeDefault := closedTypeFor(t, "default")
+	seed(t, s, tnA, "dep-a", typeA, at)
+	seed(t, s, tnB, "dep-b", typeB, at)
+	seed(t, s, egress.DefaultTenant, "dep-default-"+procToken, typeDefault, at)
 
-	body := annotationBody(
-		time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC),
-		time.Date(2026, 9, 14, 11, 0, 0, 0, time.UTC))
+	body := annotationBody(at.Add(-time.Second), at.Add(time.Second))
 
-	recA := postJSON(t, h, "/adapters/grafana/"+tnA+"/annotations", body)
-	require.Equal(t, http.StatusOK, recA.Code, recA.Body.String())
-	var annsA []map[string]any
-	require.NoError(t, json.Unmarshal(recA.Body.Bytes(), &annsA))
-	assert.Len(t, annsA, 1, "the path tenant must scope the query to tnA, not tnB or default")
+	titlesA := annotationTitles(t, postJSON(t, h, "/adapters/grafana/"+tnA+"/annotations", body))
+	assert.Equal(t, []string{typeA}, titlesA,
+		"the path tenant must scope the query to tnA, not tnB or default")
 
-	recB := postJSON(t, h, "/adapters/grafana/"+tnB+"/annotations", body)
-	require.Equal(t, http.StatusOK, recB.Code, recB.Body.String())
-	var annsB []map[string]any
-	require.NoError(t, json.Unmarshal(recB.Body.Bytes(), &annsB))
-	assert.Len(t, annsB, 1, "the path tenant must scope the query to tnB, not tnA or default")
+	titlesB := annotationTitles(t, postJSON(t, h, "/adapters/grafana/"+tnB+"/annotations", body))
+	assert.Equal(t, []string{typeB}, titlesB,
+		"the path tenant must scope the query to tnB, not tnA or default")
 
-	recDefault := postJSON(t, h, "/adapters/grafana/annotations", body)
-	require.Equal(t, http.StatusOK, recDefault.Code, recDefault.Body.String())
-	var annsDefault []map[string]any
-	require.NoError(t, json.Unmarshal(recDefault.Body.Bytes(), &annsDefault))
-	assert.Empty(t, annsDefault,
-		"the tenant-less route must resolve to DefaultTenant, not leak tnA or tnB's rows")
+	titlesDefault := annotationTitles(t, postJSON(t, h, "/adapters/grafana/annotations", body))
+	assert.Contains(t, titlesDefault, typeDefault,
+		"the tenant-less route must resolve to DefaultTenant; an empty result would also "+
+			"be returned by a route resolving to \"\" or to a typo, so absence proves nothing")
+	assert.NotContains(t, titlesDefault, typeA,
+		"the tenant-less route must not leak tnA's rows")
+	assert.NotContains(t, titlesDefault, typeB,
+		"the tenant-less route must not leak tnB's rows")
 }
 
 // TestGrafanaAnnotationsPOSTRejectsOversizedBody is F3's guard: an unauthenticated
@@ -645,4 +682,89 @@ func TestQueryChangesEmitsBothStartFacts(t *testing.T) {
 			"this pair exists to make queryable")
 	assert.Equal(t, asserted.Format(time.RFC3339Nano), got["start"],
 		"start follows the assertion once there is one")
+}
+
+// TestReadyzReports503WhenTheDatabaseIsUnreachable is the half of the readiness contract
+// that matters. A readiness probe exists to remove a pod from the load balancer, so a
+// readyz that only ever answers 200 is worse than none: it keeps a daemon that cannot
+// reach its database in rotation, answering every query with a 500. The happy path above
+// cannot catch that — a handler that returned 200 unconditionally passes it.
+//
+// Closing the pool is a real database outage rather than a faked error: Ping then fails
+// the way it fails when Postgres is gone, which is the case readyz exists for.
+// pgxpool.Close is guarded by a sync.Once, so newServer's own t.Cleanup close is safe.
+func TestReadyzReports503WhenTheDatabaseIsUnreachable(t *testing.T) {
+	h, s, _ := newServer(t)
+	s.Close()
+
+	rec := get(t, h, "/readyz")
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "database unreachable",
+		"an operator reading the probe's body must be told what is wrong")
+}
+
+// TestEgressRejectsAnInvertedWindow pins from > to as the caller's error on every window
+// parser egress has. It was accepted: the overlap predicate is
+// "start_at <= :to AND end_effective >= :from", so an inverted window does not return
+// nothing, it returns the changes SPANNING the interval the caller inverted — a
+// plausible-looking answer to a question nobody asked.
+//
+// All four transports are driven because the rule lives in newWindow and each parser has
+// to route through it; a parser that builds a window literal instead would pass every
+// other test in this file.
+func TestEgressRejectsAnInvertedWindow(t *testing.T) {
+	h, _, tn := newServer(t)
+	early := time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC)
+	late := time.Date(2026, 9, 14, 11, 0, 0, 0, time.UTC)
+	inverted := "&from=" + late.Format(time.RFC3339) + "&to=" + early.Format(time.RFC3339)
+
+	for name, url := range map[string]string{
+		"/v1/changes":          "/v1/changes?tenant=" + tn + inverted,
+		"/adapters/otlp/spans": "/adapters/otlp/spans?tenant=" + tn + inverted,
+		"GET /adapters/grafana/annotations": fmt.Sprintf(
+			"/adapters/grafana/annotations?tenant=%s&from=%d&to=%d",
+			tn, late.UnixMilli(), early.UnixMilli()),
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := get(t, h, url)
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "earliest first",
+				"the message must say what the caller should change about its own request")
+		})
+	}
+
+	t.Run("POST /adapters/grafana/annotations", func(t *testing.T) {
+		rec := postJSON(t, h, "/adapters/grafana/annotations?tenant="+tn,
+			annotationBody(late, early))
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "earliest first")
+	})
+}
+
+// TestGrafanaRejectsAnOutOfRangeEpochWindow pins the epoch bound. epochMillisParam
+// accepted any int64, and the failure that produced was silent rather than loud:
+// to=9223372036854775807 is a year-292278994 time.Time, pgx encodes timestamptz as
+// microseconds since 2000-01-01 in an int64, and that overflows — measured on this stack
+// it binds as 1969-12-31T23:59:59.999Z. The endpoint answered 200 with an empty list, so
+// a caller asking for everything up to the end of time was told there was nothing, with
+// no error raised anywhere for an operator to see. The assertions check both halves: the
+// status is the caller's own 400, and the body names the caller's parameter rather than
+// our store.
+func TestGrafanaRejectsAnOutOfRangeEpochWindow(t *testing.T) {
+	h, _, tn := newServer(t)
+	for name, url := range map[string]string{
+		"to overflows int64": "/adapters/grafana/annotations?tenant=" + tn +
+			"&from=0&to=9223372036854775807",
+		"from predates the epoch": "/adapters/grafana/annotations?tenant=" + tn +
+			"&from=-1&to=1789383600000",
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := get(t, h, url)
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "out of range",
+				"the caller must be told its own value was rejected")
+			assert.NotContains(t, strings.ToLower(rec.Body.String()), "postgres",
+				"a bad window must never surface store detail to an unauthenticated caller")
+		})
+	}
 }

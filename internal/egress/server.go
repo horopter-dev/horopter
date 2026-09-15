@@ -129,6 +129,28 @@ func rfc3339Param(r *http.Request, name string) (time.Time, error) {
 	return t, nil
 }
 
+// minEpochMillis and maxEpochMillis bound a Grafana-style epoch-millisecond parameter.
+//
+// The ceiling is core.OpenSentinel, the literal migration 0002 generates for an open
+// change's end_effective: nothing in the projection can extend past it, so a window
+// reaching beyond it can contain nothing a shorter one does not. The floor is the Unix
+// epoch, which is where this transport's own zero is.
+//
+// The bound belongs at the parser, because nothing downstream of it reports the problem.
+// Without it any int64 was accepted: ?to=9223372036854775807 became a year-292278994
+// time.Time, and pgx encodes timestamptz as microseconds since 2000-01-01 in an int64, so
+// that value OVERFLOWS and wraps. Measured against this stack (pgx v5, Postgres 18) it
+// binds as 1969-12-31T23:59:59.999Z — a caller asking for everything up to the end of
+// time is silently given a window ending before the Unix epoch, and answered 200 with an
+// empty list. No error is raised anywhere, so relaying store errors verbatim never comes
+// into it and there is nothing for an operator to notice; the caller simply gets a
+// confident wrong answer. A 400 naming the parameter is the only place that can be
+// caught.
+var (
+	minEpochMillis = time.Unix(0, 0).UTC().UnixMilli()
+	maxEpochMillis = core.OpenSentinel.UnixMilli()
+)
+
 // epochMillisParam parses a Grafana-style epoch-millisecond parameter.
 func epochMillisParam(r *http.Request, name string) (time.Time, error) {
 	raw := r.URL.Query().Get(name)
@@ -140,6 +162,14 @@ func epochMillisParam(r *http.Request, name string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, fmt.Errorf(
 			"query parameter %q=%q is not epoch milliseconds: %w", name, raw, err)
+	}
+	if ms < minEpochMillis || ms > maxEpochMillis {
+		return time.Time{}, fmt.Errorf(
+			"query parameter %q=%d is out of range; epoch milliseconds must be between "+
+				"%d (%s) and %d (%s)",
+			name, ms,
+			minEpochMillis, time.UnixMilli(minEpochMillis).UTC().Format(time.RFC3339),
+			maxEpochMillis, time.UnixMilli(maxEpochMillis).UTC().Format(time.RFC3339))
 	}
 	return time.UnixMilli(ms).UTC(), nil
 }
@@ -176,6 +206,24 @@ type window struct {
 	limit    int
 }
 
+// newWindow assembles a validated window, and is the single place from and to are
+// checked against each other. All three parsers below build their result through it —
+// RFC3339 query parameters, Grafana's epoch milliseconds, and Grafana's RFC3339 POST
+// body — so a fourth transport cannot be added without inheriting the rule.
+//
+// An inverted window is the caller's error, not an empty result. The overlap predicate
+// is "start_at <= :to AND end_effective >= :from", which for from > to selects the
+// changes SPANNING the interval the caller inverted: a non-empty answer bearing no
+// relation to the question asked, and indistinguishable from a correct one.
+func newWindow(from, to time.Time, limit int) (window, error) {
+	if from.After(to) {
+		return window{}, fmt.Errorf(
+			"query window from=%s is after to=%s; give the range earliest first",
+			from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339))
+	}
+	return window{from: from, to: to, limit: limit}, nil
+}
+
 // windowFromRFC3339 reads from/to as RFC3339 and limit as an optional bounded
 // integer, matching the neutral API and the OTLP adapter's parameter contract.
 func windowFromRFC3339(r *http.Request) (window, error) {
@@ -191,7 +239,7 @@ func windowFromRFC3339(r *http.Request) (window, error) {
 	if err != nil {
 		return window{}, err
 	}
-	return window{from: from, to: to, limit: limit}, nil
+	return newWindow(from, to, limit)
 }
 
 // windowFromEpochMillis reads from/to as epoch milliseconds and limit as an optional
@@ -212,7 +260,7 @@ func windowFromEpochMillis(r *http.Request) (window, error) {
 	if err != nil {
 		return window{}, err
 	}
-	return window{from: from, to: to, limit: limit}, nil
+	return newWindow(from, to, limit)
 }
 
 // grafanaAnnotationRequest is the JSON body grafana/simple-json-datasource — an
@@ -253,7 +301,7 @@ func windowFromAnnotationBody(r *http.Request) (window, error) {
 	if err != nil {
 		return window{}, err
 	}
-	return window{from: from, to: to, limit: limit}, nil
+	return newWindow(from, to, limit)
 }
 
 func (s *Server) changesFor(r *http.Request, win window) ([]core.Change, bool, error) {
