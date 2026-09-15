@@ -7,6 +7,18 @@ services:
       POSTGRES_DB: horopter
     ports:
       - "5432:5432"
+    volumes:
+      # Mounted at /var/lib/postgresql, NOT /var/lib/postgresql/data. postgres:18 moved
+      # PGDATA to /var/lib/postgresql/18/docker and the image declares its VOLUME at the
+      # parent, so the older path — which every pre-18 example uses — would mount an empty
+      # directory Postgres ignores. The volume would appear in `docker volume ls`, look
+      # correct, and protect nothing.
+      #
+      # Naming it is the point. Without this stanza the image's declared VOLUME still gets
+      # one, but anonymously: `docker compose down` orphans it under a hash nobody can
+      # identify, and the next `up` starts on an empty database. A named volume survives
+      # `down` and is removed only by `down -v`.
+      - horopter-db-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U horopter"]
       interval: 2s
@@ -52,3 +64,6 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+
+volumes:
+  horopter-db-data:
