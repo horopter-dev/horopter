@@ -386,11 +386,16 @@ func (s *Store) AppendEvent(
 	ctx, span := tracer().Start(ctx, "AppendEvent")
 	defer span.End()
 
+	// submitted is the event as the caller sent it. The deferred record must NOT read the
+	// ev that prepareEvent returns: on a validation failure prepareEvent returns a zero
+	// core.Event, so tenant, id, type, source, subject and ref would all be blank on
+	// exactly the error class these attributes exist to make debuggable.
+	submitted := ev
 	out := appendOutcome{dedupePath: dedupeNone}
 	defer func() {
 		out.created = created
 		out.errKind = errKindOf(err)
-		span.SetAttributes(out.attributes(ev)...)
+		span.SetAttributes(out.attributes(submitted)...)
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, out.errKind)

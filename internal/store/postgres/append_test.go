@@ -435,4 +435,10 @@ func TestAppendRecordsTheErrorKindOnAFailure(t *testing.T) {
 	kinds := spanAttrValues(rec, "AppendEvent", "horopter.error.kind")
 	assert.Equal(t, []string{"invalid_event"}, kinds,
 		"a validation failure must be recorded as the caller's fault, not a store outage")
+
+	assert.Equal(t, []string{tn}, spanAttrValues(rec, "AppendEvent", "horopter.tenant"),
+		"a rejected event must still say whose tenant it came from")
+	assert.Equal(t, []string{"deployment.started"},
+		spanAttrValues(rec, "AppendEvent", "horopter.event.type"),
+		"a rejected event must still say what type it claimed to be")
 }
