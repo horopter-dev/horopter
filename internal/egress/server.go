@@ -23,6 +23,7 @@ import (
 	"github.com/yo61/horopter/internal/adapter/otlp"
 	"github.com/yo61/horopter/internal/core"
 	"github.com/yo61/horopter/internal/store/postgres"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // DefaultTenant is used when a request omits one.
@@ -80,7 +81,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /adapters/otlp/spans", s.otlpSpans)
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
-	return mux
+	// otelhttp gives every route a server span carrying the http.* semantic
+	// conventions. It wraps the mux rather than each handler so a route added later is
+	// covered without anyone remembering. With no provider installed it is a no-op.
+	return otelhttp.NewHandler(mux, "horopter-egress")
 }
 
 // healthz reports process liveness only. It must not touch the database: a failing

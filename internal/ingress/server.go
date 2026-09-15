@@ -11,6 +11,7 @@
 package ingress
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,9 @@ import (
 
 	"github.com/yo61/horopter/internal/core"
 	"github.com/yo61/horopter/internal/store/postgres"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // DefaultTenant is used when a request omits one. v0.1 runs single-tenant in practice,
@@ -75,7 +79,10 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/events/cloudevents", s.auth(http.HandlerFunc(s.postCloudEvent)))
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
-	return mux
+	// otelhttp gives every route a server span carrying the http.* semantic
+	// conventions. It wraps the mux rather than each handler so a route added later is
+	// covered without anyone remembering. With no provider installed it is a no-op.
+	return otelhttp.NewHandler(mux, "horopter-ingress")
 }
 
 // auth enforces the bearer token using a constant-time comparison.
@@ -120,6 +127,13 @@ type eventRequest struct {
 	Attributes     map[string]any `json:"attributes"`
 }
 
+// recordTenant puts the resolved tenant on the request's span. The tenant is the
+// primary dimension every other question is sliced by, so it goes on the span that
+// exists for every request rather than only on the ones that reach the store.
+func recordTenant(ctx context.Context, tenantID string) {
+	trace.SpanFromContext(ctx).SetAttributes(attribute.String("horopter.tenant", tenantID))
+}
+
 func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, MaxBodyBytes)
 	var req eventRequest
@@ -133,6 +147,7 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 	if tenantID == "" {
 		tenantID = DefaultTenant
 	}
+	recordTenant(r.Context(), tenantID)
 	ev := core.Event{
 		ID:             core.NewULID(now, s.entropy),
 		Tenant:         tenantID,

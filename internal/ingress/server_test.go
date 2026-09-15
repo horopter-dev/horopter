@@ -22,6 +22,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/yo61/horopter/internal/ingress"
 	"github.com/yo61/horopter/internal/store/postgres"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 var fixed = time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
@@ -104,6 +107,32 @@ func TestPostEventCreatesChange(t *testing.T) {
 	rec := post(t, h, "/v1/events", body, testToken)
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), `"ref":"dep-7"`)
+}
+
+// TestPostEventRecordsTheTenantOnTheSpan pins horopter.tenant on the request's server
+// span. Task 6 and Task 7 rely on it being set once per request, on the span that
+// exists for every request, rather than only on the ones that reach the store.
+func TestPostEventRecordsTheTenantOnTheSpan(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)))
+	t.Cleanup(func() { otel.SetTracerProvider(prev) })
+
+	h, _ := newServer(t)
+	body := `{"tenant":"acme","source":"ci","type":"deployment.started",` +
+		`"subject":"acme/prod","occurred_at":"2026-09-15T10:00:00Z"}`
+	resp := post(t, h, "/v1/events", body, testToken)
+	require.Equal(t, http.StatusCreated, resp.Code)
+
+	var found bool
+	for _, span := range rec.Ended() {
+		for _, kv := range span.Attributes() {
+			if kv.Key == "horopter.tenant" && kv.Value.AsString() == "acme" {
+				found = true
+			}
+		}
+	}
+	assert.True(t, found, "the request's tenant must be recorded on a span")
 }
 
 func TestPostDuplicateIdempotencyKeyReturns200(t *testing.T) {

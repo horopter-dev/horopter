@@ -52,6 +52,7 @@ func (s *Server) postCloudEvent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	recordTenant(r.Context(), ev.Tenant)
 	s.append(w, r, ev)
 }
 
