@@ -9,10 +9,12 @@ import (
 // as separate images and can therefore be deployed at different versions; each asserts
 // this at startup so a skewed rollout fails loudly instead of corrupting data quietly.
 //
-// Migrate derives the recorded version from the highest migration filename, so this
-// constant must be raised in the same change that adds a migration. It is deliberately
-// not read from the SQL: a daemon has to be able to refuse a schema newer than the one
-// its binary was built against.
+// Migrate derives the recorded version from the highest filename in the applied_migration
+// ledger — what the DATABASE has actually run, not what this binary embeds — so this
+// constant must be raised in the same change that adds a migration. It is deliberately not
+// read from the SQL: a daemon has to be able to refuse a schema newer than the one its
+// binary was built against, and an old binary run against a newer database records that
+// database's true, higher version precisely so this assertion fails loudly.
 const ExpectedSchemaVersion = 3
 
 // SchemaVersion reads the version recorded by the migration.

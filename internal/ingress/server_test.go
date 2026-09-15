@@ -171,12 +171,15 @@ func TestHealthzWorksWithNilStore(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "healthz must not require a database")
 }
 
-// TestCloudEventMissingIDReturns400 exists because the CloudEvents id doubles as the
-// idempotency key: an unvalidated envelope with no id silently gets IdempotencyKey ""
-// (core.Event.Validate does not check it, and AppendEvent only dedupes a non-empty
-// key), so a producer that omits id would get 201 on every retry — duplicating the
-// event with nothing surfaced and nothing for an operator to notice. The spec marks id
-// REQUIRED; rejecting it here is what makes that failure impossible instead of latent.
+// TestCloudEventMissingIDReturns400 exists because the CloudEvents id is half the
+// idempotency key: an unvalidated envelope with no id still mints a NON-EMPTY key —
+// idempotencyKey("/buildkite/pipelines/api", "") ends in "/" with nothing after it — and
+// a non-empty key is deduped, because AppendEvent skips dedup only on "". So every
+// id-less envelope from one source would collapse into whichever arrived first, and each
+// later one would be answered 200 {"created": false}: distinct facts silently dropped
+// from a system of record, with nothing surfaced and nothing for an operator to notice.
+// The spec marks id REQUIRED; rejecting it here is what makes that failure impossible
+// instead of latent.
 func TestCloudEventMissingIDReturns400(t *testing.T) {
 	h, _ := newServer(t)
 	body := fmt.Sprintf(`{"specversion":"1.0","source":"/buildkite/pipelines/api",
@@ -198,9 +201,11 @@ func TestCloudEventMissingIDReturns400(t *testing.T) {
 }
 
 // TestCloudEventDuplicateIsIdempotent exists to give the "CloudEvents handler ignores
-// the CloudEvent id" mutation something to kill. The CloudEvents id doubles as the
+// the envelope's identity" mutation something to kill. source and id together form the
 // idempotency key, so replaying the identical envelope — the shape a retried delivery
-// takes — must return 200, not a second created row.
+// takes — must return 200, not a second created row. Its sibling,
+// TestCloudEventsFromDifferentSourcesSharingAnIDAreDistinct, covers the other half of
+// that key; neither test alone pins both.
 func TestCloudEventDuplicateIsIdempotent(t *testing.T) {
 	h, _ := newServer(t)
 	body := fmt.Sprintf(`{"specversion":"1.0","id":%q,"source":"/buildkite/pipelines/api",

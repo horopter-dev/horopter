@@ -399,3 +399,52 @@ func TestTruncationIsSignalledOnEveryReadEndpoint(t *testing.T) {
 		})
 	}
 }
+
+// TestQueryChangesEmitsBothStartFacts pins the two keys migration 0003 split "start" into.
+// The decision document's central argument is that first_seen_at < started_at — an event
+// claiming to predate the change's declared start — must be a QUERYABLE anomaly rather
+// than one the fold destroyed. That is unreachable if the read side never emits the two
+// facts, so the split buys nothing without these keys.
+//
+// The absent case is asserted as well as the present one: started_at missing means "no
+// producer has asserted a start yet", which is a different fact from any timestamp, and a
+// renderer that defaulted it to first_seen_at would put the inference back in the
+// assertion's slot — the exact conflation 0003 exists to undo.
+func TestQueryChangesEmitsBothStartFacts(t *testing.T) {
+	h, s, tn := newServer(t)
+	seen := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	asserted := time.Date(2026, 9, 14, 10, 20, 0, 0, time.UTC)
+	url := "/v1/changes?tenant=" + tn + "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
+
+	only := func() map[string]any {
+		rec := get(t, h, url)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var changes []map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &changes))
+		require.Len(t, changes, 1)
+		return changes[0]
+	}
+
+	// An annotation only: evidence the change exists, with nothing asserting its start.
+	seed(t, s, tn, "dep-facts", "deployment.annotated", seen)
+
+	inferred := only()
+	assert.Equal(t, seen.Format(time.RFC3339Nano), inferred["first_seen_at"],
+		"the inference must be emitted, not just folded into start")
+	assert.NotContains(t, inferred, "started_at",
+		"no producer has asserted a start, and absent is the only honest rendering of that")
+	assert.Equal(t, seen.Format(time.RFC3339Nano), inferred["start"],
+		"start falls through to the inference while the assertion is NULL")
+
+	// Now a start event asserting a LATER time than the earliest evidence.
+	seed(t, s, tn, "dep-facts", "deployment.started", asserted)
+
+	got := only()
+	assert.Equal(t, asserted.Format(time.RFC3339Nano), got["started_at"],
+		"the assertion must be emitted once a producer makes one")
+	assert.Equal(t, seen.Format(time.RFC3339Nano), got["first_seen_at"],
+		"the earlier evidence must survive; first_seen_at < started_at is the anomaly "+
+			"this pair exists to make queryable")
+	assert.Equal(t, asserted.Format(time.RFC3339Nano), got["start"],
+		"start follows the assertion once there is one")
+}

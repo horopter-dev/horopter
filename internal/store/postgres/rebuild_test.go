@@ -174,7 +174,12 @@ func TestAppendFailsFastWhileARebuildHoldsTheTenantLock(t *testing.T) {
 	var once sync.Once
 	postgres.SetAfterDeleteHook(func() {
 		once.Do(func() { close(released) })
-		time.Sleep(postgres.AppendLockTimeout + 500*time.Millisecond)
+		// The margin must cover the appender reaching lockProjectionWrite — a Begin, a
+		// set_config and an event INSERT — within it. Too small a margin and the append
+		// acquires the lock after the rebuild releases it instead of timing out, failing
+		// with "An error is expected but got nil". Derived from the constant so the two
+		// cannot drift apart.
+		time.Sleep(postgres.AppendLockTimeout + 2*time.Second)
 	})
 	t.Cleanup(func() { postgres.SetAfterDeleteHook(nil) })
 

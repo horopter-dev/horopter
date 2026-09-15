@@ -47,10 +47,12 @@ const lockNotAvailable = "55P03"
 // better failure.
 //
 // Three seconds is two orders of magnitude above ordinary same-ref contention (two appends
-// to one ref is a few milliseconds of read-modify-write), so it can only fire when
-// something rebuild-scale holds the lock. It is also well inside a normal HTTP client
-// timeout, so the producer receives a status it can act on rather than a client-side
-// timeout carrying none.
+// to one ref is a few milliseconds of read-modify-write), so a rebuild is the usual cause
+// when it does fire — but it is not the only one a bound of this size can reach. Anything
+// else holding the tenant or ref lock long enough gets here too: a pathologically slow
+// append, a hung transaction, a database under enough load that milliseconds become
+// seconds. The value is also well inside a normal HTTP client timeout, so the producer
+// receives a status it can act on rather than a client-side timeout carrying none.
 const AppendLockTimeout = 3 * time.Second
 
 // RebuildLockTimeout bounds how long a rebuild waits for the tenant lock.
@@ -621,10 +623,11 @@ func lockProjectionWrite(ctx context.Context, tx pgx.Tx, tenantID, ref string) e
 		tenantID, ref); err != nil {
 		if isLockTimeout(err) {
 			return fmt.Errorf(
-				"gave up after %s waiting for the projection lock on %q/%q: %w; a "+
-					"projection rebuild for this tenant holds it for the whole of its "+
-					"run, which is the only thing that waits this long — nothing was "+
-					"written, so retry the append once the rebuild finishes",
+				"gave up after %s waiting for the projection lock on %q/%q: %w; the "+
+					"usual cause is a projection rebuild for this tenant, which holds "+
+					"the lock for the whole of its run, but any long-held transaction "+
+					"on this tenant or ref will do it — nothing was written, so retry "+
+					"the append",
 				AppendLockTimeout, tenantID, ref, err)
 		}
 		return fmt.Errorf(
@@ -702,6 +705,11 @@ func lockAndLoadChange(
 // COALESCE(started_at, first_seen_at) (migration 0003). What this writes is the facts the
 // domain owns — started_at, first_seen_at, end_at — so there is exactly one writer of each
 // derived value and no second writer to drift from.
+//
+// None of the three timestamps is normalised to UTC on the way in. TIMESTAMPTZ stores an
+// absolute instant, so a Go value's location never reaches the column and a .UTC() here
+// would be cosmetic. Applying it to one half of the start fact and not the other spelled
+// the two in adjacent lines as though the difference meant something.
 func upsertChange(ctx context.Context, tx pgx.Tx, c core.Change) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO change (tenant, ref, subject, type, title, actor, started_at,
@@ -714,7 +722,7 @@ func upsertChange(ctx context.Context, tx pgx.Tx, c core.Change) error {
 		  status=EXCLUDED.status, attributes=EXCLUDED.attributes,
 		  last_event_id=EXCLUDED.last_event_id`,
 		c.Tenant, c.Ref, c.Subject, c.Type, c.Title, c.Actor,
-		c.StartedAt, c.FirstSeenAt.UTC(), c.End, string(c.Status), c.Attributes, c.LastEventID,
+		c.StartedAt, c.FirstSeenAt, c.End, string(c.Status), c.Attributes, c.LastEventID,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert change %q/%q: %w", c.Tenant, c.Ref, err)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,12 +31,16 @@ func (s *Server) postCloudEvent(w http.ResponseWriter, r *http.Request) {
 			"; expected application/cloudevents+json")
 		return
 	}
-	// source and id together become the idempotency key below, so an unvalidated
-	// envelope missing either would silently get a half-empty key — core.Event.Validate
-	// does not check it, and AppendEvent only dedupes a non-empty key — meaning every
-	// retry of that envelope creates a new event instead of being recognised as a
-	// duplicate. ce.Validate() enforces the spec's REQUIRED fields (id, source, type),
-	// catching that before it can happen rather than after it silently has.
+	// source and id together become the idempotency key below, and an envelope missing
+	// either still produces a NON-EMPTY key — idempotencyKey("src", "") is "3:src/", not
+	// "" — so findExistingDuplicate (internal/store/postgres/postgres.go:389) dedupes on
+	// it rather than skipping dedup as it does for an empty key. core.Event.Validate does
+	// not check the key either. So without this validation every id-less envelope from
+	// one source collapses into whichever arrived first, and each later one is answered
+	// 200 {"created": false}: a distinct fact silently dropped from a system of record,
+	// which is precisely the failure the composite key exists to eliminate. ce.Validate()
+	// enforces the spec's REQUIRED fields (id, source, type), so the degenerate key can
+	// never be minted in the first place.
 	if err := ce.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid CloudEvent: "+
 			strings.TrimSpace(err.Error()))
@@ -50,14 +55,31 @@ func (s *Server) postCloudEvent(w http.ResponseWriter, r *http.Request) {
 	s.append(w, r, ev)
 }
 
-// eventFromCloudEvent maps a CloudEvent onto the internal Event. The CloudEvents source
-// and id together become the idempotency key, which makes producer retries safe for free.
+// idempotencyKey encodes a CloudEvent's (source, id) pair into the single TEXT value the
+// store dedupes on, injectively: distinct pairs can never produce the same key.
 //
-// Both, not the id alone: CloudEvents guarantees uniqueness of source + id, so ids like
-// "1" or a bare build number are entirely conformant. Keying on the id alone meant two
-// producers that happened to share one silently swallowed the second, genuinely distinct
-// event and answered it 200 {"created": false} — a dropped fact in a system of record,
-// reported as a successful retry.
+// Both halves, not the id alone: CloudEvents guarantees uniqueness of source + id, so ids
+// like "1" or a bare build number are entirely conformant. Keying on the id by itself
+// silently swallowed a second producer's genuinely distinct event and answered it
+// 200 {"created": false} — a dropped fact in a system of record, reported as a successful
+// retry.
+//
+// Joining them under a separator alone does not close that hole, it only narrows it.
+// CloudEvents source is a URI-reference, so embedded slashes are the ordinary case rather
+// than an exotic one, and source "github/repo" with id "123" would collide with source
+// "github" and id "repo/123" under a plain "/" join — the same swallowed event, reached a
+// different way. Writing source's byte length first pins where source ends whatever
+// either half contains, which is what makes the encoding injective. The "/" that follows
+// is for legibility in a log or a table only; it carries no meaning.
+//
+// A NUL separator would be injective too and is deliberately not used: PostgreSQL TEXT
+// cannot store 0x00, so such a key would fail at the INSERT rather than dedupe anything.
+func idempotencyKey(source, id string) string {
+	return strconv.Itoa(len(source)) + ":" + source + "/" + id
+}
+
+// eventFromCloudEvent maps a CloudEvent onto the internal Event. Its source and id become
+// the idempotency key, which makes producer retries safe for free.
 func eventFromCloudEvent(
 	ce cloudevents.Event, now time.Time, id string,
 ) (core.Event, error) {
@@ -66,8 +88,11 @@ func eventFromCloudEvent(
 		if err := json.Unmarshal(ce.Data(), &attrs); err != nil {
 			// Wrapped with core.ErrInvalidEvent because it is the same class of fact as
 			// a missing required field: the caller's own body is wrong, and no retry of
-			// it will ever succeed. Without the wrap it would fall through to 503 and a
-			// producer would retry a body that can never be accepted.
+			// it will ever succeed. The wrap changes no status code today — the sole
+			// caller, postCloudEvent above, answers every error from here 400
+			// unconditionally — so what it buys is that the taxonomy stays true if a
+			// future caller routes this error through appendFailed, which reports an
+			// unwrapped error as a retryable 503.
 			return core.Event{}, fmt.Errorf(
 				"%w: CloudEvent %q: data is not a JSON object: %w",
 				core.ErrInvalidEvent, ce.ID(), err)
@@ -94,7 +119,7 @@ func eventFromCloudEvent(
 	return core.Event{
 		ID:             id,
 		Tenant:         tenantID,
-		IdempotencyKey: ce.Source() + "/" + ce.ID(),
+		IdempotencyKey: idempotencyKey(ce.Source(), ce.ID()),
 		SchemaVersion:  core.CurrentSchemaVersion,
 		Source:         ce.Source(),
 		Type:           ce.Type(),

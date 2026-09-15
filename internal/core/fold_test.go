@@ -89,13 +89,26 @@ func TestFoldTitleFallsBackToType(t *testing.T) {
 // caught by comparing a pre-fold clone against base.Attributes afterwards.
 // x and y are compared as whole structs, not field-by-field, so a divergence
 // in any of Change's fields fails the test.
+//
+// The second event is a start-type carrying an EARLIER occurred_at, which is
+// the one input that makes foldLifecycle write StartedAt on a change that
+// already has one. out.StartedAt is a pointer copied wholesale from cur, so an
+// implementation that wrote through it (*out.StartedAt = ev.OccurredAt)
+// instead of assigning a fresh &at would reach back into the caller's Change
+// and silently rewrite it. Comparing x against y cannot catch that — both
+// would hold the same mutated pointer — so base.StartedAt is captured by VALUE
+// beforehand and asserted afterwards. With a terminal second event, as this
+// test used to have, that branch is never entered and the pointer is never
+// exercised at all.
 func TestFoldIsPure(t *testing.T) {
-	a := ev("01A", "dep-7", "deployment.started", t10)
+	a := ev("01A", "dep-7", "deployment.started", t20)
 	a.Attributes = map[string]any{"service.version": "2.4.0"}
 	base := core.Fold(nil, a)
 	baseAttrsBefore := maps.Clone(base.Attributes)
+	require.NotNil(t, base.StartedAt, "precondition: base carries an asserted start")
+	baseStartedBefore := *base.StartedAt
 
-	b := ev("01B", "dep-7", "deployment.completed", t20)
+	b := ev("01B", "dep-7", "deployment.started", t10)
 	b.Attributes = map[string]any{"service.version": "2.5.0"}
 
 	x := core.Fold(&base, b)
@@ -104,6 +117,13 @@ func TestFoldIsPure(t *testing.T) {
 	assert.Equal(t, x, y, "folding identical input twice must give identical output")
 	assert.Equal(t, baseAttrsBefore, base.Attributes,
 		"Fold must not mutate the input change's attribute map")
+	require.NotNil(t, base.StartedAt)
+	assert.Equal(t, baseStartedBefore, *base.StartedAt,
+		"Fold must not write through the StartedAt pointer it copied from cur; the "+
+			"caller's Change must be untouched")
+	assert.Equal(t, t10, *x.StartedAt,
+		"precondition: the fold really did take the earlier assertion, so the branch "+
+			"that writes StartedAt was entered")
 }
 
 // F2: a terminal event folded onto a change that already has a non-nil End

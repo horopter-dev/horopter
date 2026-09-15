@@ -38,6 +38,49 @@ Each service is configured with environment variables:
 - `HOROPTER_ADDR` — listen address for `horopter-ingress` and `horopter-egress`
   (defaults to `0.0.0.0:8080` and `0.0.0.0:8081` respectively).
 
+## Upgrading
+
+`horopter-migrate` is the only binary permitted to apply schema DDL. Run it to completion
+against the database before starting any daemon at the new version; each daemon asserts the
+recorded schema version at startup and refuses to run against one it does not understand,
+so a skewed rollout fails loudly rather than corrupting data quietly.
+
+### Rebuilding a tenant's projection
+
+    horopter-migrate --rebuild-tenant=<tenant-id>
+
+The `change` table is a derived view of the immutable `event` log, so it can always be
+discarded and replayed. This runs only after the schema-version assertion passes.
+
+**It blocks every append for that tenant for the whole of its run.** Blocked appends fail
+after a few seconds with a retryable `503`, so producers retry rather than losing events,
+but the rebuild is not batched, reports no progress, and cannot run online. Run it when the
+tenant's write traffic is quiet.
+
+Migration `0003` needs it. It splits a change's start into `started_at` (what a producer
+asserted) and `first_seen_at` (the earliest event seen), and existing rows cannot be
+backfilled truthfully from the projection alone — which of the two an old `start_at` was is
+exactly what the previous model destroyed. The migration records `first_seen_at = start_at`
+and `started_at = NULL`, meaning "we do not know". A rebuild is what replaces that with the
+real values from the event log.
+
+### v0.1 pre-release: the CloudEvents idempotency key format changed
+
+The key `POST /v1/events/cloudevents` dedupes on was the CloudEvents `id` alone. It is now
+an unambiguous encoding of `source` **and** `id` together, because CloudEvents guarantees
+uniqueness of the pair and not of the id by itself — two producers sharing an id had the
+second event silently swallowed and answered `200 {"created": false}`.
+
+An envelope stored under the old key is a cache miss under the new one, so **a producer
+retry that spans the upgrade creates a second event** rather than being recognised as a
+duplicate. There is no migration for this: the old keys stay in the `event` table as they
+are and simply stop matching.
+
+For v0.1 pre-release, with no production data, that is accepted rather than worked around.
+If you are carrying data you care about, quiesce producers across the upgrade, or accept
+and later reconcile the duplicates. `POST /v1/events` is unaffected — its `idempotency_key`
+is supplied by the caller verbatim.
+
 ## Licence
 
 TBD
