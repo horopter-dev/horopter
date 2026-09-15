@@ -33,10 +33,10 @@ func (s *Server) postCloudEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	// source and id together become the idempotency key below, and an envelope missing
 	// either still produces a NON-EMPTY key — idempotencyKey("src", "") is "3:src/", not
-	// "" — so findExistingDuplicate (internal/store/postgres/postgres.go:389) dedupes on
-	// it rather than skipping dedup as it does for an empty key. core.Event.Validate does
-	// not check the key either. So without this validation every id-less envelope from
-	// one source collapses into whichever arrived first, and each later one is answered
+	// "" — so findExistingDuplicate dedupes on it rather than skipping dedup as it does
+	// for an empty key. core.Event.Validate does not check the key either. So without
+	// this validation every id-less envelope from one source collapses into whichever
+	// arrived first, and each later one is answered
 	// 200 {"created": false}: a distinct fact silently dropped from a system of record,
 	// which is precisely the failure the composite key exists to eliminate. ce.Validate()
 	// enforces the spec's REQUIRED fields (id, source, type), so the degenerate key can
