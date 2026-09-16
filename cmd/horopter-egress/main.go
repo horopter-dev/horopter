@@ -44,6 +44,10 @@ func run() error {
 	}
 	defer tel.Flush()
 
+	if err := tel.ServeMetrics(); err != nil {
+		return err
+	}
+
 	store, err := openStore(ctx, *dsn)
 	if err != nil {
 		return err

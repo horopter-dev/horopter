@@ -2,11 +2,17 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -97,4 +103,63 @@ func otlpMetricReader(ctx context.Context, serviceName string) []sdkmetric.Optio
 		return nil
 	}
 	return []sdkmetric.Option{sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter))}
+}
+
+// ServeMetrics binds the /metrics listener and serves it in the background.
+//
+// The bind happens BEFORE it returns, so an invalid port, a host that does not resolve or an
+// address already in use is an error the caller sees and exits on. The endpoint is on by
+// default, and one that was meant to be there and silently was not would look like a working
+// configuration. With OTEL_SDK_DISABLED=true there is no registry, and it does nothing — the
+// Prometheus variables are not even validated.
+//
+// The listener is deliberately not wrapped in otelhttp: a scrape every 15 seconds would
+// otherwise dominate the HTTP request metrics and produce a telemetry span per scrape.
+func (t *Telemetry) ServeMetrics() error {
+	if t.registry == nil {
+		return nil
+	}
+	addr, err := metricsAddr(t.cfg.prometheusHost, t.cfg.prometheusPort)
+	if err != nil {
+		return err
+	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen for /metrics on %s (OTEL_EXPORTER_PROMETHEUS_HOST=%q, "+
+			"OTEL_EXPORTER_PROMETHEUS_PORT=%q): %w",
+			addr, t.cfg.prometheusHost, t.cfg.prometheusPort, err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", promhttp.HandlerFor(t.registry, promhttp.HandlerOpts{}))
+	t.metricsServer = &http.Server{
+		Handler: mux,
+		// The same bounds the API servers use, for the same reasons: a slow or idle client
+		// must not hold a connection, and so a file descriptor, indefinitely.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	slog.Info("serving metrics", "addr", listener.Addr().String())
+	go serveMetrics(t.metricsServer, listener)
+	return nil
+}
+
+// serveMetrics runs the metrics server until Flush shuts it down. An error after a
+// successful bind is logged rather than stopping the daemon: its API is still serving.
+func serveMetrics(server *http.Server, listener net.Listener) {
+	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		slog.Error("the metrics server stopped", "error", err)
+	}
+}
+
+// metricsAddr validates the port and joins it to the host. The port is re-rendered from the
+// parsed integer, so a form Atoi accepts but net.Listen might not never reaches the bind.
+func metricsAddr(host, port string) (string, error) {
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return "", fmt.Errorf("OTEL_EXPORTER_PROMETHEUS_PORT=%q is not a port; "+
+			"expected an integer from 1 to 65535", port)
+	}
+	return net.JoinHostPort(host, strconv.Itoa(n)), nil
 }
