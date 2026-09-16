@@ -89,8 +89,13 @@ by environment variables, resolved once at startup:
   OTel's own SDK default is `localhost:4318`, and honouring that default would
   mean every developer running Horopter with no collector nearby gets a stream
   of export failures that look like a fault and are not one.
-- `OTEL_SDK_DISABLED` — set to `true` to force tracing off even when an endpoint
-  is configured. This is the standard OTel variable name; `opentelemetry-go`
+- `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` — the signal-specific form of the above,
+  e.g. `http://otel-collector:4318/v1/traces`. Setting either one turns tracing
+  on; setting this one takes precedence in the exporter, which is the standard
+  OTel rule and the normal shape when traces and metrics go to different
+  collectors.
+- `OTEL_SDK_DISABLED` — set to `true` to force tracing off even when either
+  endpoint is configured. This is the standard OTel variable name; `opentelemetry-go`
   does not implement it itself (a proposal to add it to the SDK was declined on
   the grounds that applications can), so Horopter reads it directly.
 - `OTEL_SERVICE_NAME` — overrides the `service.name` resource attribute reported
@@ -98,7 +103,7 @@ by environment variables, resolved once at startup:
   `horopter-egress` or `horopter-migrate`.
 - `OTEL_RESOURCE_ATTRIBUTES` — comma-separated `key=value` pairs merged onto the
   resource every span carries, e.g. `deployment.environment.name=prod,team=platform`.
-  **This one is different from the other four**: Horopter's own configuration code
+  **This one is different from the other five**: Horopter's own configuration code
   never reads it. It works because building the resource calls the OpenTelemetry
   SDK's `resource.Default()`, and that function's own environment detector reads
   this variable — the same thing it would do for any Go program built on this SDK,
@@ -110,7 +115,10 @@ by environment variables, resolved once at startup:
   silence even while tracing is otherwise on. Recognised areas:
   - `http` — the server span `otelhttp` wraps every request in.
   - `store` — the spans the store package creates around each store-level
-    operation (append an event, list events, list changes).
+    operation: append an event, list events, list changes, and rebuild a
+    tenant's projection. Disabling it on `horopter-migrate` silences the
+    rebuild span, which is the one an operator running `--rebuild-tenant`
+    most wants.
   - `sql` — the per-statement spans `otelpgx` creates around every SQL
     statement the store issues.
 
@@ -121,6 +129,20 @@ by environment variables, resolved once at startup:
   area that doesn't exist yet — if a later release instruments a new one, a
   config written for it ahead of time needs no change; it starts taking
   effect the moment that area's spans start naming themselves that.
+
+**A telemetry failure never stops a daemon.** If the tracer provider cannot be
+built, the binary logs a single `ERROR` line naming the service and the cause,
+then carries on with tracing off. Losing change events is the worst failure this
+system has and traces are secondary, so a telemetry problem must not stop ingress
+accepting events. Watch for that line: it is the only signal that tracing is
+configured but not running.
+
+Two things this does *not* cover, both upstream behaviour rather than Horopter's:
+a malformed value in any `OTEL_EXPORTER_OTLP_*` variable is reported by the SDK's
+own internal logger and then ignored, so the exporter falls back to its defaults
+instead of failing; and export failures at run time — a collector that is down or
+rejecting spans — are logged at `WARN` and retried by the batch processor, not
+surfaced as a startup failure.
 
 **Recommended production setting:** enable `sql` on `horopter-ingress`; set
 `HOROPTER_TRACE_DISABLE=sql` on `horopter-egress` to disable it there. An
