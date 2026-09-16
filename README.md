@@ -48,15 +48,15 @@ credential check of any kind. A caller can list a tenant's full change history a
 event log: subjects, actors, titles, correlation refs, and every attribute a producer
 attached, including whatever was put in `horopter.description`.
 
-Egress also relays raw store errors verbatim in its HTTP responses, so a failure can
-surface internal detail — a Postgres error message, a query shape — to that same
-unauthenticated caller.
+A read that fails is answered `500` with a generic body, and the underlying error — which
+can name tables, constraints and the database host — is written to the daemon's log
+instead, so a failure does not hand internal detail to that same caller.
 
-Both are deliberate decisions for v0.1, not oversights. `horopter-ingress` does require a
-bearer token (`HOROPTER_INGRESS_TOKEN`) on writes, so this exposure is specific to the
-read side. If you deploy this anywhere it is reachable by anyone you would not trust with
-the full change log, put a network boundary or a reverse proxy with its own
-authentication in front of port 8081 — Horopter provides neither.
+The missing authentication is a deliberate decision for v0.1, not an oversight.
+`horopter-ingress` does require a bearer token (`HOROPTER_INGRESS_TOKEN`) on writes, so
+this exposure is specific to the read side. If you deploy this anywhere it is reachable by
+anyone you would not trust with the full change log, put a network boundary or a reverse
+proxy with its own authentication in front of port 8081 — Horopter provides neither.
 
 **`docker-compose.yml` also publishes Postgres itself (5432) on the host, with the
 username and password both `horopter`.** That is direct read and write access to the

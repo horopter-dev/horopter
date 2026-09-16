@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -160,10 +161,9 @@ func rfc3339Param(r *http.Request, name string) (time.Time, error) {
 // that value OVERFLOWS and wraps. Measured against this stack (pgx v5, Postgres 18) it
 // binds as 1969-12-31T23:59:59.999Z — a caller asking for everything up to the end of
 // time is silently given a window ending before the Unix epoch, and answered 200 with an
-// empty list. No error is raised anywhere, so relaying store errors verbatim never comes
-// into it and there is nothing for an operator to notice; the caller simply gets a
-// confident wrong answer. A 400 naming the parameter is the only place that can be
-// caught.
+// empty list. No error is raised anywhere, so nothing is logged and there is nothing for
+// an operator to notice; the caller simply gets a confident wrong answer. A 400 naming
+// the parameter is the only place that can be caught.
 var (
 	minEpochMillis = time.Unix(0, 0).UTC().UnixMilli()
 	maxEpochMillis = core.OpenSentinel.UnixMilli()
@@ -349,7 +349,7 @@ func (s *Server) queryChanges(w http.ResponseWriter, r *http.Request) {
 		attribute.String("horopter.adapter", "neutral"))
 	changes, truncated, err := s.changesFor(r, win)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		readFailed(w, r, "neutral", err)
 		return
 	}
 	markTruncated(w, truncated)
@@ -380,7 +380,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		Limit:  limit,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		readFailed(w, r, "neutral", err)
 		return
 	}
 	markTruncated(w, truncated)
@@ -454,16 +454,34 @@ func (s *Server) render(
 
 	changes, truncated, err := s.changesFor(r, win)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		readFailed(w, r, adapter, err)
 		return
 	}
 	payload, err := render(changes, s.clock())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		readFailed(w, r, adapter, err)
 		return
 	}
 	markTruncated(w, truncated)
 	writeJSON(w, http.StatusOK, payload)
+}
+
+// readFailed answers a read the store, or the adapter rendering its result, could not
+// complete, and it draws the same line ingress's appendFailed does. The underlying text
+// names tables, columns and constraints — for a failed connection, the database host,
+// user and name — and the store wraps it around the caller's own tenant string. Egress's
+// callers are unauthenticated, so that detail goes to the server log, where an operator
+// can see it, and the caller is told only that the read failed.
+//
+// The status stays 500 rather than ingress's 503. There, 503 is what makes a producer
+// retry instead of dropping an event; a failed read drops nothing, and its caller — a
+// dashboard panel or an export — simply asks again.
+func readFailed(w http.ResponseWriter, r *http.Request, adapter string, err error) {
+	tenantID, _ := tenantOf(r)
+	slog.ErrorContext(r.Context(), "read failed", "error", err,
+		"tenant", tenantID, "adapter", adapter, "route", r.Pattern)
+	writeError(w, http.StatusInternalServerError,
+		"could not complete the read; the cause has been logged on the server")
 }
 
 // changesToJSON renders changes in neutral terms. No vendor field names, no epoch
