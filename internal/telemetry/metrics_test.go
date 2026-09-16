@@ -233,6 +233,29 @@ func TestFlushStopsTheMetricsListener(t *testing.T) {
 	assert.Error(t, err, "Flush must stop the metrics listener")
 }
 
+// TestFlushDoesNotWaitForAnIdleConnection pins Close over Shutdown for the metrics server.
+// A TCP connection to /metrics that never sends a request is exactly the case
+// http.Server.Shutdown waits out — it treats a brand new connection as idle only once it
+// has sat unread for 5 seconds, which is FlushTimeout itself — so Shutdown here would spend
+// the whole flush budget on a connection that scraped nothing, leaving none for the final
+// OTLP push or span flush that follow.
+func TestFlushDoesNotWaitForAnIdleConnection(t *testing.T) {
+	setTelemetryEnv(t)
+	restoreGlobalProviders(t)
+	tel, base := serving(t)
+
+	conn, err := net.Dial("tcp", strings.TrimPrefix(base, "http://"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	start := time.Now()
+	tel.Flush()
+	elapsed := time.Since(start)
+
+	assert.Less(t, elapsed, 2*time.Second,
+		"Flush must close the metrics listener rather than wait for this idle connection")
+}
+
 // otlpRequestRecorder answers every request 200 and records its method and path, so a test
 // can assert that a specific request reached the collector without standing up a real OTLP
 // server to decode the body against.

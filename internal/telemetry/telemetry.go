@@ -121,11 +121,16 @@ type Telemetry struct {
 
 // Setup installs the providers the environment asks for and returns what it installed.
 //
-// It returns an error only when the meter provider cannot be built, which in practice means
-// its Prometheus reader. The /metrics endpoint is on by default, so an endpoint that is
-// meant to be there and silently is not would be "configured but doing nothing"; a daemon
-// that refuses to start instead loses no events, because during a rolling deploy the old
-// instances keep serving.
+// It returns an error only when the meter provider cannot be built — realistically a
+// schema-URL conflict in newResource, or the Prometheus reader failing to register its
+// collectors. The /metrics endpoint is on by default, so an endpoint that is meant to be
+// there and silently is not would be "configured but doing nothing"; a daemon that refuses
+// to start instead loses no events, because during a rolling deploy the old instances keep
+// serving.
+//
+// installMetrics runs BEFORE installTracing, so that error is returned before anything else
+// is installed. The old order left a tracer provider installed and never shut down whenever
+// installMetrics failed afterwards: nothing had run yet to call its shutdown function.
 //
 // Everything that depends on a collector keeps the older rule: a telemetry
 // misconfiguration must not stop a system of record. A tracer provider that cannot be built
@@ -141,14 +146,14 @@ func Setup(ctx context.Context, serviceName string) (*Telemetry, error) {
 	if cfg.sdkDisabled {
 		return t, nil
 	}
+	if err := t.installMetrics(ctx); err != nil {
+		return nil, fmt.Errorf("set up metrics for %s: %w", cfg.serviceName, err)
+	}
 	if shutdown, err := installTracing(ctx, cfg); err != nil {
 		slog.Error("telemetry setup failed; continuing with tracing off",
 			"service", cfg.serviceName, "error", err)
 	} else {
 		t.tracerShutdown = shutdown
-	}
-	if err := t.installMetrics(ctx); err != nil {
-		return nil, fmt.Errorf("set up metrics for %s: %w", cfg.serviceName, err)
 	}
 	return t, nil
 }
@@ -223,9 +228,16 @@ const FlushTimeout = 5 * time.Second
 // Flush stops the metrics listener and drains buffered telemetry during shutdown. Every
 // binary defers it once Setup has succeeded, so the timeout cannot drift between them.
 //
-// The order matters. The metrics server stops first, so no scrape runs against a provider
-// that is shutting down; the meter provider then performs its final OTLP push; the tracer
-// provider flushes its batch last.
+// The order matters. The metrics server is CLOSED first, not gracefully shut down: Close
+// abandons any in-flight scrape and any idle connection immediately, rather than waiting
+// for them the way Shutdown would. All three stops below share one FlushTimeout budget, so
+// a single slow or half-open connection to /metrics — nothing a caller need even be
+// scraping deliberately — could otherwise spend the whole of it, leaving nothing for the
+// meter provider's final OTLP push or the tracer provider's batch flush, both of which
+// matter more: a scrape abandoned mid-response is worth nothing to the client that started
+// it, and production telemetry buffered for export is what a slow flush would put at risk.
+// The meter provider then performs its final OTLP push; the tracer provider flushes its
+// batch last.
 //
 // It builds a fresh context rather than reusing one a signal handler has already
 // cancelled: the telemetry still buffered is the telemetry describing whatever caused the
@@ -238,7 +250,7 @@ func (t *Telemetry) Flush() {
 	ctx, cancel := context.WithTimeout(context.Background(), FlushTimeout)
 	defer cancel()
 	if t.metricsServer != nil {
-		if err := t.metricsServer.Shutdown(ctx); err != nil {
+		if err := t.metricsServer.Close(); err != nil {
 			slog.Warn("stopping the metrics server failed", "error", err)
 		}
 		t.metricsServer = nil
