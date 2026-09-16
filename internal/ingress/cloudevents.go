@@ -110,6 +110,15 @@ func eventFromCloudEvent(
 				core.ErrInvalidEvent, ce.ID(), err)
 		}
 	}
+	// pull lifts a recognised key out of the data payload into a first-class event
+	// field, removing it from the attribute map so the same value is not also stored as
+	// a generic attribute. The lifted set is exactly the core.Event fields CloudEvents
+	// has no envelope attribute for: tenant, correlation_ref, title and actor. Every
+	// other key stays in attributes untouched.
+	//
+	// Non-string values are left alone rather than coerced: a caller sending
+	// {"title": 7} keeps it as an attribute instead of having it silently stringified
+	// into a field the schema promises is a title.
 	pull := func(key string) string {
 		if v, ok := attrs[key].(string); ok {
 			delete(attrs, key)
@@ -123,6 +132,7 @@ func eventFromCloudEvent(
 	}
 	corr := pull("correlation_ref")
 	title := pull("title")
+	actor := pull("actor")
 
 	occurred := ce.Time()
 	if occurred.IsZero() {
@@ -136,6 +146,7 @@ func eventFromCloudEvent(
 		Source:         ce.Source(),
 		Type:           ce.Type(),
 		Subject:        ce.Subject(),
+		Actor:          actor,
 		Title:          title,
 		OccurredAt:     occurred,
 		ReceivedAt:     now,

@@ -242,6 +242,30 @@ The signal is a header rather than a field in the body because two of these rout
 vendor-owned shapes — Grafana annotations and OTLP spans — that cannot carry a Horopter
 envelope.
 
+## CloudEvents: reserved data keys
+
+`POST /v1/events/cloudevents` takes a CloudEvents envelope. CloudEvents carries an
+instant but no duration, lifecycle, or tenancy, so four fields that `POST /v1/events`
+sends as first-class request fields travel in the `data` payload instead:
+
+| data key | becomes | if absent |
+|---|---|---|
+| `tenant` | the event's tenant | `default` |
+| `correlation_ref` | the ref two events share to describe one interval | the event stands alone as a point |
+| `title` | the change title | falls back to the event type |
+| `actor` | who performed the change | empty |
+
+These four keys are **reserved**: each is lifted into its field and removed from the
+attribute map, so it is not also stored as a generic attribute. Every other key in `data`
+is kept as an attribute untouched.
+
+A reserved key holding a non-string value is left alone rather than coerced — `{"title":
+7}` stays an attribute and the title falls back as though it were absent.
+
+The envelope's own `time` supplies `occurred_at`. It is optional in CloudEvents; when it
+is missing, receipt time is used, since that is the earliest moment the system can attest
+to.
+
 ## Attributes
 
 Attribute keys follow OpenTelemetry semantic conventions rather than an invented
