@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
@@ -102,6 +103,7 @@ func install(ctx context.Context, cfg config) (func(context.Context) error, erro
 	if !cfg.enabled {
 		return noopShutdown, nil
 	}
+	routeDiagnosticsToSlog()
 
 	exporter, err := otlptracehttp.New(ctx)
 	if err != nil {
@@ -117,19 +119,45 @@ func install(ctx context.Context, cfg config) (func(context.Context) error, erro
 		sdktrace.WithBatcher(exporter),
 		sdktrace.WithResource(res),
 	)
-	// Export failures reach otel.Handle, whose default handler writes to the stdlib
-	// logger on stderr. Every other failure in these binaries goes through slog, so a
-	// collector that starts rejecting spans should not be the one thing an operator has
-	// to find in a different log format. Installed only on the enabled path, so
-	// "disabled means this package installed nothing" stays literally true.
-	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
-		slog.Warn("opentelemetry reported an error", "error", err)
-	}))
 	otel.SetTracerProvider(filtered(provider, cfg.disabled))
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{}, propagation.Baggage{},
 	))
 	return provider.Shutdown, nil
+}
+
+// routeDiagnosticsToSlog points OpenTelemetry's TWO diagnostic channels at slog. Every
+// other failure in these binaries goes through slog, and an operator should not have to
+// know that one subsystem reports itself somewhere else in another format.
+//
+// The channels are separate and carry different things, which is why both are needed.
+//
+//  1. otel.Handle — run-time failures the SDK considers irremediable, in practice a batch
+//     the Collector rejected. Its default handler writes to the stdlib logger on stderr.
+//
+//  2. otel.SetLogger — the SDK's own internal logger, and the one that carries an
+//     OPERATOR'S mistake. Every malformed OTEL_EXPORTER_OTLP_* value is reported here and
+//     then ignored: otlptracehttp.New returns a nil error for an unparsable endpoint, an
+//     unreadable certificate file, malformed headers, a non-numeric timeout and an unknown
+//     protocol alike, falling back to its defaults in each case. Without this, a typo'd
+//     endpoint produced one unstructured stderr line and an exporter quietly pointed at
+//     localhost — which is the same "configured but doing nothing" failure the endpoint
+//     rule in configFromEnv exists to close.
+//
+// logr's Error maps to slog ERROR, which is what carries those configuration failures.
+// The SDK's warn, info and debug chatter goes through V(1), V(4) and V(8), which map
+// BELOW slog's Info and stay suppressed at a default level — so this surfaces the
+// failures without adding a stream of noise.
+//
+// Called before the exporter is built, because the exporter is what produces these
+// messages: installing the logger afterwards routes the very errors it exists for to
+// stderr. It runs only on the enabled path, so "disabled means this package installed
+// nothing" stays true.
+func routeDiagnosticsToSlog() {
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+		slog.Warn("opentelemetry reported an error", "error", err)
+	}))
+	otel.SetLogger(logr.FromSlogHandler(slog.Default().Handler()))
 }
 
 // FlushTimeout bounds the shutdown flush. What goes wrong during a flush is a collector

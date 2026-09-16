@@ -137,12 +137,19 @@ system has and traces are secondary, so a telemetry problem must not stop ingres
 accepting events. Watch for that line: it is the only signal that tracing is
 configured but not running.
 
-Two things this does *not* cover, both upstream behaviour rather than Horopter's:
-a malformed value in any `OTEL_EXPORTER_OTLP_*` variable is reported by the SDK's
-own internal logger and then ignored, so the exporter falls back to its defaults
-instead of failing; and export failures at run time — a collector that is down or
-rejecting spans — are logged at `WARN` and retried by the batch processor, not
-surfaced as a startup failure.
+**Everything OpenTelemetry reports about itself is logged through the same
+structured logger as the rest of the binary.** Two cases are worth knowing
+because neither stops the process:
+
+- **A malformed `OTEL_EXPORTER_OTLP_*` value** — an unparsable endpoint, an
+  unreadable certificate file, malformed headers, a non-numeric timeout, an
+  unknown protocol. The SDK does not fail on any of these. It logs the problem
+  at `ERROR` and falls back to its own defaults, so the exporter comes up
+  pointed somewhere you did not intend. **That log line is the only signal**,
+  and it names the value it could not parse; treat one at startup as a broken
+  collector configuration rather than as noise.
+- **Export failures at run time** — a collector that is down or rejecting spans
+  — are logged at `WARN` and retried by the batch processor.
 
 **Recommended production setting:** enable `sql` on `horopter-ingress`; set
 `HOROPTER_TRACE_DISABLE=sql` on `horopter-egress` to disable it there. An

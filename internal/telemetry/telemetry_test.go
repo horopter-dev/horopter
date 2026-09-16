@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -178,6 +179,48 @@ func TestSetupRoutesSDKErrorsThroughSlog(t *testing.T) {
 	assert.NoError(t, shutdown(ctx))
 }
 
+// TestSetupRoutesSDKConfigErrorsThroughSlog covers the channel the error handler above
+// does NOT cover, and the one an operator is actually likely to hit.
+//
+// An unparsable endpoint is not an error the exporter returns — otlptracehttp.New reports
+// it through the SDK's internal logger, ignores it and falls back to its defaults, so the
+// log line is the ONLY signal that the collector address was not understood. This drives
+// the real mistake rather than a synthesised one, which is also what pins that the logger
+// is installed before the exporter is built: install it afterwards and the parse error
+// this asserts on has already gone to stderr.
+//
+// The cleanup reinstalls the logger against the restored default handler, because
+// otel.SetLogger captures the handler rather than reading slog.Default() per call.
+func TestSetupRoutesSDKConfigErrorsThroughSlog(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "://not a url")
+
+	var logged bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	t.Cleanup(func() {
+		slog.SetDefault(previous)
+		otel.SetLogger(logr.FromSlogHandler(previous.Handler()))
+	})
+
+	prev := otel.GetTracerProvider()
+	shutdown, err := install(context.Background(),
+		config{enabled: true, serviceName: "horopter-test", disabled: map[string]bool{}})
+	t.Cleanup(func() { otel.SetTracerProvider(prev) })
+	require.NoError(t, err,
+		"the SDK ignores an unparsable endpoint rather than failing, which is exactly why "+
+			"the log line has to be visible")
+
+	assert.Contains(t, logged.String(), "parse url",
+		"a malformed OTEL_EXPORTER_OTLP_* value must reach slog, not the stdlib logger")
+	assert.Contains(t, logged.String(), "level=ERROR",
+		"the SDK reports a configuration failure at logr's Error level, which is ERROR here")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	assert.NoError(t, shutdown(ctx))
+}
+
 func TestNewResourceMergesWithoutASchemaConflict(t *testing.T) {
 	// The B2 defect in one assertion: resource.Merge rejects two resources carrying
 	// different schema URLs, and the semconv import version is the only thing that
@@ -206,8 +249,9 @@ func TestSetupInstallsNothingWhenDisabled(t *testing.T) {
 // provider delegates one way, so a provider a sibling test installs is never truly
 // removed from the process. This test passes in-suite only because every sibling that
 // installs a provider — TestSetupSucceedsWhenEnabled,
-// TestSetupHonoursTheDisabledAreasEndToEnd and TestSetupRoutesSDKErrorsThroughSlog —
-// calls its shutdown function, and a shut-down SDK provider hands out noop tracers.
+// TestSetupHonoursTheDisabledAreasEndToEnd, TestSetupRoutesSDKErrorsThroughSlog and
+// TestSetupRoutesSDKConfigErrorsThroughSlog — calls its shutdown function, and a
+// shut-down SDK provider hands out noop tracers.
 //
 // Run it in isolation
 // (go test -run TestInstrumentedPathIsInertWithNoProvider ./internal/telemetry/) to
