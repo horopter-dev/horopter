@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -849,4 +850,84 @@ func TestFailedRenderStillRecordsTheAdapter(t *testing.T) {
 
 	assert.Contains(t, spanAttrValues(rec, "", "horopter.adapter"), "grafana",
 		"a failed render must still say which adapter asked")
+}
+
+// seedWith appends an event with an explicit subject, so a filter test can tell the
+// subject and type columns apart. seed() hardcodes one subject for every event, so a
+// test built on it cannot distinguish filtering by subject from filtering by type.
+func seedWith(t *testing.T, s *postgres.Store, tn, ref, typ, subject string, at time.Time) {
+	t.Helper()
+	id := core.NewULID(time.Now(), rand.Reader)
+	_, _, err := s.AppendEvent(context.Background(), core.Event{
+		ID: id, Tenant: tn, IdempotencyKey: id, SchemaVersion: 1,
+		Source: "ci", Type: typ, Subject: subject, Actor: "ci-bot",
+		OccurredAt: at, ReceivedAt: at, CorrelationRef: ref,
+		Attributes: map[string]any{},
+	})
+	require.NoError(t, err)
+}
+
+// refsIn returns the refs of a /v1/changes response, for comparing result sets.
+func refsIn(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var changes []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &changes))
+	refs := make([]string, 0, len(changes))
+	for _, c := range changes {
+		refs = append(refs, c["ref"].(string))
+	}
+	sort.Strings(refs)
+	return refs
+}
+
+// The subject, type and status query parameters had no end-to-end coverage: the store
+// tests call QueryChanges with a hand-built struct and so skip the URL-to-struct wiring
+// entirely. A transposition there — Subject reading "type", Type reading "subject" — is
+// invisible to every other test, and it is the mechanism a Grafana dashboard uses to
+// scope a query.
+//
+// The two changes differ in BOTH subject and type, so a swap makes each filter select
+// nothing rather than selecting the wrong row. A fixture sharing one subject cannot tell
+// the two columns apart at all.
+func TestQueryChangesFiltersBySubjectAndType(t *testing.T) {
+	h, s, tn := newServer(t)
+	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	seedWith(t, s, tn, "dep-90", "deployment.started", "acme/prod", at)
+	seedWith(t, s, tn, "inc-90", "incident.declared", "acme/staging", at)
+
+	window := "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
+	assert.Equal(t, []string{"dep-90", "inc-90"},
+		refsIn(t, get(t, h, "/v1/changes?tenant="+tn+window)),
+		"precondition: both changes are in the window")
+
+	assert.Equal(t, []string{"dep-90"},
+		refsIn(t, get(t, h, "/v1/changes?tenant="+tn+window+"&subject=acme/prod")),
+		"subject= must filter on subject, not on type")
+	assert.Equal(t, []string{"inc-90"},
+		refsIn(t, get(t, h, "/v1/changes?tenant="+tn+window+"&type=incident.declared")),
+		"type= must filter on type, not on subject")
+}
+
+// status= is wired separately and is dropped just as silently: without it the endpoint
+// answers every status query with the unfiltered set, so a dashboard asking for failures
+// is handed everything and shows no error.
+func TestQueryChangesFiltersByStatus(t *testing.T) {
+	h, s, tn := newServer(t)
+	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	seedWith(t, s, tn, "dep-91", "deployment.started", "acme/prod", at)
+	seedWith(t, s, tn, "dep-92", "deployment.started", "acme/prod", at)
+	seedWith(t, s, tn, "dep-92", "deployment.completed", "acme/prod", at.Add(time.Minute))
+
+	window := "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
+	assert.Equal(t, []string{"dep-91", "dep-92"},
+		refsIn(t, get(t, h, "/v1/changes?tenant="+tn+window)),
+		"precondition: both changes are in the window")
+
+	assert.Equal(t, []string{"dep-92"},
+		refsIn(t, get(t, h, "/v1/changes?tenant="+tn+window+"&status=completed")),
+		"status= must narrow the result set")
+	assert.Equal(t, []string{"dep-91"},
+		refsIn(t, get(t, h, "/v1/changes?tenant="+tn+window+"&status=in_progress")),
+		"the complementary status must select the other change")
 }

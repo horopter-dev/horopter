@@ -84,14 +84,29 @@ func Fold(cur *Change, ev Event) Change {
 	// because eventFromCloudEvent never sets Actor: any CloudEvent folded onto a ref
 	// blanked the actor a previous event had recorded, and a rebuild reproduced the
 	// erasure rather than repairing it. Subject and Type are Validate-protected against
-	// the empty case and Title falls back to the event type, leaving Actor the one field
-	// where last-wins could silently lose a recorded value.
+	// the empty case. Title has the same hazard and is guarded the same way just below.
 	if ev.Actor != "" {
 		out.Actor = ev.Actor
 	}
 	out.LastEventID = ev.ID
-	out.Title = ev.Title
-	if out.Title == "" {
+	// Last NON-EMPTY wins, for the same reason as Actor above. An unconditional
+	// assignment did not merely blank a recorded title: the fallback below then
+	// substituted the LATER event's type, turning "Deploy v2.5.0 to prod" into
+	// "deployment.annotated". A plausible-looking wrong answer is worse than an empty
+	// one, and it reaches the egress JSON, the Grafana annotation title and the OTLP
+	// span name. Title is optional on both ingest paths, so a titleless follow-up
+	// event is the common case rather than an edge case.
+	//
+	// The type fallback still applies when nothing has ever titled the change, so a
+	// change always renders as something. KNOWN RESIDUAL: for a change no event ever
+	// titles, the stored fallback is the FIRST folded event's type and later events do
+	// not update it, so that case stays fold-order sensitive exactly as it was before.
+	// Removing that means not storing the fallback at all and letting renderers apply
+	// it — grafana.Render already does — which changes what the API returns and is out
+	// of scope here.
+	if ev.Title != "" {
+		out.Title = ev.Title
+	} else if out.Title == "" {
 		out.Title = ev.Type
 	}
 	// FirstSeenAt is the INFERENCE: the earliest occurred_at of any event folded onto

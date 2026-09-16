@@ -449,3 +449,52 @@ func TestFoldLaterNonEmptyActorWins(t *testing.T) {
 	c = core.Fold(&c, second)
 	assert.Equal(t, "bob", c.Actor, "a later event naming an actor replaces the earlier one")
 }
+
+// The same failure as the actor case, on Title. An unconditional assignment does not
+// merely blank a recorded title — the empty-title fallback then substitutes the LATER
+// event's raw type, so "Deploy v2.5.0 to prod" becomes "deployment.annotated". That is
+// worse than an empty field: it is a plausible-looking wrong answer, and it reaches the
+// egress JSON, the Grafana annotation title and the OTLP span name.
+//
+// Title is optional on both ingest paths, so a titleless follow-up event is the common
+// case rather than an edge case.
+func TestFoldPreservesTitleAgainstAnEventCarryingNone(t *testing.T) {
+	titled := ev("01A", "dep-7", "deployment.started", t10)
+	titled.Title = "Deploy v2.5.0 to prod"
+	untitled := ev("01B", "dep-7", "deployment.annotated", t20)
+	untitled.Title = ""
+
+	c := core.Fold(nil, titled)
+	require.Equal(t, "Deploy v2.5.0 to prod", c.Title, "precondition: the first event titles it")
+	c = core.Fold(&c, untitled)
+	assert.Equal(t, "Deploy v2.5.0 to prod", c.Title,
+		"a titleless event must not replace a recorded title with its own type")
+
+	// Like Actor, the unconditional form made Title depend on fold order.
+	rev := core.Fold(nil, untitled)
+	rev = core.Fold(&rev, titled)
+	assert.Equal(t, c.Title, rev.Title, "Title must not depend on fold order")
+}
+
+// The type fallback still applies when no event has ever carried a title, so a change
+// always renders with something rather than an empty string.
+func TestFoldTitleStillFallsBackToTypeWhenNoEventTitlesIt(t *testing.T) {
+	untitled := ev("01A", "dep-7", "deployment.started", t10)
+	untitled.Title = ""
+
+	c := core.Fold(nil, untitled)
+	assert.Equal(t, "deployment.started", c.Title,
+		"with no title recorded, the event's own type is the fallback")
+}
+
+// A later event that DOES carry a title replaces the earlier one.
+func TestFoldLaterNonEmptyTitleWins(t *testing.T) {
+	first := ev("01A", "dep-7", "deployment.started", t10)
+	first.Title = "Deploy v2.5.0"
+	second := ev("01B", "dep-7", "deployment.completed", t20)
+	second.Title = "Deploy v2.5.1"
+
+	c := core.Fold(nil, first)
+	c = core.Fold(&c, second)
+	assert.Equal(t, "Deploy v2.5.1", c.Title)
+}
