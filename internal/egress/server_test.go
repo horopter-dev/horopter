@@ -806,7 +806,7 @@ func spanAttrValues(rec *tracetest.SpanRecorder, spanName, key string) []string 
 	return out
 }
 
-// TestGrafanaPathTenantIsRecordedAsPathSourced pins Step 1's tenantOf source, driven
+// TestGrafanaPathTenantIsRecordedAsPathSourced pins the source tenantOf reports, driven
 // through the one route that can actually produce "path": the path-scoped Grafana
 // annotations route.
 func TestGrafanaPathTenantIsRecordedAsPathSourced(t *testing.T) {
@@ -826,4 +826,28 @@ func TestGrafanaPathTenantIsRecordedAsPathSourced(t *testing.T) {
 	sources := spanAttrValues(rec, "", "horopter.tenant.source")
 	assert.Contains(t, sources, "path",
 		"a path-scoped route must record that the path supplied the tenant")
+}
+
+// TestFailedRenderStillRecordsTheAdapter is the failure half of horopter.adapter. Which
+// vendor shape a request was for is known before the query runs, and a failing query is
+// exactly when it matters — "Grafana's annotation calls are erroring" and "the OTLP span
+// endpoint is erroring" are different incidents. Recording it after the query succeeded
+// left every 500 unattributed.
+//
+// Closing the store is what makes the query fail without reaching into the handler:
+// pgxpool.Close is idempotent, so newServer's own t.Cleanup(s.Close) still runs safely.
+func TestFailedRenderStillRecordsTheAdapter(t *testing.T) {
+	rec, restore := recordSpans(t)
+	defer restore()
+
+	h, s, _ := newServer(t)
+	s.Close()
+
+	body := `{"range":{"from":"2026-09-15T09:00:00.000Z","to":"2026-09-15T11:00:00.000Z"}}`
+	resp := postJSON(t, h, "/adapters/grafana/annotations", body)
+	require.Equal(t, http.StatusInternalServerError, resp.Code,
+		"a closed pool must fail the query; a 200 here means the test proved nothing")
+
+	assert.Contains(t, spanAttrValues(rec, "", "horopter.adapter"), "grafana",
+		"a failed render must still say which adapter asked")
 }

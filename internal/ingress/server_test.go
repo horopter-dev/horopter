@@ -110,11 +110,11 @@ func TestPostEventCreatesChange(t *testing.T) {
 }
 
 // TestPostEventRecordsTheTenantOnTheSpan pins horopter.tenant on the request's server
-// span. Task 6 and Task 7 rely on it being set once per request, on the span that
-// exists for every request, rather than only on the ones that reach the store.
+// span. It must be set once per request, on the span that exists for every request,
+// rather than only on the ones that reach the store.
 //
-// The loop below must skip the store's own "AppendEvent" span. Task 6 gave that span
-// the same horopter.tenant attribute (internal/store/postgres/outcome.go), and this
+// The loop below must skip the store's own "AppendEvent" span, which carries the same
+// horopter.tenant attribute (internal/store/postgres/outcome.go), and this
 // request reaches the store, so both spans land in one recorder carrying the attribute
 // this test checks for. Scanning every span for it — as an earlier version of this test
 // did — proves nothing about recordTenant specifically: deleting its call in postEvent

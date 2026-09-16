@@ -82,7 +82,13 @@ func (s *Server) Routes() http.Handler {
 	// otelhttp gives every route a server span carrying the http.* semantic
 	// conventions. It wraps the mux rather than each handler so a route added later is
 	// covered without anyone remembering. With no provider installed it is a no-op.
-	return otelhttp.NewHandler(mux, "horopter-ingress")
+	//
+	// The operation argument is empty because it has no effect here. Without a
+	// WithSpanNameFormatter option, otelhttp's default formatter ignores the operation
+	// entirely and names the span from the request's method and route; passing the
+	// binary name only made it look load-bearing. The binary name already reaches
+	// backends as the service.name resource attribute.
+	return otelhttp.NewHandler(mux, "")
 }
 
 // auth enforces the bearer token using a constant-time comparison.

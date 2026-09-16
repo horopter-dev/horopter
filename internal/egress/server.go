@@ -86,7 +86,13 @@ func (s *Server) Routes() http.Handler {
 	// otelhttp gives every route a server span carrying the http.* semantic
 	// conventions. It wraps the mux rather than each handler so a route added later is
 	// covered without anyone remembering. With no provider installed it is a no-op.
-	return otelhttp.NewHandler(mux, "horopter-egress")
+	//
+	// The operation argument is empty because it has no effect here. Without a
+	// WithSpanNameFormatter option, otelhttp's default formatter ignores the operation
+	// entirely and names the span from the request's method and route; passing the
+	// binary name only made it look load-bearing. The binary name already reaches
+	// backends as the service.name resource attribute.
+	return otelhttp.NewHandler(mux, "")
 }
 
 // healthz reports process liveness only. It must not touch the database: a failing
@@ -112,7 +118,11 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 // datasource URL. If that is wrong, this attribute reads "default" on every
 // Grafana-originated request in production — visible at once, rather than surfacing
 // later as quietly wrong data.
-func tenantOf(r *http.Request) (string, string) {
+//
+// The results are NAMED because they are two bare same-typed strings: nothing catches a
+// transposition at either end, which is the same reason replayProjection names its two
+// ints in internal/store/postgres.
+func tenantOf(r *http.Request) (tenantID, source string) {
 	if v := r.PathValue("tenant"); v != "" {
 		return v, "path"
 	}
@@ -436,13 +446,17 @@ func (s *Server) render(
 	w http.ResponseWriter, r *http.Request, win window, adapter string,
 	render func([]core.Change, time.Time) (any, error),
 ) {
+	// Set before the query, not after it: which adapter a request was for is known at
+	// entry, and a failing query is exactly when you need to know whether it was Grafana
+	// or OTLP asking. Recording it only on success left every failed read unattributed.
+	trace.SpanFromContext(r.Context()).SetAttributes(
+		attribute.String("horopter.adapter", adapter))
+
 	changes, truncated, err := s.changesFor(r, win)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	trace.SpanFromContext(r.Context()).SetAttributes(
-		attribute.String("horopter.adapter", adapter))
 	payload, err := render(changes, s.clock())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
