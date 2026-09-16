@@ -73,6 +73,50 @@ surface on the write daemon to duplicate a check an orchestrator already makes a
 `/readyz` over the network. Point your orchestrator's liveness probe at `/healthz` and
 its readiness probe at `/readyz`.
 
+## Telemetry
+
+Horopter can emit its own OpenTelemetry traces of its own operation — HTTP server
+spans, spans around each store-level operation, and a span per SQL statement — to
+help operate Horopter itself. This is separate from the change-event product
+surface: it describes Horopter's own request handling and database calls, never
+anything a producer submitted.
+
+Tracing is **off by default** in all three binaries, and is configured entirely
+by environment variables, resolved once at startup:
+
+- `OTEL_EXPORTER_OTLP_ENDPOINT` — the OTLP/HTTP collector to send spans to, e.g.
+  `http://otel-collector:4318`. **Absent means tracing is off**, deliberately:
+  OTel's own SDK default is `localhost:4318`, and honouring that default would
+  mean every developer running Horopter with no collector nearby gets a stream
+  of export failures that look like a fault and are not one.
+- `OTEL_SDK_DISABLED` — set to `true` to force tracing off even when an endpoint
+  is configured. This is the standard OTel variable name; `opentelemetry-go`
+  does not implement it itself (a proposal to add it to the SDK was declined on
+  the grounds that applications can), so Horopter reads it directly.
+- `OTEL_SERVICE_NAME` — overrides the `service.name` resource attribute reported
+  to the collector. Defaults to the binary's own name: `horopter-ingress`,
+  `horopter-egress` or `horopter-migrate`.
+- `HOROPTER_TRACE_DISABLE` — a comma-separated list of instrumentation areas to
+  silence even while tracing is otherwise on. Recognised areas:
+  - `http` — the server span `otelhttp` wraps every request in.
+  - `store` — the spans the store package creates around each store-level
+    operation (append an event, list events, list changes).
+  - `sql` — the per-statement spans `otelpgx` creates around every SQL
+    statement the store issues.
+
+  An unrecognised name is accepted and silently does nothing, so a future area
+  never fails to disable — it just doesn't exist yet.
+
+**Recommended production setting:** enable `sql` on `horopter-ingress`; set
+`HOROPTER_TRACE_DISABLE=sql` on `horopter-egress` to disable it there. An
+append runs several SQL statements inside one transaction, and when one of
+them is what's slow or blocked, a per-statement span is the only way to see
+which. On the read side those same per-statement spans buy much less for much
+more: a dashboard refreshing every ten seconds across twenty engineers turns
+them into a permanent, high-volume stream, while the one fact worth knowing on
+a read — whether the result was truncated — is already an attribute on the
+`store`-area span itself, not something a `sql`-area span would add.
+
 ## Upgrading
 
 `horopter-migrate` is the only binary permitted to apply schema DDL. Run it to completion
