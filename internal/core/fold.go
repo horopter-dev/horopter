@@ -39,6 +39,23 @@ func RefFor(ev Event) string {
 	return ev.ID
 }
 
+// mergedAttributes returns cur's attributes overlaid with ev's, in a fresh map. Fold's
+// purity depends on that copy: the returned Change must never share an attribute map with
+// cur, or folding one event would mutate a Change the caller still holds.
+func mergedAttributes(cur *Change, ev Event) map[string]any {
+	out := make(map[string]any, len(ev.Attributes))
+	if cur != nil {
+		out = make(map[string]any, len(cur.Attributes)+len(ev.Attributes))
+		for k, v := range cur.Attributes {
+			out[k] = v
+		}
+	}
+	for k, v := range ev.Attributes {
+		out[k] = v
+	}
+	return out
+}
+
 // Fold applies one event to a change and returns the result. cur is nil for
 // the first event of a ref, but a zero-value *Change (as produced by, e.g.,
 // `c := m[ref]; m[ref] = Fold(&c, ev)` over a map[string]Change) must yield
@@ -56,23 +73,22 @@ func Fold(cur *Change, ev Event) Change {
 	var out Change
 	if cur != nil {
 		out = *cur
-		out.Attributes = make(map[string]any, len(cur.Attributes)+len(ev.Attributes))
-		for k, v := range cur.Attributes {
-			out.Attributes[k] = v
-		}
-	} else {
-		out = Change{Attributes: make(map[string]any, len(ev.Attributes))}
 	}
-
-	for k, v := range ev.Attributes {
-		out.Attributes[k] = v
-	}
+	out.Attributes = mergedAttributes(cur, ev)
 
 	out.Tenant = ev.Tenant
 	out.Ref = RefFor(ev)
 	out.Subject = ev.Subject
 	out.Type = ev.Type
-	out.Actor = ev.Actor
+	// Last NON-EMPTY wins. An unconditional assignment destroys information here,
+	// because eventFromCloudEvent never sets Actor: any CloudEvent folded onto a ref
+	// blanked the actor a previous event had recorded, and a rebuild reproduced the
+	// erasure rather than repairing it. Subject and Type are Validate-protected against
+	// the empty case and Title falls back to the event type, leaving Actor the one field
+	// where last-wins could silently lose a recorded value.
+	if ev.Actor != "" {
+		out.Actor = ev.Actor
+	}
 	out.LastEventID = ev.ID
 	out.Title = ev.Title
 	if out.Title == "" {

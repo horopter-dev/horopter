@@ -325,10 +325,10 @@ func TestFoldAnAssertedStartSurvivesALaterEventCarryingAnEarlierTime(t *testing.
 }
 
 // A ref carrying more than one start-type event takes the EARLIEST assertion. The
-// decision document reasons from the assertion being idempotent, which holds for one
+// two-fact start model reasons from the assertion being idempotent, which holds for one
 // .started and fails for two with different timestamps: last-folded-wins would make a
 // rebuild (id order) and a live append (arrival order) disagree. Minimum is commutative,
-// so taking it is what keeps the document's stated property true.
+// so taking it is what keeps that property true.
 func TestFoldEarliestStartAssertionWins(t *testing.T) {
 	later := core.Fold(nil, ev("01A", "dep-7", "deployment.started", t30))
 	later = core.Fold(&later, ev("01B", "dep-7", "deployment.started", t10))
@@ -364,7 +364,7 @@ func permutations(events []core.Event) [][]core.Event {
 // Folding the same set of events in ANY order must produce the same StartedAt,
 // FirstSeenAt and Start. This is the property that makes RebuildProjection meaningful —
 // a rebuild replays in id order while a live append folds in arrival order, and the two
-// must converge — and it is the property the decision document claims. Both facts are
+// must converge — and it is the property the two-fact start model rests on. Both facts are
 // minima, which is what makes it hold; a rule that let the last-folded start win would
 // fail here on the two .started events alone.
 //
@@ -406,4 +406,46 @@ func TestFoldStartFactsAreInsensitiveToFoldOrder(t *testing.T) {
 			"order %v: Start is COALESCE(StartedAt, FirstSeenAt) and must not depend on "+
 				"fold order — a rebuild replays in id order, a live append in arrival order", ids)
 	}
+}
+
+// A later event carrying no actor must not erase the one already recorded. Every event
+// arriving over the CloudEvents path has an empty Actor — eventFromCloudEvent never sets
+// one — so an unconditional assignment blanked change.actor as soon as any CloudEvent
+// followed the event that named the actor, in the live and the rebuild path alike. Title
+// carries the same hazard and is guarded against it in Fold.
+//
+// No existing test could catch this: the ev() helper gives every fixture the same
+// non-empty actor, so last-wins and last-non-empty-wins are indistinguishable under it.
+func TestFoldPreservesActorAgainstAnEventCarryingNone(t *testing.T) {
+	named := ev("01A", "dep-7", "deployment.started", t10)
+	named.Actor = "alice"
+	anonymous := ev("01B", "dep-7", "deployment.annotated", t20)
+	anonymous.Actor = ""
+
+	c := core.Fold(nil, named)
+	require.Equal(t, "alice", c.Actor, "precondition: the first event names the actor")
+	c = core.Fold(&c, anonymous)
+	assert.Equal(t, "alice", c.Actor,
+		"an event carrying no actor must not erase the recorded one")
+
+	// The unconditional assignment also made Actor depend on fold order: named-then-
+	// anonymous yielded "", anonymous-then-named yielded "alice". A rebuild folds in id
+	// order and a live append in arrival order, so the two could disagree about actor.
+	rev := core.Fold(nil, anonymous)
+	rev = core.Fold(&rev, named)
+	assert.Equal(t, c.Actor, rev.Actor, "Actor must not depend on fold order")
+}
+
+// A later event that does name an actor still replaces the earlier one: the rule is
+// last-non-empty-wins, not first-wins. Without this, a fix for the erasure above could
+// freeze the first actor a ref ever saw and silently stop recording handovers.
+func TestFoldLaterNonEmptyActorWins(t *testing.T) {
+	first := ev("01A", "dep-7", "deployment.started", t10)
+	first.Actor = "alice"
+	second := ev("01B", "dep-7", "deployment.completed", t20)
+	second.Actor = "bob"
+
+	c := core.Fold(nil, first)
+	c = core.Fold(&c, second)
+	assert.Equal(t, "bob", c.Actor, "a later event naming an actor replaces the earlier one")
 }

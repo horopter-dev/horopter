@@ -638,7 +638,7 @@ func TestTruncationIsSignalledOnEveryReadEndpoint(t *testing.T) {
 }
 
 // TestQueryChangesEmitsBothStartFacts pins the two keys migration 0003 split "start" into.
-// The decision document's central argument is that first_seen_at < started_at — an event
+// The central argument for splitting them is that first_seen_at < started_at — an event
 // claiming to predate the change's declared start — must be a QUERYABLE anomaly rather
 // than one the fold destroyed. That is unreachable if the read side never emits the two
 // facts, so the split buys nothing without these keys.
