@@ -23,48 +23,78 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 )
 
+// DefaultPrometheusHost and DefaultPrometheusPort are the OpenTelemetry specification's
+// defaults for OTEL_EXPORTER_PROMETHEUS_HOST and OTEL_EXPORTER_PROMETHEUS_PORT. They are
+// kept rather than chosen for containers, so an operator who knows the specification gets
+// what they expect; the README states what that costs inside a container.
+const (
+	DefaultPrometheusHost = "localhost"
+	DefaultPrometheusPort = "9464"
+)
+
 // config is the resolved environment. It is a value rather than package state so a
 // test can build one directly.
 type config struct {
-	enabled     bool
-	serviceName string
-	disabled    map[string]bool
+	sdkDisabled    bool
+	tracing        bool
+	otlpMetrics    bool
+	serviceName    string
+	disabled       map[string]bool
+	prometheusHost string
+	prometheusPort string
 }
 
 // configFromEnv resolves the standard OTEL_* variables plus this project's own
 // HOROPTER_TRACE_DISABLE.
 //
-// Tracing is enabled only when an endpoint is configured AND the SDK is not
-// disabled. An absent endpoint counts as off deliberately: OTel's own default is
-// localhost:4318, so honouring it would make every run without a collector emit
-// export failures that look like a fault and are not one.
+// Each OTLP signal is enabled only when an endpoint for it is configured AND the SDK is
+// not disabled. OTEL_EXPORTER_OTLP_ENDPOINT counts for both signals; each signal-specific
+// variable counts for its own signal only. An absent endpoint counts as off deliberately:
+// OTel's own default is localhost:4318, so honouring it would make every run without a
+// collector emit export failures that look like a fault and are not one.
 //
-// Either endpoint variable counts. OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is the
-// signal-specific form the exporter itself honours in preference to the general one,
-// and it is the normal shape when traces and metrics go to different collectors.
-// Gating on the general variable alone gave an operator who set only the
-// signal-specific one a daemon that started happily and emitted nothing.
+// The signal-specific variables are the ones the exporters themselves honour in
+// preference to the general one, and setting only one is the normal shape when traces and
+// metrics go to different collectors. Gating on the general variable alone gave that
+// operator a daemon that started happily and emitted nothing.
 //
 // opentelemetry-go does not implement OTEL_SDK_DISABLED itself — the proposal was
 // declined on the grounds that applications can do it — so this reads it directly
 // rather than inventing a private name for a variable that already has a standard one.
+// It turns off every signal, the /metrics endpoint included.
 func configFromEnv(serviceName string) config {
 	cfg := config{
-		serviceName: serviceName,
-		disabled:    map[string]bool{},
+		sdkDisabled:    strings.EqualFold(os.Getenv("OTEL_SDK_DISABLED"), "true"),
+		serviceName:    envOr("OTEL_SERVICE_NAME", serviceName),
+		disabled:       disabledAreas(os.Getenv("HOROPTER_TRACE_DISABLE")),
+		prometheusHost: envOr("OTEL_EXPORTER_PROMETHEUS_HOST", DefaultPrometheusHost),
+		prometheusPort: envOr("OTEL_EXPORTER_PROMETHEUS_PORT", DefaultPrometheusPort),
 	}
-	if name := os.Getenv("OTEL_SERVICE_NAME"); name != "" {
-		cfg.serviceName = name
+	general := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != ""
+	cfg.tracing = !cfg.sdkDisabled &&
+		(general || os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") != "")
+	cfg.otlpMetrics = !cfg.sdkDisabled &&
+		(general || os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") != "")
+	return cfg
+}
+
+// envOr returns the variable's value, or fallback when it is unset or empty.
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
-	for _, area := range strings.Split(os.Getenv("HOROPTER_TRACE_DISABLE"), ",") {
+	return fallback
+}
+
+// disabledAreas parses HOROPTER_TRACE_DISABLE's comma-separated area names.
+func disabledAreas(raw string) map[string]bool {
+	out := map[string]bool{}
+	for _, area := range strings.Split(raw, ",") {
 		if area = strings.TrimSpace(area); area != "" {
-			cfg.disabled[area] = true
+			out[area] = true
 		}
 	}
-	endpointSet := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" ||
-		os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") != ""
-	cfg.enabled = endpointSet && !strings.EqualFold(os.Getenv("OTEL_SDK_DISABLED"), "true")
-	return cfg
+	return out
 }
 
 // noopShutdown is returned whenever no provider was installed, so callers never
@@ -100,7 +130,7 @@ func Setup(ctx context.Context, serviceName string) func(context.Context) error 
 // install builds and installs the provider, returning the error Setup turns into a log
 // line. It is separate so the failure has a return value a test can assert on.
 func install(ctx context.Context, cfg config) (func(context.Context) error, error) {
-	if !cfg.enabled {
+	if !cfg.tracing {
 		return noopShutdown, nil
 	}
 	routeDiagnosticsToSlog()

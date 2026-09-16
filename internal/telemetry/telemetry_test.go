@@ -15,73 +15,115 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
-// Every test here sets EVERY variable it depends on, including the ones it needs to be
-// empty. Reading one from the ambient environment is how a suite passes locally and fails
-// in CI, or vice versa.
+// Every test here declares EVERY variable Setup reads, through setTelemetryEnv, and then
+// sets what it needs. Reading one from the ambient environment is how a suite passes
+// locally and fails in CI, or the reverse.
+
+// setTelemetryEnv clears every variable this package reads, for the rest of the test.
+func setTelemetryEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"OTEL_SDK_DISABLED", "OTEL_SERVICE_NAME", "HOROPTER_TRACE_DISABLE",
+		"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+		"OTEL_EXPORTER_PROMETHEUS_HOST", "OTEL_EXPORTER_PROMETHEUS_PORT",
+	} {
+		t.Setenv(key, "")
+	}
+}
 
 func TestConfigFromEnvDisabledWithoutAnEndpoint(t *testing.T) {
 	// The OTel default endpoint is localhost:4318. Honouring it would make every
 	// developer run without a collector emit a stream of export failures, so an
 	// absent endpoint means off rather than "use the default".
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
-	t.Setenv("HOROPTER_TRACE_DISABLE", "")
-	assert.False(t, configFromEnv("horopter-ingress").enabled)
+	setTelemetryEnv(t)
+	cfg := configFromEnv("horopter-ingress")
+	assert.False(t, cfg.tracing)
+	assert.False(t, cfg.otlpMetrics)
 }
 
-// TestConfigFromEnvEnabledWithOnlyTheSignalSpecificEndpoint covers the normal shape when
-// traces and metrics go to different collectors: only OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
-// is set. It is the variable the exporter itself prefers, so gating on the general one
-// alone gave that operator a daemon that started happily and emitted nothing, with
-// neither an error nor a log line.
-func TestConfigFromEnvEnabledWithOnlyTheSignalSpecificEndpoint(t *testing.T) {
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+// TestConfigFromEnvTracesEndpointEnablesOnlyTracing covers the normal shape when traces
+// and metrics go to different collectors. The signal-specific variable is the one the
+// exporter itself prefers, so gating on the general one alone gave that operator a daemon
+// that started happily and emitted nothing — and it must turn on its own signal only.
+func TestConfigFromEnvTracesEndpointEnablesOnlyTracing(t *testing.T) {
+	setTelemetryEnv(t)
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://collector:4318/v1/traces")
-	t.Setenv("OTEL_SDK_DISABLED", "")
-	assert.True(t, configFromEnv("horopter-ingress").enabled)
+	cfg := configFromEnv("horopter-ingress")
+	assert.True(t, cfg.tracing)
+	assert.False(t, cfg.otlpMetrics, "a traces endpoint must not turn on OTLP metrics")
+}
+
+func TestConfigFromEnvMetricsEndpointEnablesOnlyOTLPMetrics(t *testing.T) {
+	setTelemetryEnv(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "http://collector:4318/v1/metrics")
+	cfg := configFromEnv("horopter-ingress")
+	assert.True(t, cfg.otlpMetrics)
+	assert.False(t, cfg.tracing, "a metrics endpoint must not turn on tracing")
 }
 
 // OTEL_SDK_DISABLED is a hard off for the signal-specific endpoint too, not only for the
-// general one — the two endpoint variables must share every other rule.
+// general one — the endpoint variables must share every other rule.
 func TestConfigFromEnvSDKDisabledOverridesTheSignalSpecificEndpoint(t *testing.T) {
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	setTelemetryEnv(t)
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://collector:4318/v1/traces")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "http://collector:4318/v1/metrics")
 	t.Setenv("OTEL_SDK_DISABLED", "true")
-	assert.False(t, configFromEnv("horopter-ingress").enabled)
+	cfg := configFromEnv("horopter-ingress")
+	assert.False(t, cfg.tracing)
+	assert.False(t, cfg.otlpMetrics)
 }
 
-func TestConfigFromEnvEnabledWithAnEndpoint(t *testing.T) {
+func TestConfigFromEnvGeneralEndpointEnablesBothOTLPSignals(t *testing.T) {
+	setTelemetryEnv(t)
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
-	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
-	t.Setenv("OTEL_SDK_DISABLED", "")
-	t.Setenv("OTEL_SERVICE_NAME", "")
 	cfg := configFromEnv("horopter-ingress")
-	assert.True(t, cfg.enabled)
+	assert.True(t, cfg.tracing)
+	assert.True(t, cfg.otlpMetrics)
 	assert.Equal(t, "horopter-ingress", cfg.serviceName)
 }
 
 func TestConfigFromEnvSDKDisabledOverridesAnEndpoint(t *testing.T) {
+	setTelemetryEnv(t)
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
-	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
 	t.Setenv("OTEL_SDK_DISABLED", "true")
-	assert.False(t, configFromEnv("horopter-ingress").enabled,
-		"OTEL_SDK_DISABLED is a hard off regardless of any other variable")
+	cfg := configFromEnv("horopter-ingress")
+	assert.True(t, cfg.sdkDisabled)
+	assert.False(t, cfg.tracing, "OTEL_SDK_DISABLED is a hard off regardless of any other variable")
+	assert.False(t, cfg.otlpMetrics)
 }
 
 func TestConfigFromEnvServiceNameOverride(t *testing.T) {
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
+	setTelemetryEnv(t)
 	t.Setenv("OTEL_SERVICE_NAME", "horopter-canary")
 	assert.Equal(t, "horopter-canary", configFromEnv("horopter-ingress").serviceName)
 }
 
 func TestConfigFromEnvDisabledAreas(t *testing.T) {
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
-	t.Setenv("OTEL_SDK_DISABLED", "")
+	setTelemetryEnv(t)
 	t.Setenv("HOROPTER_TRACE_DISABLE", " sql , http ")
 	cfg := configFromEnv("horopter-ingress")
 	assert.True(t, cfg.disabled["sql"], "whitespace around an area must not defeat it")
 	assert.True(t, cfg.disabled["http"])
 	assert.False(t, cfg.disabled["store"])
+}
+
+// The OpenTelemetry specification's own defaults, kept deliberately (spec §2): an operator
+// who knows the specification gets what they expect.
+func TestConfigFromEnvPrometheusDefaults(t *testing.T) {
+	setTelemetryEnv(t)
+	cfg := configFromEnv("horopter-ingress")
+	assert.Equal(t, "localhost", cfg.prometheusHost)
+	assert.Equal(t, "9464", cfg.prometheusPort)
+}
+
+func TestConfigFromEnvPrometheusOverrides(t *testing.T) {
+	setTelemetryEnv(t)
+	t.Setenv("OTEL_EXPORTER_PROMETHEUS_HOST", "0.0.0.0")
+	t.Setenv("OTEL_EXPORTER_PROMETHEUS_PORT", "9470")
+	cfg := configFromEnv("horopter-ingress")
+	assert.Equal(t, "0.0.0.0", cfg.prometheusHost)
+	assert.Equal(t, "9470", cfg.prometheusPort)
 }
 
 func TestSetupSucceedsWhenEnabled(t *testing.T) {
@@ -184,7 +226,7 @@ func TestSetupRoutesSDKErrorsThroughSlog(t *testing.T) {
 
 	prev := otel.GetTracerProvider()
 	shutdown, err := install(context.Background(),
-		config{enabled: true, serviceName: "horopter-test", disabled: map[string]bool{}})
+		config{tracing: true, serviceName: "horopter-test", disabled: map[string]bool{}})
 	t.Cleanup(func() { otel.SetTracerProvider(prev) })
 	require.NoError(t, err)
 
@@ -224,7 +266,7 @@ func TestSetupRoutesSDKConfigErrorsThroughSlog(t *testing.T) {
 
 	prev := otel.GetTracerProvider()
 	shutdown, err := install(context.Background(),
-		config{enabled: true, serviceName: "horopter-test", disabled: map[string]bool{}})
+		config{tracing: true, serviceName: "horopter-test", disabled: map[string]bool{}})
 	t.Cleanup(func() { otel.SetTracerProvider(prev) })
 	require.NoError(t, err,
 		"the SDK ignores an unparsable endpoint rather than failing, which is exactly why "+
