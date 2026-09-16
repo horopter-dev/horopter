@@ -112,9 +112,15 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 
 // readyz reports whether this instance can serve traffic, which requires the database.
 // A failing readiness probe removes the pod from the load balancer without killing it.
+//
+// The probe answers without a token, and pgx formats a failed connection with the
+// database user, database name, host and port, so the error goes to the server log and
+// the body says only that the database is unreachable — appendFailed's rule, applied to
+// the one route on this daemon that anyone can call.
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.Pool().Ping(r.Context()); err != nil {
-		writeError(w, http.StatusServiceUnavailable, "database unreachable: "+err.Error())
+		slog.ErrorContext(r.Context(), "readiness probe failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "database unreachable")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})

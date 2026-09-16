@@ -1,6 +1,7 @@
 package egress_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -706,6 +708,38 @@ func TestReadyzReports503WhenTheDatabaseIsUnreachable(t *testing.T) {
 		"an operator reading the probe's body must be told what is wrong")
 }
 
+// TestReadyzDoesNotRelayTheDatabaseError pins what the 503 body withholds. The probe is
+// unauthenticated — an orchestrator has no credential to send — and pgx formats a failed
+// connection with the database user, database name, host and port, so relaying the error
+// handed all four to anyone who could reach the port during an outage.
+func TestReadyzDoesNotRelayTheDatabaseError(t *testing.T) {
+	h, s, _ := newServer(t)
+	s.Close()
+
+	rec := get(t, h, "/readyz")
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "closed pool",
+		"the database error must not reach an unauthenticated caller")
+}
+
+// TestFailedReadinessProbeLogsItsCause is the other half: withholding the error from the
+// body must not lose it. A pod that drops out of rotation with no record of why leaves an
+// operator reproducing the probe by hand to find out.
+func TestFailedReadinessProbeLogsItsCause(t *testing.T) {
+	h, s, _ := newServer(t)
+	s.Close()
+	records := captureLogs(t)
+
+	rec := get(t, h, "/readyz")
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+
+	logged := slices.ContainsFunc(records(), func(r map[string]any) bool {
+		cause, _ := r["error"].(string)
+		return r["level"] == "ERROR" && strings.Contains(cause, "closed pool")
+	})
+	assert.True(t, logged, "the probe's failure must reach the server log; got %v", records())
+}
+
 // TestEgressRejectsAnInvertedWindow pins from > to as the caller's error on every window
 // parser egress has. It was accepted: the overlap predicate is
 // "start_at <= :to AND end_effective >= :from", so an inverted window does not return
@@ -850,6 +884,135 @@ func TestFailedRenderStillRecordsTheAdapter(t *testing.T) {
 
 	assert.Contains(t, spanAttrValues(rec, "", "horopter.adapter"), "grafana",
 		"a failed render must still say which adapter asked")
+}
+
+// readRoute is one request against one egress read route, naming the pattern Routes
+// registers it under so TestEveryReadRouteHasAFailureCase can match the two up.
+type readRoute struct {
+	pattern, method, url, body string
+}
+
+// readRoutes returns one well-formed request per egress read route, each naming tenant
+// tn: through the path on the path-scoped Grafana route, through the query string on the
+// rest. Every request is valid, so a failure can only come from the store.
+func readRoutes(tn string) []readRoute {
+	const rfc3339Window = "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
+	const annotationWindow = `{"range":{"from":"2026-09-15T09:00:00.000Z",` +
+		`"to":"2026-09-15T11:00:00.000Z"}}`
+	return []readRoute{
+		{"GET /v1/changes", http.MethodGet, "/v1/changes?tenant=" + tn + rfc3339Window, ""},
+		{"GET /v1/events", http.MethodGet, "/v1/events?tenant=" + tn, ""},
+		{"GET /adapters/grafana/annotations", http.MethodGet,
+			"/adapters/grafana/annotations?tenant=" + tn + "&from=1789376400000&to=1789383600000",
+			""},
+		{"POST /adapters/grafana/annotations", http.MethodPost,
+			"/adapters/grafana/annotations?tenant=" + tn, annotationWindow},
+		{"POST /adapters/grafana/{tenant}/annotations", http.MethodPost,
+			"/adapters/grafana/" + tn + "/annotations", annotationWindow},
+		{"GET /adapters/otlp/spans", http.MethodGet,
+			"/adapters/otlp/spans?tenant=" + tn + rfc3339Window, ""},
+	}
+}
+
+func (rr readRoute) serve(t *testing.T, h http.Handler) *httptest.ResponseRecorder {
+	t.Helper()
+	if rr.method == http.MethodPost {
+		return postJSON(t, h, rr.url, rr.body)
+	}
+	return get(t, h, rr.url)
+}
+
+// captureLogs sends slog's default logger to a buffer until the test ends, and returns a
+// function decoding every record written so far. Swapping a process-wide default is safe
+// only because no test in this package calls t.Parallel.
+func captureLogs(t *testing.T) func() []map[string]any {
+	t.Helper()
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return func() []map[string]any {
+		var records []map[string]any
+		dec := json.NewDecoder(bytes.NewReader(buf.Bytes()))
+		for dec.More() {
+			var record map[string]any
+			require.NoError(t, dec.Decode(&record))
+			records = append(records, record)
+		}
+		return records
+	}
+}
+
+// TestEveryReadRouteHasAFailureCase keeps readRoutes complete. The two failure-policy
+// tests below drive every route in it, so a read route registered in Routes but missing
+// here would be one whose failures nobody checks are logged or withheld — exactly how all
+// four read paths came to fail silently. The probes are excluded: they read no tenant's
+// data and have their own failure tests.
+func TestEveryReadRouteHasAFailureCase(t *testing.T) {
+	var covered []string
+	for _, route := range readRoutes("any") {
+		covered = append(covered, route.pattern)
+	}
+	var registered []string
+	for _, p := range collectRoutePatterns(t) {
+		if p != "GET /healthz" && p != "GET /readyz" {
+			registered = append(registered, p)
+		}
+	}
+	assert.ElementsMatch(t, registered, covered,
+		"readRoutes must list every read route Routes registers, and nothing else")
+}
+
+// TestEveryFailedReadIsLoggedWithItsCause pins the server-side half of egress's failure
+// policy. Every read route used to answer a store failure with a 500 and log nothing, so
+// an operator watching an hour of blank Grafana panels found two startup lines in the
+// daemon's output and no record of why; the only copy of the cause went to a caller the
+// operator does not control. Tracing is no substitute: it is off by default.
+//
+// The tenant is asserted with the cause because which tenant's reads are failing is the
+// first thing an operator needs from the line.
+func TestEveryFailedReadIsLoggedWithItsCause(t *testing.T) {
+	h, s, tn := newServer(t)
+	s.Close()
+
+	for _, route := range readRoutes(tn) {
+		t.Run(route.pattern, func(t *testing.T) {
+			records := captureLogs(t)
+			rec := route.serve(t, h)
+			require.Equal(t, http.StatusInternalServerError, rec.Code,
+				"a closed pool must fail the read; anything else means the test proved nothing")
+
+			logged := slices.ContainsFunc(records(), func(r map[string]any) bool {
+				cause, _ := r["error"].(string)
+				return r["level"] == "ERROR" && r["tenant"] == tn &&
+					strings.Contains(cause, "closed pool")
+			})
+			assert.True(t, logged,
+				"the store's error and the tenant must reach the server log; got %v", records())
+		})
+	}
+}
+
+// TestFailedReadDoesNotRelayStoreErrorText pins the caller-facing half. The store's error
+// names tables, columns and constraints — and for a failed connection the database host,
+// user and name — and egress is unauthenticated, so relaying it published that detail to
+// anyone who could reach the port. The wrapped error also carried the caller's own tenant
+// string, making every failing route a reflector for caller-chosen text. Ingress's
+// appendFailed withholds the same text for the same reason.
+func TestFailedReadDoesNotRelayStoreErrorText(t *testing.T) {
+	h, s, tn := newServer(t)
+	s.Close()
+
+	for _, route := range readRoutes(tn) {
+		t.Run(route.pattern, func(t *testing.T) {
+			rec := route.serve(t, h)
+			require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), "closed pool",
+				"the store's error text must not reach the caller")
+			assert.NotContains(t, rec.Body.String(), tn,
+				"the caller's tenant must not be reflected back in an error body")
+		})
+	}
 }
 
 // seedWith appends an event with an explicit subject, so a filter test can tell the
