@@ -25,6 +25,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -143,7 +144,24 @@ func connect(ctx context.Context, dsn, connectErrHint string) (*pgxpool.Pool, er
 		pool.Close()
 		return nil, fmt.Errorf("ping postgres: %w; is the database reachable?", err)
 	}
+	recordPoolStats(pool)
 	return pool, nil
+}
+
+// poolName names the pool on pgxpool.* metrics in place of otelpgx's default,
+// host:port/database, which would publish the database's address and name on /metrics.
+const poolName = "horopter"
+
+// recordPoolStats exports the pool's statistics as pgxpool.* metrics through the global
+// meter provider as it stands now. It runs only once the pool has answered a ping, so a
+// pool that failed to connect registers nothing. A registration failure is logged: pool
+// statistics are not worth refusing to open a store over.
+func recordPoolStats(pool *pgxpool.Pool) {
+	err := otelpgx.RecordStats(pool,
+		otelpgx.WithStatsAttributes(semconv.DBClientConnectionPoolName(poolName)))
+	if err != nil {
+		slog.Error("record connection pool statistics; continuing without them", "error", err)
+	}
 }
 
 // tracer returns the store's own instrumentation scope. Spans from this scope are the

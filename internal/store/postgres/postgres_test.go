@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +13,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/yo61/horopter/internal/store/postgres"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 func TestOpenAppliesMigrations(t *testing.T) {
@@ -171,4 +175,60 @@ func TestSchemaVersionIsDerivedFromTheHighestMigration(t *testing.T) {
 		"ExpectedSchemaVersion must be raised in the same change that adds a migration")
 	assert.Equal(t, fmt.Sprintf("%04d", v), highest[:4],
 		"the recorded version must be the numeric prefix of the highest applied migration")
+}
+
+// poolAttributeSets returns the attribute set of every data point on every pgxpool.*
+// metric. otelpgx records pool statistics as int64 observable counters, up-down counters and
+// a gauge, which arrive as Sum[int64] and Gauge[int64].
+func poolAttributeSets(t *testing.T, reader *sdkmetric.ManualReader) []attribute.Set {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	var sets []attribute.Set
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if !strings.HasPrefix(m.Name, "pgxpool.") {
+				continue
+			}
+			switch data := m.Data.(type) {
+			case metricdata.Sum[int64]:
+				sets = append(sets, pointAttributes(data.DataPoints)...)
+			case metricdata.Gauge[int64]:
+				sets = append(sets, pointAttributes(data.DataPoints)...)
+			}
+		}
+	}
+	return sets
+}
+
+func pointAttributes(points []metricdata.DataPoint[int64]) []attribute.Set {
+	sets := make([]attribute.Set, 0, len(points))
+	for _, point := range points {
+		sets = append(sets, point.Attributes)
+	}
+	return sets
+}
+
+// TestStoreRecordsPoolStatisticsUnderAFixedPoolName pins the override on otelpgx's default
+// pool name, host:port/database. Left alone, /metrics would publish the database's address
+// and name to whoever can reach it — the detail /readyz was changed to stop returning.
+func TestStoreRecordsPoolStatisticsUnderAFixedPoolName(t *testing.T) {
+	reader := recordMetrics(t)
+	newStore(t)
+
+	cfg, err := pgxpool.ParseConfig(dsn(t))
+	require.NoError(t, err)
+	address := fmt.Sprintf("%s:%d", cfg.ConnConfig.Host, cfg.ConnConfig.Port)
+
+	sets := poolAttributeSets(t, reader)
+	require.NotEmpty(t, sets, "no pgxpool.* metric was recorded, so nothing below is proven")
+	for _, set := range sets {
+		name, ok := set.Value("db.client.connection.pool.name")
+		require.True(t, ok, "every pool statistic must carry a pool name")
+		assert.Equal(t, "horopter", name.AsString())
+		for _, kv := range set.ToSlice() {
+			assert.NotContains(t, kv.Value.String(), address,
+				"no metric attribute may carry the database address")
+		}
+	}
 }
