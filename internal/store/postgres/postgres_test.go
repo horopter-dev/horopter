@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -177,31 +178,52 @@ func TestSchemaVersionIsDerivedFromTheHighestMigration(t *testing.T) {
 		"the recorded version must be the numeric prefix of the highest applied migration")
 }
 
-// poolAttributeSets returns the attribute set of every data point on every pgxpool.*
-// metric. otelpgx records pool statistics as int64 observable counters, up-down counters and
-// a gauge, which arrive as Sum[int64] and Gauge[int64].
-func poolAttributeSets(t *testing.T, reader *sdkmetric.ManualReader) []attribute.Set {
+// otelpgxScope is the instrumentation scope name both otelpgx.RecordStats and
+// otelpgx.NewTracer's metrics register under.
+const otelpgxScope = "github.com/exaring/otelpgx"
+
+// otelpgxAttributeSets returns the attribute set of every data point of every metric in the
+// otelpgx scope, split into the pgxpool.* pool-statistic metrics (from RecordStats) and every
+// other otelpgx metric (the tracer's own db.client.operation.duration and .errors). otelpgx
+// records these as int64 sums, an int64 gauge and a float64 histogram.
+func otelpgxAttributeSets(
+	t *testing.T, reader *sdkmetric.ManualReader,
+) (pool, other []attribute.Set) {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))
-	var sets []attribute.Set
 	for _, scope := range rm.ScopeMetrics {
+		if scope.Scope.Name != otelpgxScope {
+			continue
+		}
 		for _, m := range scope.Metrics {
-			if !strings.HasPrefix(m.Name, "pgxpool.") {
-				continue
-			}
-			switch data := m.Data.(type) {
-			case metricdata.Sum[int64]:
-				sets = append(sets, pointAttributes(data.DataPoints)...)
-			case metricdata.Gauge[int64]:
-				sets = append(sets, pointAttributes(data.DataPoints)...)
+			sets := metricAttributeSets(m.Data)
+			if strings.HasPrefix(m.Name, "pgxpool.") {
+				pool = append(pool, sets...)
+			} else {
+				other = append(other, sets...)
 			}
 		}
 	}
-	return sets
+	return pool, other
 }
 
-func pointAttributes(points []metricdata.DataPoint[int64]) []attribute.Set {
+// metricAttributeSets returns the attribute set of every data point in one metric's
+// aggregation, covering the three shapes otelpgx's own metrics take.
+func metricAttributeSets(data metricdata.Aggregation) []attribute.Set {
+	switch data := data.(type) {
+	case metricdata.Sum[int64]:
+		return pointAttributes(data.DataPoints)
+	case metricdata.Gauge[int64]:
+		return pointAttributes(data.DataPoints)
+	case metricdata.Histogram[float64]:
+		return histogramAttributes(data.DataPoints)
+	default:
+		return nil
+	}
+}
+
+func pointAttributes[N int64 | float64](points []metricdata.DataPoint[N]) []attribute.Set {
 	sets := make([]attribute.Set, 0, len(points))
 	for _, point := range points {
 		sets = append(sets, point.Attributes)
@@ -209,26 +231,49 @@ func pointAttributes(points []metricdata.DataPoint[int64]) []attribute.Set {
 	return sets
 }
 
-// TestStoreRecordsPoolStatisticsUnderAFixedPoolName pins the override on otelpgx's default
-// pool name, host:port/database. Left alone, /metrics would publish the database's address
-// and name to whoever can reach it — the detail /readyz was changed to stop returning.
+func histogramAttributes[N int64 | float64](
+	points []metricdata.HistogramDataPoint[N],
+) []attribute.Set {
+	sets := make([]attribute.Set, 0, len(points))
+	for _, point := range points {
+		sets = append(sets, point.Attributes)
+	}
+	return sets
+}
+
+// attributeKeys returns set's keys, sorted, so two key sets can be compared regardless of
+// the order their attributes were recorded in.
+func attributeKeys(set attribute.Set) []string {
+	keys := make([]string, 0, set.Len())
+	for _, kv := range set.ToSlice() {
+		keys = append(keys, string(kv.Key))
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// TestStoreRecordsPoolStatisticsUnderAFixedPoolName pins otelpgx's metrics against
+// publishing the database's identity on the unauthenticated /metrics listener: the fixed
+// pool name override on its pgxpool.* statistics, and the exact attribute key set on every
+// other otelpgx metric (its per-operation duration and error counters). A dependency bump
+// that added an attribute such as server.address, server.port or db.namespace to either
+// family would otherwise publish it with the suite green.
 func TestStoreRecordsPoolStatisticsUnderAFixedPoolName(t *testing.T) {
 	reader := recordMetrics(t)
-	newStore(t)
+	newStore(t) // opening runs migrations, which is what otelpgx's operation metrics need
 
-	cfg, err := pgxpool.ParseConfig(dsn(t))
-	require.NoError(t, err)
-	address := fmt.Sprintf("%s:%d", cfg.ConnConfig.Host, cfg.ConnConfig.Port)
+	pool, other := otelpgxAttributeSets(t, reader)
+	require.NotEmpty(t, pool, "no pgxpool.* metric was recorded, so nothing below is proven")
+	require.NotEmpty(t, other, "no other otelpgx metric was recorded, so nothing below is proven")
 
-	sets := poolAttributeSets(t, reader)
-	require.NotEmpty(t, sets, "no pgxpool.* metric was recorded, so nothing below is proven")
-	for _, set := range sets {
-		name, ok := set.Value("db.client.connection.pool.name")
-		require.True(t, ok, "every pool statistic must carry a pool name")
+	for _, set := range pool {
+		assert.Equal(t, []string{"db.client.connection.pool.name", "db.system.name"},
+			attributeKeys(set), "a pgxpool.* metric must carry exactly these two attributes")
+		name, _ := set.Value("db.client.connection.pool.name")
 		assert.Equal(t, "horopter", name.AsString())
-		for _, kv := range set.ToSlice() {
-			assert.NotContains(t, kv.Value.String(), address,
-				"no metric attribute may carry the database address")
-		}
+	}
+	for _, set := range other {
+		assert.Equal(t, []string{"db.system.name", "pgx.operation.type"}, attributeKeys(set),
+			"every non-pgxpool otelpgx metric must carry exactly these two attributes")
 	}
 }
