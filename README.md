@@ -114,8 +114,13 @@ by environment variables, resolved once at startup:
   - `sql` — the per-statement spans `otelpgx` creates around every SQL
     statement the store issues.
 
-  An unrecognised name is accepted and silently does nothing, so a future area
-  never fails to disable — it just doesn't exist yet.
+  An unrecognised name is accepted rather than rejected — Horopter never
+  validates it against the areas above. Concretely: misspell an area and
+  nothing errors, it just silently disables nothing, which is a real footgun
+  if you mistype one. The same tolerance also means it is safe to disable an
+  area that doesn't exist yet — if a later release instruments a new one, a
+  config written for it ahead of time needs no change; it starts taking
+  effect the moment that area's spans start naming themselves that.
 
 **Recommended production setting:** enable `sql` on `horopter-ingress`; set
 `HOROPTER_TRACE_DISABLE=sql` on `horopter-egress` to disable it there. An
