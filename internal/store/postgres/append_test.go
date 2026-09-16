@@ -16,6 +16,9 @@ import (
 	"github.com/yo61/horopter/internal/core"
 	"github.com/yo61/horopter/internal/store/postgres"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
@@ -265,6 +268,7 @@ func TestConcurrentAppendsToSameRefDoNotLoseUpdates(t *testing.T) {
 func TestConcurrentDuplicateIdempotencyKeyReturnsTheOriginal(t *testing.T) {
 	rec, restore := recordSpans(t)
 	defer restore()
+	reader := recordMetrics(t)
 
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
@@ -332,6 +336,11 @@ func TestConcurrentDuplicateIdempotencyKeyReturnsTheOriginal(t *testing.T) {
 	assert.Contains(t, paths, "unique_violation",
 		"one of the two racers must lose on uq_event_idem and take the recovery path; this "+
 			"is the only test in the suite that reaches it")
+
+	assert.Equal(t,
+		map[string]int64{appendCreated: 1, appendDeduplicatedByUniqueViolation: 1},
+		appendCounts(t, reader),
+		"the recovery path must be counted as a deduplication, not a failure")
 }
 
 // recordSpans installs a recording provider and returns it with a restore function.
@@ -366,6 +375,134 @@ func spanAttrValues(rec *tracetest.SpanRecorder, spanName, key string) []string 
 		}
 	}
 	return out
+}
+
+// recordMetrics installs a meter provider with a manual reader for the rest of the test.
+//
+// Call it BEFORE newStore. A store creates its append counter from the global meter provider
+// when it opens, so a store opened first keeps counting into whatever provider was global
+// then — the same one-way delegation recordSpans documents.
+func recordMetrics(t *testing.T) *sdkmetric.ManualReader {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(provider)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = provider.Shutdown(context.Background())
+	})
+	return reader
+}
+
+// appendCounts returns horopter.event.appends' count for each attribute set, keyed by the
+// set's encoding: "key=value" pairs in key order, joined by commas.
+func appendCounts(t *testing.T, reader *sdkmetric.ManualReader) map[string]int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	counts := map[string]int64{}
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "horopter.event.appends" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok, "horopter.event.appends must be an int64 counter, got %T", m.Data)
+			for _, point := range sum.DataPoints {
+				counts[point.Attributes.Encoded(attribute.DefaultEncoder())] = point.Value
+			}
+		}
+	}
+	return counts
+}
+
+// The attribute sets horopter.event.appends records, written out by hand: every key the
+// counter may carry, and nothing that identifies a caller or an entity. An assertion against
+// these fails if a key is added — a tenant, say — which is what makes them the cardinality
+// guard as well.
+const (
+	appendCreated = "horopter.append.dedupe_path=none,horopter.append.outcome=created," +
+		"horopter.fold.out_of_order=false"
+	appendCreatedOutOfOrder = "horopter.append.dedupe_path=none," +
+		"horopter.append.outcome=created,horopter.fold.out_of_order=true"
+	appendDeduplicatedByLookup = "horopter.append.dedupe_path=lookup," +
+		"horopter.append.outcome=deduplicated,horopter.fold.out_of_order=false"
+	appendDeduplicatedByUniqueViolation = "horopter.append.dedupe_path=unique_violation," +
+		"horopter.append.outcome=deduplicated,horopter.fold.out_of_order=false"
+	appendFailedInvalid = "horopter.append.dedupe_path=none,horopter.append.outcome=failed," +
+		"horopter.error.kind=invalid_event,horopter.fold.out_of_order=false"
+	appendFailedTransient = "horopter.append.dedupe_path=none," +
+		"horopter.append.outcome=failed,horopter.error.kind=transient," +
+		"horopter.fold.out_of_order=false"
+)
+
+func TestAppendCountsCreatedAndDeduplicatedEvents(t *testing.T) {
+	reader := recordMetrics(t)
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 16, 10, 0, 0, 0, time.UTC)
+
+	first := mkEvent(tn, eventID(t, "a"), "dup-key", "dep-1", "deployment.started", at)
+	_, created, err := s.AppendEvent(ctx, first)
+	require.NoError(t, err)
+	require.True(t, created)
+	retry := mkEvent(tn, eventID(t, "b"), "dup-key", "dep-1", "deployment.started", at)
+	_, created, err = s.AppendEvent(ctx, retry)
+	require.NoError(t, err)
+	require.False(t, created)
+
+	assert.Equal(t, map[string]int64{appendCreated: 1, appendDeduplicatedByLookup: 1},
+		appendCounts(t, reader))
+}
+
+// TestAppendCountsOutOfOrderEvents measures the rate the out-of-order decision says has
+// never been observed. Ids are minted fresh and ordered, as TestAppendRecordsAnOutOfOrderFold
+// explains, because this suite never truncates its database.
+func TestAppendCountsOutOfOrderEvents(t *testing.T) {
+	reader := recordMetrics(t)
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 16, 10, 0, 0, 0, time.UTC)
+
+	a, b := eventID(t, "x"), eventID(t, "y")
+	if a > b {
+		a, b = b, a
+	}
+	_, _, err := s.AppendEvent(ctx, mkEvent(tn, b, "k1", "dep-2", "deployment.started", at))
+	require.NoError(t, err)
+	_, _, err = s.AppendEvent(ctx, mkEvent(tn, a, "k2", "dep-2", "deployment.completed", at))
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string]int64{appendCreated: 1, appendCreatedOutOfOrder: 1},
+		appendCounts(t, reader))
+}
+
+func TestAppendCountsAnInvalidEvent(t *testing.T) {
+	reader := recordMetrics(t)
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 16, 10, 0, 0, 0, time.UTC)
+
+	bad := mkEvent(tn, eventID(t, "bad"), "k1", "dep-3", "deployment.started", at)
+	bad.Subject = ""
+	_, _, err := s.AppendEvent(ctx, bad)
+	require.Error(t, err)
+
+	assert.Equal(t, map[string]int64{appendFailedInvalid: 1}, appendCounts(t, reader))
+}
+
+// TestAppendCountsATransientFailure closes the pool, which is a real outage rather than a
+// faked error: Begin fails the way it fails when Postgres is gone. pgxpool.Close is guarded
+// by a sync.Once, so newStore's own cleanup close is still safe.
+func TestAppendCountsATransientFailure(t *testing.T) {
+	reader := recordMetrics(t)
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 16, 10, 0, 0, 0, time.UTC)
+	s.Close()
+
+	_, _, err := s.AppendEvent(ctx,
+		mkEvent(tn, eventID(t, "down"), "k1", "dep-4", "deployment.started", at))
+	require.Error(t, err)
+
+	assert.Equal(t, map[string]int64{appendFailedTransient: 1}, appendCounts(t, reader))
 }
 
 func TestAppendRecordsTheDedupePath(t *testing.T) {

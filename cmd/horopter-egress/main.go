@@ -38,8 +38,15 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	shutdownTelemetry := telemetry.Setup(ctx, "horopter-egress")
-	defer telemetry.Flush(shutdownTelemetry)
+	tel, err := telemetry.Setup(ctx, "horopter-egress")
+	if err != nil {
+		return err
+	}
+	defer tel.Flush()
+
+	if err := tel.ServeMetrics(); err != nil {
+		return err
+	}
 
 	store, err := openStore(ctx, *dsn)
 	if err != nil {

@@ -48,5 +48,5 @@ func OpenNoMigrate(ctx context.Context, dsn string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Store{pool: pool}, nil
+	return storeFromPool(pool), nil
 }
