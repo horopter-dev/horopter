@@ -408,11 +408,11 @@ func TestFoldStartFactsAreInsensitiveToFoldOrder(t *testing.T) {
 	}
 }
 
-// A later event carrying no actor must not erase the one already recorded. Every event
-// arriving over the CloudEvents path has an empty Actor — eventFromCloudEvent never sets
-// one — so an unconditional assignment blanked change.actor as soon as any CloudEvent
-// followed the event that named the actor, in the live and the rebuild path alike. Title
-// carries the same hazard and is guarded against it in Fold.
+// A later event carrying no actor must not erase the one already recorded. Actor is
+// optional on both ingest paths — omitted from a native request body, or absent from a
+// CloudEvent's data payload — so an actorless follow-up event is ordinary traffic, and an
+// unconditional assignment blanked change.actor as soon as one arrived, in the live and
+// the rebuild path alike. Title carries the same hazard and is guarded against it in Fold.
 //
 // No existing test could catch this: the ev() helper gives every fixture the same
 // non-empty actor, so last-wins and last-non-empty-wins are indistinguishable under it.

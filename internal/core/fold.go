@@ -80,11 +80,11 @@ func Fold(cur *Change, ev Event) Change {
 	out.Ref = RefFor(ev)
 	out.Subject = ev.Subject
 	out.Type = ev.Type
-	// Last NON-EMPTY wins. An unconditional assignment destroys information here,
-	// because eventFromCloudEvent never sets Actor: any CloudEvent folded onto a ref
-	// blanked the actor a previous event had recorded, and a rebuild reproduced the
-	// erasure rather than repairing it. Subject and Type are Validate-protected against
-	// the empty case. Title has the same hazard and is guarded the same way just below.
+	// Last NON-EMPTY wins. Actor is optional on both ingest paths, so an event carrying
+	// none is ordinary traffic; an unconditional assignment let any such event blank the
+	// actor a previous event had recorded, and a rebuild reproduced the erasure rather
+	// than repairing it. Subject and Type are Validate-protected against the empty case.
+	// Title has the same hazard and is guarded the same way just below.
 	if ev.Actor != "" {
 		out.Actor = ev.Actor
 	}
