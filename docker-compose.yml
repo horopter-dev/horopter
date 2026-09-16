@@ -45,8 +45,12 @@ services:
       DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
       HOROPTER_INGRESS_TOKEN: local-dev-token
       HOROPTER_ADDR: 0.0.0.0:8080
+      OTEL_EXPORTER_PROMETHEUS_HOST: 0.0.0.0
     ports:
       - "8080:8080"
+      # Loopback only on the host side. The API ports publish on every interface, which the
+      # security review already reports; the metrics port does not add to it.
+      - "127.0.0.1:9464:9464"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -59,8 +63,12 @@ services:
     environment:
       DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
       HOROPTER_ADDR: 0.0.0.0:8081
+      OTEL_EXPORTER_PROMETHEUS_HOST: 0.0.0.0
     ports:
       - "8081:8081"
+      # The container keeps the default 9464; the host side is 9465 so it does not clash
+      # with ingress's. Loopback only, as for ingress.
+      - "127.0.0.1:9465:9464"
     depends_on:
       migrate:
         condition: service_completed_successfully

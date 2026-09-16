@@ -75,91 +75,154 @@ its readiness probe at `/readyz`.
 
 ## Telemetry
 
-Horopter can emit its own OpenTelemetry traces of its own operation — HTTP server
-spans, spans around each store-level operation, and a span per SQL statement — to
-help operate Horopter itself. This is separate from the change-event product
-surface: it describes Horopter's own request handling and database calls, never
-anything a producer submitted.
+Horopter reports on its own operation through OpenTelemetry: telemetry spans describing its
+HTTP requests, store operations and SQL statements, and metrics describing request rates,
+event appends, its connection pool and the process itself. This is separate from the
+change-event product surface: it describes Horopter's own request handling and database
+calls, never anything a producer submitted.
 
-Tracing is **off by default** in all three binaries, and is configured entirely
-by environment variables, resolved once at startup:
+Everything is configured by environment variables, resolved once at startup.
+**`OTEL_SDK_DISABLED=true` turns all of it off** — traces, OTLP metrics and the `/metrics`
+endpoint. This is the standard OTel variable name; `opentelemetry-go` does not implement it
+itself (a proposal to add it to the SDK was declined on the grounds that applications can),
+so Horopter reads it directly.
 
-- `OTEL_EXPORTER_OTLP_ENDPOINT` — the OTLP/HTTP collector to send spans to, e.g.
-  `http://otel-collector:4318`. **Absent means tracing is off**, deliberately:
-  OTel's own SDK default is `localhost:4318`, and honouring that default would
-  mean every developer running Horopter with no collector nearby gets a stream
-  of export failures that look like a fault and are not one.
-- `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` — the signal-specific form of the above,
-  e.g. `http://otel-collector:4318/v1/traces`. Setting either one turns tracing
-  on; setting this one takes precedence in the exporter, which is the standard
-  OTel rule and the normal shape when traces and metrics go to different
-  collectors.
-- `OTEL_SDK_DISABLED` — set to `true` to force tracing off even when either
-  endpoint is configured. This is the standard OTel variable name; `opentelemetry-go`
-  does not implement it itself (a proposal to add it to the SDK was declined on
-  the grounds that applications can), so Horopter reads it directly.
-- `OTEL_SERVICE_NAME` — overrides the `service.name` resource attribute reported
-  to the collector. Defaults to the binary's own name: `horopter-ingress`,
-  `horopter-egress` or `horopter-migrate`.
-- `OTEL_RESOURCE_ATTRIBUTES` — comma-separated `key=value` pairs merged onto the
-  resource every span carries, e.g. `deployment.environment.name=prod,team=platform`.
-  **This one is different from the other five**: Horopter's own configuration code
-  never reads it. It works because building the resource calls the OpenTelemetry
-  SDK's `resource.Default()`, and that function's own environment detector reads
-  this variable — the same thing it would do for any Go program built on this SDK,
-  not something Horopter added. It is genuinely honoured, but it is upstream
-  behaviour Horopter inherits rather than configures, and no test in this project
-  exercises it — a future SDK upgrade could change or drop it with nothing here to
-  notice.
-- `HOROPTER_TRACE_DISABLE` — a comma-separated list of instrumentation areas to
-  silence even while tracing is otherwise on. Recognised areas:
+### Tracing
+
+Tracing is **off by default** in all three binaries.
+
+- `OTEL_EXPORTER_OTLP_ENDPOINT` — the OTLP/HTTP collector to send telemetry to, e.g.
+  `http://otel-collector:4318`. It turns on both tracing and OTLP metrics. **Absent means
+  both are off**, deliberately: OTel's own SDK default is `localhost:4318`, and honouring
+  that default would mean every developer running Horopter with no collector nearby gets a
+  stream of export failures that look like a fault and are not one.
+- `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` — the signal-specific form, e.g.
+  `http://otel-collector:4318/v1/traces`. It turns on tracing only, and takes precedence in
+  the exporter, which is the standard OTel rule and the normal shape when traces and metrics
+  go to different collectors.
+- `OTEL_SERVICE_NAME` — overrides the `service.name` resource attribute reported to the
+  collector. Defaults to the binary's own name: `horopter-ingress`, `horopter-egress` or
+  `horopter-migrate`.
+- `OTEL_RESOURCE_ATTRIBUTES` — comma-separated `key=value` pairs merged onto the resource
+  every span and metric carries, e.g. `deployment.environment.name=prod,team=platform`.
+  **This one is different from the others**: Horopter's own configuration code never reads
+  it. It works because building the resource calls the OpenTelemetry SDK's
+  `resource.Default()`, and that function's own environment detector reads this variable —
+  the same thing it would do for any Go program built on this SDK, not something Horopter
+  added. It is genuinely honoured, but it is upstream behaviour Horopter inherits rather than
+  configures, and no test in this project exercises it — a future SDK upgrade could change or
+  drop it with nothing here to notice.
+- `HOROPTER_TRACE_DISABLE` — a comma-separated list of instrumentation areas to silence even
+  while tracing is otherwise on. It affects tracing only; metrics have no per-area switch.
+  Recognised areas:
   - `http` — the server span `otelhttp` wraps every request in.
-  - `store` — the spans the store package creates around each store-level
-    operation: append an event, list events, list changes, and rebuild a
-    tenant's projection. Disabling it on `horopter-migrate` silences the
-    rebuild span, which is the one an operator running `--rebuild-tenant`
-    most wants.
-  - `sql` — the per-statement spans `otelpgx` creates around every SQL
-    statement the store issues.
+  - `store` — the spans the store package creates around each store-level operation: append
+    an event, list events, list changes, and rebuild a tenant's projection. Disabling it on
+    `horopter-migrate` silences the rebuild span, which is the one an operator running
+    `--rebuild-tenant` most wants.
+  - `sql` — the per-statement spans `otelpgx` creates around every SQL statement the store
+    issues.
 
-  An unrecognised name is accepted rather than rejected — Horopter never
-  validates it against the areas above. Concretely: misspell an area and
-  nothing errors, it just silently disables nothing, which is a real footgun
-  if you mistype one. The same tolerance also means it is safe to disable an
-  area that doesn't exist yet — if a later release instruments a new one, a
-  config written for it ahead of time needs no change; it starts taking
-  effect the moment that area's spans start naming themselves that.
-
-**A telemetry failure never stops a daemon.** If the tracer provider cannot be
-built, the binary logs a single `ERROR` line naming the service and the cause,
-then carries on with tracing off. Losing change events is the worst failure this
-system has and traces are secondary, so a telemetry problem must not stop ingress
-accepting events. Watch for that line: it is the only signal that tracing is
-configured but not running.
-
-**Everything OpenTelemetry reports about itself is logged through the same
-structured logger as the rest of the binary.** Two cases are worth knowing
-because neither stops the process:
-
-- **A malformed `OTEL_EXPORTER_OTLP_*` value** — an unparsable endpoint, an
-  unreadable certificate file, malformed headers, a non-numeric timeout, an
-  unknown protocol. The SDK does not fail on any of these. It logs the problem
-  at `ERROR` and falls back to its own defaults, so the exporter comes up
-  pointed somewhere you did not intend. **That log line is the only signal**,
-  and it names the value it could not parse; treat one at startup as a broken
-  collector configuration rather than as noise.
-- **Export failures at run time** — a collector that is down or rejecting spans
-  — are logged at `WARN` and retried by the batch processor.
+  An unrecognised name is accepted rather than rejected — Horopter never validates it
+  against the areas above. Concretely: misspell an area and nothing errors, it just silently
+  disables nothing, which is a real footgun if you mistype one. The same tolerance also means
+  it is safe to disable an area that doesn't exist yet — if a later release instruments a new
+  one, a config written for it ahead of time needs no change; it starts taking effect the
+  moment that area's spans start naming themselves that.
 
 **Recommended production setting:** enable `sql` on `horopter-ingress`; set
-`HOROPTER_TRACE_DISABLE=sql` on `horopter-egress` to disable it there. An
-append runs several SQL statements inside one transaction, and when one of
-them is what's slow or blocked, a per-statement span is the only way to see
-which. On the read side those same per-statement spans buy much less for much
-more: a dashboard refreshing every ten seconds across twenty engineers turns
-them into a permanent, high-volume stream, while the one fact worth knowing on
-a read — whether the result was truncated — is already an attribute on the
-`store`-area span itself, not something a `sql`-area span would add.
+`HOROPTER_TRACE_DISABLE=sql` on `horopter-egress` to disable it there. An append runs several
+SQL statements inside one transaction, and when one of them is what's slow or blocked, a
+per-statement span is the only way to see which. On the read side those same per-statement
+spans buy much less for much more: a dashboard refreshing every ten seconds across twenty
+engineers turns them into a permanent, high-volume stream, while the one fact worth knowing
+on a read — whether the result was truncated — is already an attribute on the `store`-area
+span itself, not something a `sql`-area span would add.
+
+### Metrics
+
+`horopter-ingress` and `horopter-egress` serve Prometheus metrics at `/metrics` on a listener
+of their own, **on by default**, and push the same metrics over OTLP when a collector is
+configured.
+
+- `OTEL_EXPORTER_PROMETHEUS_HOST` — the host the `/metrics` listener binds. Default
+  `localhost`.
+- `OTEL_EXPORTER_PROMETHEUS_PORT` — its port. Default `9464`, on both daemons.
+- `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` — the signal-specific OTLP endpoint for metrics, e.g.
+  `http://otel-collector:4318/v1/metrics`. Setting it, or `OTEL_EXPORTER_OTLP_ENDPOINT`,
+  turns on OTLP metrics.
+- `OTEL_METRIC_EXPORT_INTERVAL`, `OTEL_METRIC_EXPORT_TIMEOUT` and
+  `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` — read by the OpenTelemetry SDK and
+  exporter themselves. Defaults: a push every 60 seconds, a 30-second timeout, cumulative
+  temporality.
+
+`horopter-migrate` runs once and exits, so nothing could scrape it and it serves no
+`/metrics`. With a collector configured, its metrics go out over OTLP as it finishes.
+
+The host and port defaults are the OpenTelemetry specification's, which has two consequences:
+
+- **Inside a container, `localhost` is reachable only from the same network namespace.** A
+  collector sidecar in the same pod can scrape it as shipped; anything scraping over the
+  network needs `OTEL_EXPORTER_PROMETHEUS_HOST=0.0.0.0`. The images have no shell or `curl`,
+  so `docker exec` cannot reach it either. `docker-compose.yml` sets the host and publishes
+  the ports on the host's loopback: `curl localhost:9464/metrics` for ingress,
+  `curl localhost:9465/metrics` for egress.
+- **Both daemons default to port 9464.** In separate containers or pods that does not matter.
+  Running both binaries on one host, or in one pod, needs a different port on one of them.
+
+What is recorded:
+
+- `horopter_event_appends_total` — every event submitted to the store, labelled with
+  `horopter_append_outcome` (`created`, `deduplicated` or `failed`),
+  `horopter_append_dedupe_path` (`none`, `lookup` or `unique_violation`),
+  `horopter_error_kind` (`invalid_event` or `transient`, on failures only) and
+  `horopter_fold_out_of_order` — whether the event arrived with an id below the latest one
+  already folded into its change.
+- HTTP server request durations and sizes, by method, route and status code. Ingress answers
+  each append outcome with its own status code — 201, 200, 400 or 503 — so these split
+  appends by outcome too.
+- Database operation durations and errors, and `pgxpool_*` connection-pool statistics.
+- Go runtime and process metrics: goroutines, memory, garbage collection, open file
+  descriptors.
+
+**No metric carries a tenant, a ref, an event id or any other value a caller chooses.** Every
+label comes from a fixed set, so no caller can create series without limit by sending
+requests. Per-request detail, tenant included, is on telemetry spans, where it can be sliced
+by anything.
+
+Two cautions. `OTEL_RESOURCE_ATTRIBUTES` appears on `/metrics` as the `target_info` series,
+visible to anyone who can reach the listener, so put nothing sensitive in it. And a backend
+should not both scrape `/metrics` and receive OTLP metrics from the same process, or every
+series is stored twice.
+
+### When telemetry fails
+
+**A metrics listener that cannot start stops the daemon.** A port that is not an integer from
+1 to 65535, a host that does not resolve, or an address already in use makes the daemon exit
+with an error naming the variable and its value. The endpoint is on by default, so one that
+was silently missing would look like a working configuration; a daemon that refuses to start
+loses no events, because during a rolling deploy the old instances keep serving.
+
+**Anything that depends on a collector never stops a daemon.** If the tracer provider or the
+OTLP metric exporter cannot be built, the binary logs a single `ERROR` line naming the service
+and the cause, then carries on without it. Losing change events is the worst failure this
+system has, and exported telemetry is secondary. Watch for that line: it is the only signal
+that export is configured but not running.
+
+**Everything OpenTelemetry reports about itself is logged through the same structured logger
+as the rest of the binary.** Two cases are worth knowing because neither stops the process:
+
+- **A malformed `OTEL_EXPORTER_OTLP_*` value** — an unparsable endpoint, an unreadable
+  certificate file, malformed headers, a non-numeric timeout, an unknown protocol. The SDK
+  does not fail on any of these. It logs the problem at `ERROR` and falls back to its own
+  defaults, so the exporter comes up pointed somewhere you did not intend. **That log line is
+  the only signal**, and it names the value it could not parse; treat one at startup as a
+  broken collector configuration rather than as noise.
+- **Export failures at run time** — a collector that is down or rejecting data — are logged at
+  `WARN`. The exporter retries with backoff; once it gives up, those spans are gone for good,
+  and spans buffered during a collector outage do not come back when it recovers. Metric
+  totals survive, because with the default cumulative temporality every push carries running
+  totals.
 
 ## Upgrading
 
