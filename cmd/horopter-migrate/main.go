@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"time"
 
 	"github.com/yo61/horopter/internal/store/postgres"
 	"github.com/yo61/horopter/internal/telemetry"
@@ -42,11 +41,13 @@ func run(ctx context.Context, dsn, rebuildTenant string) error {
 			"postgres://user:pass@host:5432/horopter")
 	}
 
-	shutdownTelemetry, err := telemetry.Setup(ctx, "horopter-migrate")
-	if err != nil {
-		return err
-	}
-	defer flushTelemetry(shutdownTelemetry)
+	shutdownTelemetry := telemetry.Setup(ctx, "horopter-migrate")
+	// Flush builds a fresh context because a daemon's signal handler has already
+	// cancelled the one it was serving on. horopter-migrate has no signal handler —
+	// main passes context.Background() straight through — so there is no cancelled
+	// context to avoid here; what the fresh context and its timeout still buy is a
+	// bound on a collector that has become unreachable.
+	defer telemetry.Flush(shutdownTelemetry)
 
 	store, err := postgres.Open(ctx, dsn) // Open applies migrations under an advisory lock
 	if err != nil {
@@ -78,19 +79,4 @@ func run(ctx context.Context, dsn, rebuildTenant string) error {
 	}
 	slog.Info("projection rebuilt from the event log", "tenant", rebuildTenant)
 	return nil
-}
-
-// flushTelemetry drains buffered spans during shutdown.
-//
-// horopter-migrate has no signal handler and nothing else that cancels a context —
-// main passes context.Background() straight through to run — so there is no
-// cancelled context here to avoid reusing. A fresh context with its own timeout is
-// still the right defensive default: what actually goes wrong during a flush is a
-// collector that has become unreachable, and the timeout bounds exactly that.
-func flushTelemetry(shutdown func(context.Context) error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := shutdown(ctx); err != nil {
-		slog.Warn("flushing telemetry failed; some spans were lost", "error", err)
-	}
 }

@@ -57,10 +57,9 @@ func (p filteringProvider) Tracer(name string, opts ...trace.TracerOption) trace
 // second way for tracing to be off. With nothing disabled it still wraps, so the
 // enabled and disabled paths stay identical in shape.
 // Returns a POINTER, not a value. testify's assert.NotSame requires both arguments to be
-// pointers and fails outright on a struct value — so Task 1 Step 6a's check that Setup
-// installed a provider would break the moment Step 4 above wires this in, and the failure
-// would look like the filter's fault rather than the assertion's. Returning a pointer also
-// avoids copying the struct on every Tracer call.
+// pointers and fails outright on a struct value, so telemetry_test.go's check that Setup
+// replaced the global provider would fail on the assertion rather than on the thing it
+// asserts. Returning a pointer also avoids copying the struct on every Tracer call.
 func filtered(inner trace.TracerProvider, disabled map[string]bool) trace.TracerProvider {
 	return &filteringProvider{inner: inner, off: noop.NewTracerProvider(), disabled: disabled}
 }
