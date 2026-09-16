@@ -261,8 +261,9 @@ func TestSetupHonoursTheDisabledAreasEndToEnd(t *testing.T) {
 // every other, and the one an operator is least likely to have a filter for.
 //
 // It drives installTracing() rather than Setup so the assertion does not depend on which
-// environment variables happen to enable tracing, and it shuts down the provider install
-// leaves behind for the reason TestInstrumentedPathIsInertWithNoProvider documents.
+// environment variables happen to enable tracing, and it shuts down the provider
+// installTracing leaves behind for the reason TestInstrumentedPathIsInertWithNoProvider
+// documents.
 //
 // The variables are still declared. installTracing() takes an explicit config, so the two
 // switches below are not read on this path — but otlptracehttp.New is, and it builds the

@@ -64,6 +64,12 @@ event log, past every check either daemon makes, for anyone who can reach the po
 compose file is a local development stack and nothing else: do not run it anywhere its
 ports are reachable from outside the machine, and do not reuse its credentials.
 
+**The `/metrics` listener is unauthenticated on both daemons.** It binds `localhost` by
+default, which is reachable only from inside the same container or pod. Bound to another
+interface, it exposes metric names, route paths and the `target_info` series — and so
+whatever is in `OTEL_RESOURCE_ATTRIBUTES` — to anyone who can reach it, but no tenant,
+event or database identity: see the Telemetry section below for what it records.
+
 ### Container health checks
 
 The images carry no `HEALTHCHECK`, and will not. They are built `FROM
@@ -87,6 +93,22 @@ endpoint. This is the standard OTel variable name; `opentelemetry-go` does not i
 itself (a proposal to add it to the SDK was declined on the grounds that applications can),
 so Horopter reads it directly.
 
+Two variables shape both signals alike, because they configure the resource every span and
+metric is reported against:
+
+- `OTEL_SERVICE_NAME` — overrides the `service.name` resource attribute reported with every
+  span and metric. Defaults to the binary's own name: `horopter-ingress`, `horopter-egress`
+  or `horopter-migrate`.
+- `OTEL_RESOURCE_ATTRIBUTES` — comma-separated `key=value` pairs merged onto the resource
+  every span and metric carries, e.g. `deployment.environment.name=prod,team=platform`.
+  **This one is different from the others**: Horopter's own configuration code never reads
+  it. It works because building the resource calls the OpenTelemetry SDK's
+  `resource.Default()`, and that function's own environment detector reads this variable —
+  the same thing it would do for any Go program built on this SDK, not something Horopter
+  added. It is genuinely honoured, but it is upstream behaviour Horopter inherits rather than
+  configures, and no test in this project exercises it — a future SDK upgrade could change or
+  drop it with nothing here to notice.
+
 ### Tracing
 
 Tracing is **off by default** in all three binaries.
@@ -100,18 +122,6 @@ Tracing is **off by default** in all three binaries.
   `http://otel-collector:4318/v1/traces`. It turns on tracing only, and takes precedence in
   the exporter, which is the standard OTel rule and the normal shape when traces and metrics
   go to different collectors.
-- `OTEL_SERVICE_NAME` — overrides the `service.name` resource attribute reported to the
-  collector. Defaults to the binary's own name: `horopter-ingress`, `horopter-egress` or
-  `horopter-migrate`.
-- `OTEL_RESOURCE_ATTRIBUTES` — comma-separated `key=value` pairs merged onto the resource
-  every span and metric carries, e.g. `deployment.environment.name=prod,team=platform`.
-  **This one is different from the others**: Horopter's own configuration code never reads
-  it. It works because building the resource calls the OpenTelemetry SDK's
-  `resource.Default()`, and that function's own environment detector reads this variable —
-  the same thing it would do for any Go program built on this SDK, not something Horopter
-  added. It is genuinely honoured, but it is upstream behaviour Horopter inherits rather than
-  configures, and no test in this project exercises it — a future SDK upgrade could change or
-  drop it with nothing here to notice.
 - `HOROPTER_TRACE_DISABLE` — a comma-separated list of instrumentation areas to silence even
   while tracing is otherwise on. It affects tracing only; metrics have no per-area switch.
   Recognised areas:
@@ -177,7 +187,12 @@ What is recorded:
   `horopter_append_dedupe_path` (`none`, `lookup` or `unique_violation`),
   `horopter_error_kind` (`invalid_event` or `transient`, on failures only) and
   `horopter_fold_out_of_order` — whether the event arrived with an id below the latest one
-  already folded into its change.
+  already folded into its change. It answers whether ingress is accepting, deduplicating or
+  rejecting events, without tracing turned on. `horopter_fold_out_of_order="true"` is the
+  out-of-order rate, the measurement the projection re-fold decision is waiting on.
+  `horopter_append_dedupe_path="unique_violation"` counts concurrent retries of one
+  idempotency key racing each other, as distinct from a retry that lands after the first
+  attempt has already committed.
 - HTTP server request durations and sizes, by method, route and status code. Ingress answers
   each append outcome with its own status code — 201, 200, 400 or 503 — so these split
   appends by outcome too.

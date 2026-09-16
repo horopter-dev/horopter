@@ -154,7 +154,8 @@ func serveMetrics(server *http.Server, listener net.Listener) {
 }
 
 // metricsAddr validates the port and joins it to the host. The port is re-rendered from the
-// parsed integer, so a form Atoi accepts but net.Listen might not never reaches the bind.
+// parsed integer, so a form Atoi accepts, such as +9464, is normalised before it reaches
+// the bind.
 func metricsAddr(host, port string) (string, error) {
 	n, err := strconv.Atoi(port)
 	if err != nil || n < 1 || n > 65535 {
