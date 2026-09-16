@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -230,4 +231,76 @@ func TestFlushStopsTheMetricsListener(t *testing.T) {
 		_ = conn.Close()
 	}
 	assert.Error(t, err, "Flush must stop the metrics listener")
+}
+
+// otlpRequestRecorder answers every request 200 and records its method and path, so a test
+// can assert that a specific request reached the collector without standing up a real OTLP
+// server to decode the body against.
+type otlpRequestRecorder struct {
+	mu       sync.Mutex
+	requests []string
+}
+
+func (r *otlpRequestRecorder) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	r.requests = append(r.requests, req.Method+" "+req.URL.Path)
+	r.mu.Unlock()
+	w.WriteHeader(http.StatusOK)
+}
+
+func (r *otlpRequestRecorder) seen(want string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, got := range r.requests {
+		if got == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestFlushPushesMetricsOverOTLP pins spec §4's "the meter provider performs the final OTLP
+// push" on Flush. Nothing else in this suite drives an OTLP metric export end to end:
+// changing installMetrics's `if t.cfg.otlpMetrics {` guard to never run leaves every other
+// test green.
+func TestFlushPushesMetricsOverOTLP(t *testing.T) {
+	recorder := &otlpRequestRecorder{}
+	server := httptest.NewServer(recorder)
+	defer server.Close()
+
+	setTelemetryEnv(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", server.URL+"/v1/metrics")
+	restoreGlobalProviders(t)
+
+	tel, err := Setup(context.Background(), "horopter-test")
+	require.NoError(t, err)
+
+	counter, err := otel.Meter("horopter/test").Int64Counter("horopter.test.otlp_export")
+	require.NoError(t, err)
+	counter.Add(context.Background(), 1)
+
+	tel.Flush()
+
+	assert.True(t, recorder.seen(http.MethodPost+" /v1/metrics"),
+		"Flush must push the accumulated metrics to the OTLP collector before shutting down")
+}
+
+// TestInstallMetricsRoutesOTLPParseErrorsThroughSlog pins routeDiagnosticsToSlog()'s call
+// inside installMetrics: without it, an unparsable
+// OTEL_EXPORTER_OTLP_METRICS_ENDPOINT reaches the SDK's internal logger, which writes to
+// the stdlib logger on stderr instead of slog, and the suite stays green.
+func TestInstallMetricsRoutesOTLPParseErrorsThroughSlog(t *testing.T) {
+	setTelemetryEnv(t)
+	restoreGlobalProviders(t)
+	logged := captureSlog(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "://not a url")
+
+	tel, err := Setup(context.Background(), "horopter-test")
+	require.NoError(t, err, "a malformed OTLP endpoint must never stop a daemon starting")
+	tel.Flush()
+
+	assert.Contains(t, logged.String(), "parse url",
+		"a malformed OTEL_EXPORTER_OTLP_METRICS_ENDPOINT must reach slog, not the stdlib logger")
+	assert.Contains(t, logged.String(), "level=ERROR",
+		"the SDK reports a configuration failure at logr's Error level, which is ERROR here")
 }
