@@ -96,6 +96,16 @@ by environment variables, resolved once at startup:
 - `OTEL_SERVICE_NAME` — overrides the `service.name` resource attribute reported
   to the collector. Defaults to the binary's own name: `horopter-ingress`,
   `horopter-egress` or `horopter-migrate`.
+- `OTEL_RESOURCE_ATTRIBUTES` — comma-separated `key=value` pairs merged onto the
+  resource every span carries, e.g. `deployment.environment.name=prod,team=platform`.
+  **This one is different from the other four**: Horopter's own configuration code
+  never reads it. It works because building the resource calls the OpenTelemetry
+  SDK's `resource.Default()`, and that function's own environment detector reads
+  this variable — the same thing it would do for any Go program built on this SDK,
+  not something Horopter added. It is genuinely honoured, but it is upstream
+  behaviour Horopter inherits rather than configures, and no test in this project
+  exercises it — a future SDK upgrade could change or drop it with nothing here to
+  notice.
 - `HOROPTER_TRACE_DISABLE` — a comma-separated list of instrumentation areas to
   silence even while tracing is otherwise on. Recognised areas:
   - `http` — the server span `otelhttp` wraps every request in.
