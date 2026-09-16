@@ -107,8 +107,8 @@ func install(ctx context.Context, cfg config) (func(context.Context) error, erro
 
 	exporter, err := otlptracehttp.New(ctx)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"create the OTLP trace exporter: %w; check OTEL_EXPORTER_OTLP_ENDPOINT", err)
+		return nil, fmt.Errorf("create the OTLP trace exporter: %w; check "+
+			"OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", err)
 	}
 	res, err := newResource(cfg.serviceName)
 	if err != nil {

@@ -18,6 +18,7 @@ import (
 // Every test here sets EVERY variable it depends on, including the ones it needs to be
 // empty. Reading one from the ambient environment is how a suite passes locally and fails
 // in CI, or vice versa.
+
 func TestConfigFromEnvDisabledWithoutAnEndpoint(t *testing.T) {
 	// The OTel default endpoint is localhost:4318. Honouring it would make every
 	// developer run without a collector emit a stream of export failures, so an
@@ -157,11 +158,29 @@ func TestSetupHonoursTheDisabledAreasEndToEnd(t *testing.T) {
 // It drives install() rather than Setup so the assertion does not depend on which
 // environment variables happen to enable tracing, and it shuts down the provider install
 // leaves behind for the reason TestInstrumentedPathIsInertWithNoProvider documents.
+//
+// The variables are still declared. install() takes an explicit config, so the two
+// switches below are not read on this path — but otlptracehttp.New is, and it builds the
+// exporter from the ambient OTEL_EXPORTER_OTLP_* family. Setting all four matches the
+// other Setup tests, so the file has one shape, and means this test cannot start reading
+// the environment if it is ever switched from install to Setup.
+//
+// The cleanup reinstalls the logger against the restored default handler, because
+// otel.SetLogger captures the handler rather than reading slog.Default() per call.
+// Restoring only slog.Default() would leave OTel's logger writing into a dead buffer.
 func TestSetupRoutesSDKErrorsThroughSlog(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+	t.Setenv("OTEL_SDK_DISABLED", "")
+	t.Setenv("HOROPTER_TRACE_DISABLE", "")
+
 	var logged bytes.Buffer
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	t.Cleanup(func() {
+		slog.SetDefault(previous)
+		otel.SetLogger(logr.FromSlogHandler(previous.Handler()))
+	})
 
 	prev := otel.GetTracerProvider()
 	shutdown, err := install(context.Background(),
@@ -222,9 +241,11 @@ func TestSetupRoutesSDKConfigErrorsThroughSlog(t *testing.T) {
 }
 
 func TestNewResourceMergesWithoutASchemaConflict(t *testing.T) {
-	// The B2 defect in one assertion: resource.Merge rejects two resources carrying
-	// different schema URLs, and the semconv import version is the only thing that
-	// decides. Installs no provider and touches no global.
+	// resource.Merge REJECTS two resources carrying different schema URLs, and the
+	// version of the semconv import above is the only thing deciding whether Horopter's
+	// explicit service.name agrees with the one resource.Default() carries. An SDK
+	// upgrade that moves the schema URL breaks every binary's startup here and nowhere
+	// else, so it gets its own assertion. Installs no provider and touches no global.
 	_, err := newResource("horopter-test")
 	require.NoError(t, err, "semconv must match the version resource.Default() uses")
 }
