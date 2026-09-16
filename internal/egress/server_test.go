@@ -24,6 +24,9 @@ import (
 	"github.com/yo61/horopter/internal/core"
 	"github.com/yo61/horopter/internal/egress"
 	"github.com/yo61/horopter/internal/store/postgres"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 var fixed = time.Date(2026, 9, 14, 10, 30, 0, 0, time.UTC)
@@ -767,4 +770,60 @@ func TestGrafanaRejectsAnOutOfRangeEpochWindow(t *testing.T) {
 				"a bad window must never surface store detail to an unauthenticated caller")
 		})
 	}
+}
+
+// recordSpans installs a recording provider and returns it with a restore function.
+//
+// This is a copy of internal/store/postgres/append_test.go's helper of the same name,
+// not an import: that file is package postgres_test and this is package egress_test, so
+// it cannot be imported. The restore is best-effort and deliberately named for what it
+// attempts rather than what it guarantees — see the postgres copy for why.
+func recordSpans(t *testing.T) (*tracetest.SpanRecorder, func()) {
+	t.Helper()
+	rec := tracetest.NewSpanRecorder()
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)))
+	return rec, func() { otel.SetTracerProvider(prev) }
+}
+
+// spanAttrValues returns key's value from every ended span named spanName, in the order
+// the spans ended. A span lacking the attribute is SKIPPED rather than contributing an
+// empty entry. Pass "" as spanName to match every span. kv.Value.String() is used rather
+// than the deprecated Emit(), which staticcheck rejects under SA1019 on the pinned otel
+// v1.46.0.
+func spanAttrValues(rec *tracetest.SpanRecorder, spanName, key string) []string {
+	var out []string
+	for _, span := range rec.Ended() {
+		if spanName != "" && span.Name() != spanName {
+			continue
+		}
+		for _, kv := range span.Attributes() {
+			if string(kv.Key) == key {
+				out = append(out, kv.Value.String())
+			}
+		}
+	}
+	return out
+}
+
+// TestGrafanaPathTenantIsRecordedAsPathSourced pins Step 1's tenantOf source, driven
+// through the one route that can actually produce "path": the path-scoped Grafana
+// annotations route.
+func TestGrafanaPathTenantIsRecordedAsPathSourced(t *testing.T) {
+	rec, restore := recordSpans(t)
+	defer restore()
+
+	// No seeding. grafana.Renderer.Render builds an empty slice and returns it, so an
+	// empty result still renders 200 with []. The assertion is about which mechanism
+	// supplied the tenant, not about any row coming back — and seeding under newServer's
+	// tenant would write to the wrong one anyway, since the path segment "acme" is the
+	// whole point. Discard all three results: a bound-but-unused tn is a compile error.
+	h, _, _ := newServer(t)
+	body := `{"range":{"from":"2026-09-15T09:00:00.000Z","to":"2026-09-15T11:00:00.000Z"}}`
+	resp := postJSON(t, h, "/adapters/grafana/acme/annotations", body)
+	require.Equal(t, http.StatusOK, resp.Code)
+
+	sources := spanAttrValues(rec, "", "horopter.tenant.source")
+	assert.Contains(t, sources, "path",
+		"a path-scoped route must record that the path supplied the tenant")
 }

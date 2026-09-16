@@ -827,9 +827,17 @@ func upsertChange(ctx context.Context, tx pgx.Tx, c core.Change) error {
 // arm is restricted to rows with no correlation_ref so it can only ever match the point
 // that owns the ref, never an unrelated event whose id happens to equal some other
 // change's correlation_ref.
-func (s *Store) ListEvents(ctx context.Context, q EventQuery) ([]core.Event, bool, error) {
+func (s *Store) ListEvents(
+	ctx context.Context, q EventQuery,
+) (evs []core.Event, truncated bool, err error) {
 	ctx, span := tracer().Start(ctx, "ListEvents")
 	defer span.End()
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "")
+		}
+	}()
 
 	query := `
 		SELECT id, tenant, idempotency_key, schema_version, source, type, subject,
@@ -855,11 +863,18 @@ func (s *Store) ListEvents(ctx context.Context, q EventQuery) ([]core.Event, boo
 	}
 	defer rows.Close()
 
-	evs, err := scanEvents(rows, q.Tenant)
+	evs, err = scanEvents(rows, q.Tenant)
 	if err != nil {
 		return nil, false, err
 	}
-	evs, truncated := trimToLimit(evs, q.Limit)
+	evs, truncated = trimToLimit(evs, q.Limit)
+
+	span.SetAttributes(
+		attribute.Int("horopter.query.limit", q.Limit),
+		attribute.Int("horopter.query.rows", len(evs)),
+		attribute.Bool("horopter.query.truncated", truncated),
+	)
+
 	return evs, truncated, nil
 }
 
@@ -900,9 +915,17 @@ func scanEvents(rows pgx.Rows, tenantID string) ([]core.Event, error) {
 // otherwise cannot tell a result set of exactly q.Limit rows from one that dropped the
 // changes it most needed. The over-fetch that detects it is invisible to the caller —
 // q.Limit still means what it says.
-func (s *Store) QueryChanges(ctx context.Context, q ChangeQuery) ([]core.Change, bool, error) {
+func (s *Store) QueryChanges(
+	ctx context.Context, q ChangeQuery,
+) (out []core.Change, truncated bool, err error) {
 	ctx, span := tracer().Start(ctx, "QueryChanges")
 	defer span.End()
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "")
+		}
+	}()
 
 	sb := strings.Builder{}
 	sb.WriteString(`
@@ -924,11 +947,19 @@ func (s *Store) QueryChanges(ctx context.Context, q ChangeQuery) ([]core.Change,
 	}
 	defer rows.Close()
 
-	out, err := scanChanges(rows)
+	out, err = scanChanges(rows)
 	if err != nil {
 		return nil, false, err
 	}
-	out, truncated := trimToLimit(out, q.Limit)
+	out, truncated = trimToLimit(out, q.Limit)
+
+	span.SetAttributes(
+		attribute.Int("horopter.query.limit", q.Limit),
+		attribute.Int("horopter.query.rows", len(out)),
+		attribute.Bool("horopter.query.truncated", truncated),
+		attribute.Int64("horopter.query.window_ms", q.To.Sub(q.From).Milliseconds()),
+	)
+
 	return out, truncated, nil
 }
 
@@ -1034,9 +1065,15 @@ func scanChanges(rows pgx.Rows) ([]core.Change, error) {
 // AppendLockTimeout with a retryable error rather than pinning pool connections, so the
 // bound on an event's delay is the producer's own retry patience. There is no batching,
 // no progress reporting and no online rebuild.
-func (s *Store) RebuildProjection(ctx context.Context, tenantID string) error {
+func (s *Store) RebuildProjection(ctx context.Context, tenantID string) (err error) {
 	ctx, span := tracer().Start(ctx, "RebuildProjection")
 	defer span.End()
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "")
+		}
+	}()
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1049,30 +1086,58 @@ func (s *Store) RebuildProjection(ctx context.Context, tenantID string) error {
 		return err
 	}
 	lockWait := time.Since(lockStart)
-	if _, err := tx.Exec(ctx, `DELETE FROM change WHERE tenant = $1`, tenantID); err != nil {
-		return fmt.Errorf("clear projection for tenant %q: %w", tenantID, err)
-	}
-	if afterDeleteHook != nil {
-		afterDeleteHook()
-	}
-
-	acc, events, err := foldEventLog(ctx, tx, tenantID)
-	if err != nil {
+	if err := clearProjection(ctx, tx, tenantID); err != nil {
 		return err
 	}
-	if err := writeProjection(ctx, tx, acc); err != nil {
+
+	events, refs, err := replayProjection(ctx, tx, tenantID)
+	if err != nil {
 		return err
 	}
 
 	span.SetAttributes(
 		attribute.String("horopter.rebuild.tenant", tenantID),
 		attribute.Int("horopter.rebuild.events", events),
-		attribute.Int("horopter.rebuild.refs", len(acc)),
+		attribute.Int("horopter.rebuild.refs", refs),
 		attribute.Int64("horopter.rebuild.lock_wait_ms", lockWait.Milliseconds()),
 	)
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit rebuild for tenant %q: %w", tenantID, err)
+	}
+	return nil
+}
+
+// replayProjection folds a tenant's whole event log in id order and writes the result,
+// returning the number of events replayed.
+//
+// Kept out of RebuildProjection so that function stays legible while it carries the lock,
+// the clear, the span and the commit — and so it has complexity headroom, which it does
+// not otherwise have.
+// The results are NAMED because they are two bare ints in a row: nothing catches a
+// transposition at either end, and TestRebuildRecordsItsShapeOnASpan seeds two events
+// onto one ref specifically so the two values differ and a swap is visible.
+func replayProjection(
+	ctx context.Context, tx pgx.Tx, tenantID string,
+) (events, refs int, err error) {
+	acc, events, err := foldEventLog(ctx, tx, tenantID)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := writeProjection(ctx, tx, acc); err != nil {
+		return 0, 0, err
+	}
+	return events, len(acc), nil
+}
+
+// clearProjection discards a tenant's projection inside the rebuild transaction. The hook
+// is what lets a test hold the rebuild open in the window an append must not enter.
+func clearProjection(ctx context.Context, tx pgx.Tx, tenantID string) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM change WHERE tenant = $1`, tenantID); err != nil {
+		return fmt.Errorf("clear projection for tenant %q: %w", tenantID, err)
+	}
+	if afterDeleteHook != nil {
+		afterDeleteHook()
 	}
 	return nil
 }

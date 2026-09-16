@@ -24,6 +24,8 @@ import (
 	"github.com/yo61/horopter/internal/core"
 	"github.com/yo61/horopter/internal/store/postgres"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // DefaultTenant is used when a request omits one.
@@ -103,19 +105,21 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
-// tenantOf resolves a request's tenant: a path {tenant} wildcard first — only the
-// path-scoped Grafana annotations route (see Routes) registers one — falling back to
-// the "tenant" query parameter every other route already used, and DefaultTenant if
-// neither is present. PathValue returns "" on a route whose pattern has no such
-// wildcard, so this is safe to call unconditionally from every handler.
-func tenantOf(r *http.Request) string {
+// tenantOf resolves the tenant and reports which mechanism supplied it.
+//
+// The source is recorded because the path-scoped Grafana route exists on the finding
+// that both of Grafana's access modes discard a query string baked into a configured
+// datasource URL. If that is wrong, this attribute reads "default" on every
+// Grafana-originated request in production — visible at once, rather than surfacing
+// later as quietly wrong data.
+func tenantOf(r *http.Request) (string, string) {
 	if v := r.PathValue("tenant"); v != "" {
-		return v
+		return v, "path"
 	}
 	if v := r.URL.Query().Get("tenant"); v != "" {
-		return v
+		return v, "query"
 	}
-	return DefaultTenant
+	return DefaultTenant, "default"
 }
 
 // rfc3339Param parses an RFC3339 query parameter, naming the expected format on error.
@@ -309,8 +313,13 @@ func windowFromAnnotationBody(r *http.Request) (window, error) {
 }
 
 func (s *Server) changesFor(r *http.Request, win window) ([]core.Change, bool, error) {
+	tenantID, source := tenantOf(r)
+	trace.SpanFromContext(r.Context()).SetAttributes(
+		attribute.String("horopter.tenant", tenantID),
+		attribute.String("horopter.tenant.source", source),
+	)
 	return s.store.QueryChanges(r.Context(), postgres.ChangeQuery{
-		Tenant:  tenantOf(r),
+		Tenant:  tenantID,
 		From:    win.from,
 		To:      win.to,
 		Subject: r.URL.Query().Get("subject"),
@@ -326,6 +335,8 @@ func (s *Server) queryChanges(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	trace.SpanFromContext(r.Context()).SetAttributes(
+		attribute.String("horopter.adapter", "neutral"))
 	changes, truncated, err := s.changesFor(r, win)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -347,8 +358,14 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	tenantID, source := tenantOf(r)
+	trace.SpanFromContext(r.Context()).SetAttributes(
+		attribute.String("horopter.adapter", "neutral"),
+		attribute.String("horopter.tenant", tenantID),
+		attribute.String("horopter.tenant.source", source),
+	)
 	events, truncated, err := s.store.ListEvents(r.Context(), postgres.EventQuery{
-		Tenant: tenantOf(r),
+		Tenant: tenantID,
 		Ref:    r.URL.Query().Get("ref"),
 		Limit:  limit,
 	})
@@ -366,7 +383,7 @@ func (s *Server) grafanaAnnotations(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.render(w, r, win, s.grafana.Render)
+	s.render(w, r, win, "grafana", s.grafana.Render)
 }
 
 // grafanaAnnotationsPOST serves the same annotations the GET route does, for the
@@ -388,7 +405,7 @@ func (s *Server) grafanaAnnotationsPOST(w http.ResponseWriter, r *http.Request) 
 		writeAnnotationBodyError(w, err)
 		return
 	}
-	s.render(w, r, win, s.grafana.Render)
+	s.render(w, r, win, "grafana", s.grafana.Render)
 }
 
 // writeAnnotationBodyError answers a POST body that could not be read. An
@@ -412,11 +429,11 @@ func (s *Server) otlpSpans(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.render(w, r, win, s.otlp.Render)
+	s.render(w, r, win, "otlp", s.otlp.Render)
 }
 
 func (s *Server) render(
-	w http.ResponseWriter, r *http.Request, win window,
+	w http.ResponseWriter, r *http.Request, win window, adapter string,
 	render func([]core.Change, time.Time) (any, error),
 ) {
 	changes, truncated, err := s.changesFor(r, win)
@@ -424,6 +441,8 @@ func (s *Server) render(
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	trace.SpanFromContext(r.Context()).SetAttributes(
+		attribute.String("horopter.adapter", adapter))
 	payload, err := render(changes, s.clock())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

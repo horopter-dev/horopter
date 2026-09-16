@@ -229,6 +229,10 @@ func TestAppendFailsFastWhileARebuildHoldsTheTenantLock(t *testing.T) {
 // TestRebuildRecordsItsShapeOnASpan pins RebuildProjection's span attributes: the
 // tenant, the events replayed and the refs they folded into say what the rebuild did,
 // and their ratio predicts how long the NEXT rebuild for this tenant will hold the lock.
+//
+// Two events land on the SAME ref, so events (2) and refs (1) differ. A single seeded
+// event, as this test used to do, makes both values 1 — indistinguishable from a
+// transposed replayProjection that swapped its two named results.
 func TestRebuildRecordsItsShapeOnASpan(t *testing.T) {
 	rec := tracetest.NewSpanRecorder()
 	prev := otel.GetTracerProvider()
@@ -239,6 +243,9 @@ func TestRebuildRecordsItsShapeOnASpan(t *testing.T) {
 	at := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
 	_, _, err := s.AppendEvent(ctx, mkEvent(tn, eventID(t, "a"), "k1", "dep-1",
 		"deployment.started", at))
+	require.NoError(t, err)
+	_, _, err = s.AppendEvent(ctx, mkEvent(tn, eventID(t, "b"), "k2", "dep-1",
+		"deployment.completed", at.Add(20*time.Minute)))
 	require.NoError(t, err)
 
 	require.NoError(t, s.RebuildProjection(ctx, tn))
@@ -254,6 +261,6 @@ func TestRebuildRecordsItsShapeOnASpan(t *testing.T) {
 	}
 	require.NotNil(t, attrs, "RebuildProjection must open a span")
 	assert.Equal(t, tn, attrs["horopter.rebuild.tenant"])
-	assert.Equal(t, int64(1), attrs["horopter.rebuild.events"])
+	assert.Equal(t, int64(2), attrs["horopter.rebuild.events"])
 	assert.Equal(t, int64(1), attrs["horopter.rebuild.refs"])
 }
