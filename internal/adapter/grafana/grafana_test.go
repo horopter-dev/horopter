@@ -84,7 +84,7 @@ func TestRenderGoldenJSON(t *testing.T) {
 	}]`, string(b))
 }
 
-// TestTextForReadsNamespacedDescriptionOnly is C4's guard: it pins that
+// TestTextForReadsNamespacedDescriptionOnly pins that
 // horopter.description populates the annotation body, and that an
 // unnamespaced "description" attribute — an invented key the OTel semantic
 // conventions do not define — no longer does, even when

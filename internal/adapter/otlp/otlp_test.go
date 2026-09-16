@@ -180,7 +180,7 @@ func TestRenderIDsAreStableAcrossReRender(t *testing.T) {
 	assert.Equal(t, span1.SpanID, span2.SpanID, "re-exporting must not duplicate span ids")
 }
 
-// TestRenderIDsDependOnTenant is C3's guard: two changes differing only by
+// TestRenderIDsDependOnTenant pins that two changes differing only by
 // tenant must produce different span ids AND different trace ids. Before the
 // fix, SpanID derived from ref alone, so two tenants sharing a ref collided.
 func TestRenderIDsDependOnTenant(t *testing.T) {
@@ -202,7 +202,7 @@ func TestRenderIDsDependOnTenant(t *testing.T) {
 		"two tenants sharing a ref must not collide on span id")
 }
 
-// TestRenderSpanIDIsNotATraceIDPrefix guards the domain-separation half of C3:
+// TestRenderSpanIDIsNotATraceIDPrefix guards the domain-separation half of that:
 // trace id and span id must be independent derivations, not the same hash
 // truncated at two lengths, or the 8-byte span id would always be a prefix of
 // the 16-byte trace id — an accidental correlation nobody asked for.
@@ -218,7 +218,7 @@ func TestRenderSpanIDIsNotATraceIDPrefix(t *testing.T) {
 		"trace id and span id must be domain-separated, independent derivations")
 }
 
-// TestRenderGoldenOTLPJSON is C1's guard: it asserts the exact marshalled JSON
+// TestRenderGoldenOTLPJSON asserts the exact marshalled JSON
 // shape — nesting, lowerCamelCase field names, and specifically that the
 // nanosecond fields serialise as strings — rather than asserting against the
 // Go struct, which cannot catch a missing or wrong json tag.

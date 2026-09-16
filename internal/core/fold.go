@@ -42,8 +42,9 @@ func RefFor(ev Event) string {
 // Fold applies one event to a change and returns the result. cur is nil for
 // the first event of a ref, but a zero-value *Change (as produced by, e.g.,
 // `c := m[ref]; m[ref] = Fold(&c, ev)` over a map[string]Change) must yield
-// the identical result — Task 8 rebuilds the whole projection with exactly
-// that idiom.
+// the identical result. Both spellings are natural when accumulating into a
+// map, and a rebuild that picked the zero-value one must not diverge from the
+// incremental path, which passes nil.
 //
 // Fold is pure: it reads no clock, consumes no randomness, and does not
 // mutate cur or any map reachable from it. This is what makes a projection

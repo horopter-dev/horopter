@@ -174,11 +174,11 @@ func TestGrafanaAdapterUsesEpochMillis(t *testing.T) {
 
 // TestGrafanaRejectsMalformedEpochMillis exists because
 // TestEgressRejectsMalformedTimeParams only exercises rfc3339Param, via /v1/changes —
-// nothing in the brief's suite drove a malformed value through epochMillisParam, the
-// parser the Grafana endpoint actually uses. The needle is "epoch milliseconds"
-// rather than "from": Task 11 had an assertion on the bare word "id" satisfied by the
-// word invalid in the error's own prefix, so this pins wording long enough that only
-// the intended message can match it.
+// nothing drove a malformed value through epochMillisParam, the parser the Grafana
+// endpoint actually uses. The needle is "epoch milliseconds" rather than "from":
+// an earlier assertion on the bare word "id" was satisfied by the word "invalid" in
+// the error's own prefix, so this pins wording long enough that only the intended
+// message can match it.
 func TestGrafanaRejectsMalformedEpochMillis(t *testing.T) {
 	h, _, tn := newServer(t)
 	rec := get(t, h, "/adapters/grafana/annotations?tenant="+tn+
@@ -243,7 +243,7 @@ func annotationBody(from, to time.Time) string {
 		from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano))
 }
 
-// TestGrafanaAnnotationsPOSTUsesRequestBodyRange is C2's guard: it drives the
+// TestGrafanaAnnotationsPOSTUsesRequestBodyRange drives the
 // new POST route with a Grafana-shaped JSON body and pins that the time range
 // comes from range.from/range.to in the body, not from query parameters —
 // the GET route's contract, which this route deliberately does not share.
@@ -281,11 +281,10 @@ func TestGrafanaAnnotationsPOSTRejectsMalformedBody(t *testing.T) {
 		"the response must name the field, not just say the request was bad")
 }
 
-// TestGrafanaAnnotationsPOSTSignalsTruncation is C2's other guard: the new
-// route must signal truncation the same way every other read endpoint does
-// (batch B, item B5b) — an endpoint that silently truncates is the finding
-// B5b existed to fix, and adding a route to the open surface must not
-// reopen it.
+// TestGrafanaAnnotationsPOSTSignalsTruncation pins that the POST route signals
+// truncation the same way every other read endpoint does. An endpoint that
+// truncates silently hands back a short answer indistinguishable from a complete
+// one, and adding a route to the read surface must not reintroduce that.
 func TestGrafanaAnnotationsPOSTSignalsTruncation(t *testing.T) {
 	h, s, tn := newServer(t)
 	const seeded = 3
@@ -337,11 +336,11 @@ func annotationTitles(t *testing.T, rec *httptest.ResponseRecorder) []string {
 	return titles
 }
 
-// TestGrafanaAnnotationsPOSTPathTenantIsScoped is F2's guard: a POST to the
-// path-scoped route must query that path's tenant, and the pre-existing
-// tenant-less route must still resolve to DefaultTenant — the mechanism a real
-// Grafana can actually reach, since both of its access modes discard a "?tenant="
-// query parameter baked into the configured datasource URL (see fix-c-report.md).
+// TestGrafanaAnnotationsPOSTPathTenantIsScoped pins that a POST to the path-scoped
+// route queries that path's tenant, and that the pre-existing tenant-less route
+// still resolves to DefaultTenant. The path is the mechanism a real Grafana can
+// actually reach: both of its access modes discard a "?tenant=" query parameter
+// baked into the configured datasource URL.
 //
 // The tenant-less leg used to assert the response was EMPTY, having seeded nothing in
 // DefaultTenant. That is satisfied by every wrong answer as well as the right one: a
@@ -385,7 +384,7 @@ func TestGrafanaAnnotationsPOSTPathTenantIsScoped(t *testing.T) {
 		"the tenant-less route must not leak tnB's rows")
 }
 
-// TestGrafanaAnnotationsPOSTRejectsOversizedBody is F3's guard: an unauthenticated
+// TestGrafanaAnnotationsPOSTRejectsOversizedBody pins that an unauthenticated
 // caller must not be able to force an unbounded allocation through the first
 // request-body route on egress's open surface.
 func TestGrafanaAnnotationsPOSTRejectsOversizedBody(t *testing.T) {

@@ -84,7 +84,7 @@ func TestFoldTitleFallsBackToType(t *testing.T) {
 	assert.Equal(t, "API v2.5.0", core.Fold(nil, e).Title)
 }
 
-// F1: TestFoldIsPure must actually be capable of failing. base carries a
+// TestFoldIsPure must actually be capable of failing. base carries a
 // non-empty attribute map with a key the second event overwrites, so an
 // implementation that shares (rather than clones) cur's attribute map is
 // caught by comparing a pre-fold clone against base.Attributes afterwards.
@@ -127,7 +127,7 @@ func TestFoldIsPure(t *testing.T) {
 			"that writes StartedAt was entered")
 }
 
-// F2: a terminal event folded onto a change that already has a non-nil End
+// A terminal event folded onto a change that already has a non-nil End
 // must assign a fresh *time.Time, not write through the copied pointer. If it
 // wrote through (*out.End = ev.OccurredAt), the earlier change's End would be
 // mutated in place, since `out = *cur` copies the pointer value, not the
@@ -147,10 +147,12 @@ func TestFoldTerminalEventReplacesEndWithFreshPointer(t *testing.T) {
 	assert.Equal(t, t20, *c.End, "the prior change value must remain untouched")
 }
 
-// F3: Fold(nil, ev) and Fold(&Change{}, ev) must converge on identical
-// output for the same event sequence. Task 8 rebuilds the projection with
-// `c := m[ref]; m[ref] = Fold(&c, ev)` over a map[string]Change, which passes
-// a zero-value *Change rather than nil for the first event of a ref.
+// Fold(nil, ev) and Fold(&Change{}, ev) must converge on identical output for the
+// same event sequence. Accumulating into a map[string]Change invites the spelling
+// `c := m[ref]; m[ref] = Fold(&c, ev)`, which passes a zero-value *Change rather than
+// nil for the first event of a ref; foldEventLog in internal/store/postgres passes nil.
+// Both must agree, or a rebuild and the incremental append path would disagree about
+// every ref's first event.
 func TestFoldNilAndZeroValueCurConverge(t *testing.T) {
 	events := []core.Event{
 		ev("01A", "", "config.changed", t10),            // point
@@ -183,7 +185,7 @@ func TestFoldNilAndZeroValueCurConverge(t *testing.T) {
 		"Fold(nil, ev) and Fold(&Change{}, ev) must produce identical projections")
 }
 
-// F4: a .started and a .completed at the same timestamp is a zero-duration
+// A .started and a .completed at the same timestamp is a zero-duration
 // closed interval, not a point. Only the no-correlation-ref path produces a
 // point.
 func TestFoldZeroDurationClosedIntervalIsNotAPoint(t *testing.T) {
@@ -206,10 +208,10 @@ func TestRefFor(t *testing.T) {
 	assert.Equal(t, "01B", core.RefFor(withoutCorr), "a point's ref is its own event id")
 }
 
-// F5: pins the full v0.1 terminal vocabulary, including the additions for
-// F5 (resolved/closed/done/ended -> completed, aborted -> cancelled,
-// errored/timed_out -> failed), plus non-terminal types and a three-segment
-// type to exercise the last-dot-segment rule.
+// Pins the full v0.1 terminal vocabulary, including resolved/closed/done/ended
+// -> completed, aborted -> cancelled and errored/timed_out -> failed, plus
+// non-terminal types and a three-segment type to exercise the last-dot-segment
+// rule.
 func TestStatusForTypeTerminalVocabulary(t *testing.T) {
 	tests := []struct {
 		typ      string
@@ -246,7 +248,7 @@ func TestStatusForTypeTerminalVocabulary(t *testing.T) {
 	}
 }
 
-// F6: a correlated event that is neither a start nor a terminal type must still leave a
+// A correlated event that is neither a start nor a terminal type must still leave a
 // queryable status. Before this, neither branch fired and Status stayed "", which wrote
 // a row QueryChanges could not select (it reads an empty Status as "no filter") and
 // which, with End nil, rendered as an interval growing to the year 9999. A change has
@@ -268,7 +270,7 @@ func TestFoldCorrelatedNonTerminalIsInProgress(t *testing.T) {
 	}
 }
 
-// F7: the in-progress default must not reopen a change that already reached a terminal
+// The in-progress default must not reopen a change that already reached a terminal
 // status. A late annotation on a finished deployment is ordinary traffic, and rewriting
 // its outcome to in_progress while End stays set would be a worse corruption than the
 // empty status it replaced.
@@ -283,7 +285,7 @@ func TestFoldNonTerminalAfterTerminalKeepsTheOutcome(t *testing.T) {
 	assert.Equal(t, t20, *c.End, "the recorded end must survive the annotation")
 }
 
-// F8: start falls back to the EARLIEST occurred_at seen for the ref, not the first one. The
+// Start falls back to the EARLIEST occurred_at seen for the ref, not the first one. The
 // implementation used to keep the FIRST FOLDED one, which differs precisely when a
 // later non-start, non-terminal event carries an earlier timestamp — the case below.
 func TestFoldStartFallsBackToTheEarliestOccurredAt(t *testing.T) {
@@ -301,11 +303,11 @@ func TestFoldStartFallsBackToTheEarliestOccurredAt(t *testing.T) {
 	assert.Equal(t, t30, c.Start, "the real start must overwrite the fallback, not be min'd with it")
 }
 
-// F9: the case the two-fact start model was introduced to fix.
-// A stray annotation carrying a timestamp EARLIER than the change's declared start used
-// to drag the recorded start backwards behind the event that authoritatively declared it
-// — silently, and only in one of the two arrival orders. The assertion must win, and the
-// earlier evidence must still be recorded rather than destroyed.
+// The case the two-fact start model was introduced to fix: a stray annotation carrying a
+// timestamp EARLIER than the change's declared start used to drag the recorded start
+// backwards behind the event that authoritatively declared it — silently, and only in one
+// of the two arrival orders. The assertion must win, and the earlier evidence must still
+// be recorded rather than destroyed.
 func TestFoldAnAssertedStartSurvivesALaterEventCarryingAnEarlierTime(t *testing.T) {
 	c := core.Fold(nil, ev("01A", "dep-7", "deployment.started", t20))
 	require.NotNil(t, c.StartedAt)
@@ -322,7 +324,7 @@ func TestFoldAnAssertedStartSurvivesALaterEventCarryingAnEarlierTime(t *testing.
 			"anomaly worth auditing, and a single start field destroyed it")
 }
 
-// F10: a ref carrying more than one start-type event takes the EARLIEST assertion. The
+// A ref carrying more than one start-type event takes the EARLIEST assertion. The
 // decision document reasons from the assertion being idempotent, which holds for one
 // .started and fails for two with different timestamps: last-folded-wins would make a
 // rebuild (id order) and a live append (arrival order) disagree. Minimum is commutative,
@@ -359,7 +361,7 @@ func permutations(events []core.Event) [][]core.Event {
 	return out
 }
 
-// F11: folding the same set of events in ANY order must produce the same StartedAt,
+// Folding the same set of events in ANY order must produce the same StartedAt,
 // FirstSeenAt and Start. This is the property that makes RebuildProjection meaningful —
 // a rebuild replays in id order while a live append folds in arrival order, and the two
 // must converge — and it is the property the decision document claims. Both facts are

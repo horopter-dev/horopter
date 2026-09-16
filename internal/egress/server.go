@@ -113,9 +113,9 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 
 // tenantOf resolves the tenant and reports which mechanism supplied it.
 //
-// The source is recorded because the path-scoped Grafana route exists on the finding
-// that both of Grafana's access modes discard a query string baked into a configured
-// datasource URL. If that is wrong, this attribute reads "default" on every
+// The source is recorded because the path-scoped Grafana route exists precisely
+// because both of Grafana's access modes discard a query string baked into a
+// configured datasource URL. If that is wrong, this attribute reads "default" on every
 // Grafana-originated request in production — visible at once, rather than surfacing
 // later as quietly wrong data.
 //
