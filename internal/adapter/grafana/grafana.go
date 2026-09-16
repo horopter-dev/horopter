@@ -61,16 +61,26 @@ func (r *Renderer) Render(changes []core.Change, now time.Time) (any, error) {
 
 // tagsFor flattens structured attributes into Grafana's flat tag list. Sorted so
 // that output is deterministic: Go map iteration order is not.
+// The computed tags OVERLAY a producer's attributes of the same name rather than being
+// appended beside them. Grafana tags are a flat list, so an attribute literally named
+// "status" used to render a second "status:" tag next to the change's own, with nothing
+// marking which one is authoritative. Nothing restricts attribute keys, so that is
+// reachable from either ingest path. otlp.mergedAttributes overlays its computed keys
+// for the same reason, and textFor was fixed for the same collision on "description".
 func tagsFor(c core.Change) []string {
-	tags := make([]string, 0, len(c.Attributes)+2)
+	merged := make(map[string]any, len(c.Attributes)+2)
 	for k, v := range c.Attributes {
-		tags = append(tags, fmt.Sprintf("%s:%v", k, v))
+		merged[k] = v
 	}
 	if c.Status != "" {
-		tags = append(tags, "status:"+string(c.Status))
+		merged["status"] = string(c.Status)
 	}
 	if c.Subject != "" {
-		tags = append(tags, "subject:"+c.Subject)
+		merged["subject"] = c.Subject
+	}
+	tags := make([]string, 0, len(merged))
+	for k, v := range merged {
+		tags = append(tags, fmt.Sprintf("%s:%v", k, v))
 	}
 	sort.Strings(tags)
 	return tags

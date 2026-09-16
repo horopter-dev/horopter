@@ -127,3 +127,25 @@ func TestRenderNilChangesMarshalsToEmptyArray(t *testing.T) {
 	require.NoError(t, err)
 	assert.JSONEq(t, `[]`, string(b))
 }
+
+// A producer attribute named "status" or "subject" must not produce a second tag under
+// the same prefix: Grafana tags are a flat list, so a reader given both has no way to
+// tell which is the change's own status. The change's value wins, matching how the OTLP
+// adapter overlays its computed keys.
+func TestTagsForOverlaysComputedTagsOverCollidingAttributes(t *testing.T) {
+	out, err := grafana.New().Render([]core.Change{{
+		Tenant: "acme", Ref: "dep-12", Start: start, End: &start,
+		Status: core.StatusCompleted, Subject: "acme/prod",
+		Attributes: map[string]any{
+			"status":          "eu-west-1a",
+			"subject":         "not-the-subject",
+			"service.version": "2.5.0",
+		},
+	}}, now)
+	require.NoError(t, err)
+
+	tags := out.([]grafana.Annotation)[0].Tags
+	assert.Equal(t, []string{
+		"service.version:2.5.0", "status:completed", "subject:acme/prod",
+	}, tags, "one tag per key, with the change's own value winning the collision")
+}
