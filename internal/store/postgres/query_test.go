@@ -348,3 +348,59 @@ func TestStartAtIsGeneratedFromTheTwoStartFacts(t *testing.T) {
 		"once asserted, start_at must follow the assertion even though it is later than "+
 			"the earliest event seen")
 }
+
+// TestFailedQueryChangesStillRecordsItsAttributes is the failure half of the read path's
+// instrumentation. The attributes that say what was asked for — tenant, limit and window
+// — are all known before the query runs, so recording them only after it succeeded left
+// every failed read describing nothing at all, which is the one case anyone reads a span
+// for. A cancelled context is the cheapest deterministic way to make the pool refuse.
+//
+// rows and truncated are asserted as their zero values rather than skipped: they come
+// from the named results, and asserting them pins that the deferred block reads the
+// results rather than stale locals.
+func TestFailedQueryChangesStillRecordsItsAttributes(t *testing.T) {
+	rec, restore := recordSpans(t)
+	defer restore()
+
+	s, tn := newStore(t), tenant(t)
+	from := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
+	to := from.Add(90 * time.Minute)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err := s.QueryChanges(ctx, postgres.ChangeQuery{
+		Tenant: tn, From: from, To: to, Limit: 25,
+	})
+	require.Error(t, err, "a cancelled context must fail the query, not return an empty result")
+
+	assert.Equal(t, []string{tn},
+		spanAttrValues(rec, "QueryChanges", "horopter.tenant"),
+		"a failed query must still say which tenant asked")
+	assert.Equal(t, []string{"25"},
+		spanAttrValues(rec, "QueryChanges", "horopter.query.limit"))
+	assert.Equal(t, []string{"5400000"},
+		spanAttrValues(rec, "QueryChanges", "horopter.query.window_ms"),
+		"the window is known at entry; a failing query is when its width matters most")
+	assert.Equal(t, []string{"0"}, spanAttrValues(rec, "QueryChanges", "horopter.query.rows"))
+	assert.Equal(t, []string{"false"},
+		spanAttrValues(rec, "QueryChanges", "horopter.query.truncated"))
+}
+
+// TestFailedListEventsStillRecordsItsAttributes is the same guard on the other read
+// method, which has its own copy of the deferred block.
+func TestFailedListEventsStillRecordsItsAttributes(t *testing.T) {
+	rec, restore := recordSpans(t)
+	defer restore()
+
+	s, tn := newStore(t), tenant(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn, Limit: 7})
+	require.Error(t, err)
+
+	assert.Equal(t, []string{tn}, spanAttrValues(rec, "ListEvents", "horopter.tenant"))
+	assert.Equal(t, []string{"7"}, spanAttrValues(rec, "ListEvents", "horopter.query.limit"))
+	assert.Equal(t, []string{"0"}, spanAttrValues(rec, "ListEvents", "horopter.query.rows"))
+}

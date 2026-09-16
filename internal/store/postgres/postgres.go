@@ -832,7 +832,16 @@ func (s *Store) ListEvents(
 ) (evs []core.Event, truncated bool, err error) {
 	ctx, span := tracer().Start(ctx, "ListEvents")
 	defer span.End()
+	// Recorded from a defer, not from the success path, so a query that fails still says
+	// which tenant asked for what. The limit is known at entry; rows and truncated read
+	// from the named results, which on every error path are the zero values this returns.
 	defer func() {
+		span.SetAttributes(
+			attribute.String("horopter.tenant", q.Tenant),
+			attribute.Int("horopter.query.limit", q.Limit),
+			attribute.Int("horopter.query.rows", len(evs)),
+			attribute.Bool("horopter.query.truncated", truncated),
+		)
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "")
@@ -868,13 +877,6 @@ func (s *Store) ListEvents(
 		return nil, false, err
 	}
 	evs, truncated = trimToLimit(evs, q.Limit)
-
-	span.SetAttributes(
-		attribute.Int("horopter.query.limit", q.Limit),
-		attribute.Int("horopter.query.rows", len(evs)),
-		attribute.Bool("horopter.query.truncated", truncated),
-	)
-
 	return evs, truncated, nil
 }
 
@@ -920,7 +922,19 @@ func (s *Store) QueryChanges(
 ) (out []core.Change, truncated bool, err error) {
 	ctx, span := tracer().Start(ctx, "QueryChanges")
 	defer span.End()
+	// Recorded from a defer, not from the success path, so a query that fails still says
+	// which tenant asked for what over how wide a window — the two dimensions a slow or
+	// failing dashboard query is diagnosed by. Limit and window are known at entry; rows
+	// and truncated read from the named results, which on every error path are the zero
+	// values this returns.
 	defer func() {
+		span.SetAttributes(
+			attribute.String("horopter.tenant", q.Tenant),
+			attribute.Int("horopter.query.limit", q.Limit),
+			attribute.Int("horopter.query.rows", len(out)),
+			attribute.Bool("horopter.query.truncated", truncated),
+			attribute.Int64("horopter.query.window_ms", q.To.Sub(q.From).Milliseconds()),
+		)
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "")
@@ -952,14 +966,6 @@ func (s *Store) QueryChanges(
 		return nil, false, err
 	}
 	out, truncated = trimToLimit(out, q.Limit)
-
-	span.SetAttributes(
-		attribute.Int("horopter.query.limit", q.Limit),
-		attribute.Int("horopter.query.rows", len(out)),
-		attribute.Bool("horopter.query.truncated", truncated),
-		attribute.Int64("horopter.query.window_ms", q.To.Sub(q.From).Milliseconds()),
-	)
-
 	return out, truncated, nil
 }
 
@@ -1068,7 +1074,24 @@ func scanChanges(rows pgx.Rows) ([]core.Change, error) {
 func (s *Store) RebuildProjection(ctx context.Context, tenantID string) (err error) {
 	ctx, span := tracer().Start(ctx, "RebuildProjection")
 	defer span.End()
+
+	// Recorded from a defer, not after the replay, so the failure an operator actually
+	// meets is covered: a rebuild that gives up in lockRebuildWrite on RebuildLockTimeout
+	// used to produce a span saying neither which tenant it was for nor how long it
+	// waited. The counters stay zero on that path, which is the truth — nothing was
+	// replayed.
+	var (
+		lockWait time.Duration
+		events   int
+		refs     int
+	)
 	defer func() {
+		span.SetAttributes(
+			attribute.String("horopter.rebuild.tenant", tenantID),
+			attribute.Int("horopter.rebuild.events", events),
+			attribute.Int("horopter.rebuild.refs", refs),
+			attribute.Int64("horopter.rebuild.lock_wait_ms", lockWait.Milliseconds()),
+		)
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "")
@@ -1081,26 +1104,22 @@ func (s *Store) RebuildProjection(ctx context.Context, tenantID string) (err err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// lockWait is assigned before the error is checked, so a lock that timed out reports
+	// the wait that ended in the timeout rather than zero.
 	lockStart := time.Now()
-	if err := lockRebuildWrite(ctx, tx, tenantID); err != nil {
-		return err
+	lockErr := lockRebuildWrite(ctx, tx, tenantID)
+	lockWait = time.Since(lockStart)
+	if lockErr != nil {
+		return lockErr
 	}
-	lockWait := time.Since(lockStart)
 	if err := clearProjection(ctx, tx, tenantID); err != nil {
 		return err
 	}
 
-	events, refs, err := replayProjection(ctx, tx, tenantID)
+	events, refs, err = replayProjection(ctx, tx, tenantID)
 	if err != nil {
 		return err
 	}
-
-	span.SetAttributes(
-		attribute.String("horopter.rebuild.tenant", tenantID),
-		attribute.Int("horopter.rebuild.events", events),
-		attribute.Int("horopter.rebuild.refs", refs),
-		attribute.Int64("horopter.rebuild.lock_wait_ms", lockWait.Milliseconds()),
-	)
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit rebuild for tenant %q: %w", tenantID, err)
@@ -1109,7 +1128,7 @@ func (s *Store) RebuildProjection(ctx context.Context, tenantID string) (err err
 }
 
 // replayProjection folds a tenant's whole event log in id order and writes the result,
-// returning the number of events replayed.
+// returning the number of events replayed and the number of refs they folded into.
 //
 // Kept out of RebuildProjection so that function stays legible while it carries the lock,
 // the clear, the span and the commit — and so it has complexity headroom, which it does
@@ -1143,7 +1162,7 @@ func clearProjection(ctx context.Context, tx pgx.Tx, tenantID string) error {
 }
 
 // foldEventLog replays a tenant's event log in ULID order and returns the projection it
-// implies, keyed by ref.
+// implies, keyed by ref, together with the number of events it read to build it.
 //
 // Folding inside the scan loop, rather than materialising the whole log into a slice
 // first, keeps peak memory proportional to the number of distinct refs rather than the

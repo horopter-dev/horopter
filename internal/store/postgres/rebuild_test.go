@@ -264,3 +264,29 @@ func TestRebuildRecordsItsShapeOnASpan(t *testing.T) {
 	assert.Equal(t, int64(2), attrs["horopter.rebuild.events"])
 	assert.Equal(t, int64(1), attrs["horopter.rebuild.refs"])
 }
+
+// TestFailedRebuildStillRecordsItsTenant is the failure half of the rebuild span. The
+// case that matters operationally is RebuildLockTimeout, where an operator needs the span
+// to say which tenant was being rebuilt and how long it waited; recording the attributes
+// after the replay meant a rebuild that never got the lock described nothing.
+//
+// A cancelled context fails the Begin, which is the cheapest deterministic failure and
+// exercises the same deferred block. It fails BEFORE the lock, so lock_wait_ms is
+// correctly zero here and is not what this asserts — what it asserts is that the
+// attributes are emitted at all on a path that never reaches the replay.
+func TestFailedRebuildStillRecordsItsTenant(t *testing.T) {
+	rec, restore := recordSpans(t)
+	defer restore()
+
+	s, tn := newStore(t), tenant(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.Error(t, s.RebuildProjection(ctx, tn))
+
+	assert.Equal(t, []string{tn},
+		spanAttrValues(rec, "RebuildProjection", "horopter.rebuild.tenant"),
+		"a rebuild that failed before replaying anything must still name its tenant")
+	assert.Equal(t, []string{"0"},
+		spanAttrValues(rec, "RebuildProjection", "horopter.rebuild.events"))
+}

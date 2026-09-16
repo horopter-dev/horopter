@@ -72,8 +72,7 @@ func (o appendOutcome) attributes(ev core.Event) []attribute.KeyValue {
 func (o appendOutcome) baseAttributes(ev core.Event) []attribute.KeyValue {
 	return []attribute.KeyValue{
 		// Repeated from the server span deliberately: a query that slices store spans by
-		// tenant should not have to join across a trace to do it, and horopter-migrate
-		// has no server span at all.
+		// tenant should not have to join across a trace to do it.
 		attribute.String("horopter.tenant", ev.Tenant),
 		attribute.String("horopter.event.id", ev.ID),
 		attribute.String("horopter.event.type", ev.Type),
