@@ -116,6 +116,7 @@ func fetch(t *testing.T, method, url string) (int, string) {
 // serving starts Setup and ServeMetrics on a free loopback port and returns the base URL.
 func serving(t *testing.T) (*Telemetry, string) {
 	t.Helper()
+	captureSlog(t) // ServeMetrics logs "serving metrics" at INFO; keep it out of -v output.
 	port := freePort(t)
 	t.Setenv("OTEL_EXPORTER_PROMETHEUS_HOST", "127.0.0.1")
 	t.Setenv("OTEL_EXPORTER_PROMETHEUS_PORT", port)

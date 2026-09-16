@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log"
 	"log/slog"
 	"testing"
 	"time"
@@ -38,31 +39,68 @@ func setTelemetryEnv(t *testing.T) {
 // provider was installed stay bound to it. This restores what the getters return, not that
 // delegation, which is why every test that installs a provider must also shut it down —
 // Flush does, for a Telemetry.
+//
+// Each setter is called only when the current provider differs from the one being
+// restored: calling it with the provider that is already current makes OTel log "Setting
+// ... provider to its current value" at ERROR, on every single test in the package that
+// never replaced one to begin with.
 func restoreGlobalProviders(t *testing.T) {
 	t.Helper()
 	tracers, meters := otel.GetTracerProvider(), otel.GetMeterProvider()
 	t.Cleanup(func() {
-		otel.SetTracerProvider(tracers)
-		otel.SetMeterProvider(meters)
+		if current := otel.GetTracerProvider(); current != tracers {
+			otel.SetTracerProvider(tracers)
+		}
+		if current := otel.GetMeterProvider(); current != meters {
+			otel.SetMeterProvider(meters)
+		}
 	})
 }
 
-// captureSlog routes slog's default logger to a buffer for the rest of the test and returns
-// the buffer.
+// captureSlog routes slog's default logger to a buffer for the rest of the test and
+// restores both slog's default AND the stdlib log package's writer and flags in cleanup.
 //
-// The cleanup reinstalls OTel's logger against the restored default handler, because
+// slog.SetDefault with a non-default handler ALSO redirects the stdlib log package
+// (log.SetOutput, log.SetFlags(0)), so it can bridge log.Print calls through slog.
+// Restoring only slog.Default() leaves that redirection in place: every later test's
+// stdlib log and slog output would go into this test's now-dead buffer.
+//
+// The cleanup also reinstalls OTel's logger against the restored default handler, because
 // otel.SetLogger captures the handler rather than reading slog.Default() per call.
 // Restoring only slog.Default() would leave OTel's logger writing into a dead buffer.
 func captureSlog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var logged bytes.Buffer
+	previousWriter := log.Writer()
+	previousFlags := log.Flags()
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
 	t.Cleanup(func() {
 		slog.SetDefault(previous)
+		log.SetOutput(previousWriter)
+		log.SetFlags(previousFlags)
 		otel.SetLogger(logr.FromSlogHandler(previous.Handler()))
 	})
 	return &logged
+}
+
+// TestCaptureSlogRestoresTheStdlibLogPackage pins captureSlog's restoration of the stdlib
+// log package's writer and flags, not only slog.Default(). It runs captureSlog inside a
+// subtest so the outer t.Cleanup registered by the subtest's *testing.T fires before this
+// test asserts against the log package's state, the same way one test's cleanup runs
+// before the package's next test in a full suite.
+func TestCaptureSlogRestoresTheStdlibLogPackage(t *testing.T) {
+	wantWriter := log.Writer()
+	wantFlags := log.Flags()
+
+	t.Run("subtest", func(t *testing.T) {
+		captureSlog(t)
+	})
+
+	assert.Equal(t, wantWriter, log.Writer(),
+		"captureSlog must restore the stdlib log package's writer, not only slog.Default()")
+	assert.Equal(t, wantFlags, log.Flags(),
+		"captureSlog must restore the stdlib log package's flags, not only slog.Default()")
 }
 
 func TestConfigFromEnvDisabledWithoutAnEndpoint(t *testing.T) {
@@ -168,7 +206,7 @@ func TestSetupSucceedsWhenEnabled(t *testing.T) {
 	// provider was replaced: a schema-URL conflict in newResource returns before
 	// otel.SetTracerProvider, and the provider then stays exactly what it was.
 	setTelemetryEnv(t)
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4318")
 	restoreGlobalProviders(t)
 
 	prev := otel.GetTracerProvider()
@@ -189,7 +227,7 @@ func TestSetupSucceedsWhenEnabled(t *testing.T) {
 // shut-down SDK provider handing out noop tracers is what keeps that later test honest.
 func TestSetupHonoursTheDisabledAreasEndToEnd(t *testing.T) {
 	setTelemetryEnv(t)
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4318")
 	t.Setenv("HOROPTER_TRACE_DISABLE", "sql")
 	restoreGlobalProviders(t)
 
