@@ -35,9 +35,10 @@ func (r *Renderer) Render(changes []core.Change, now time.Time) (any, error) {
 	out := make([]Annotation, 0, len(changes))
 	for _, c := range changes {
 		// An open change renders as a region growing to the present; anything else
-		// renders to the end it recorded. core.Change.IsOpen is the domain's name for
-		// that distinction (spec §5.3), so the adapter asks the change which shape it
-		// is rather than re-deriving it from a nil check the concept has a word for.
+		// renders to the end it recorded. A change takes one of three shapes — point,
+		// open, or closed — and core.Change.IsOpen is the domain's name for the
+		// distinction, so the adapter asks the change which shape it is rather than
+		// re-deriving it from a nil check the concept has a word for.
 		// IsOpen() is false exactly when End is non-nil, so the dereference is safe.
 		end := now
 		if !c.IsOpen() {
@@ -78,7 +79,7 @@ func tagsFor(c core.Change) []string {
 // textFor returns the annotation body text.
 //
 // horopter.description is a Horopter extension, not an OTel semantic
-// convention — no spec vocabulary names an annotation-body concept. It is
+// convention — no OTel convention names an annotation-body concept. It is
 // namespaced under "horopter." the same way otlp.mergedAttributes sets
 // horopter.subject, horopter.ref and horopter.status (internal/adapter/otlp),
 // which is what keeps a project-specific extension point consistent with

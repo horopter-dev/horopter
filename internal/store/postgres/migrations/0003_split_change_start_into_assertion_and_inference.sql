@@ -3,7 +3,7 @@
 -- change must have existed by T because an event referencing it exists. Any precedence
 -- rule written over one column has to destroy one of them, and which one it destroys
 -- changes with fold order. Recording both facts removes the dilemma instead of resolving
--- it. See decisions/2026-09-15-change-start-time-provenance.md.
+-- it.
 ALTER TABLE change ADD COLUMN started_at    TIMESTAMPTZ;
 ALTER TABLE change ADD COLUMN first_seen_at TIMESTAMPTZ;
 

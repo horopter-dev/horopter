@@ -249,8 +249,8 @@ func TestStatusForTypeTerminalVocabulary(t *testing.T) {
 // F6: a correlated event that is neither a start nor a terminal type must still leave a
 // queryable status. Before this, neither branch fired and Status stayed "", which wrote
 // a row QueryChanges could not select (it reads an empty Status as "no filter") and
-// which, with End nil, rendered as an interval growing to the year 9999. The spec's
-// three shapes admit no fourth state, so such an event means "in flight".
+// which, with End nil, rendered as an interval growing to the year 9999. A change has
+// three shapes and admits no fourth, so such an event means "in flight".
 func TestFoldCorrelatedNonTerminalIsInProgress(t *testing.T) {
 	for _, typ := range []string{
 		"incident.declared",
@@ -283,7 +283,7 @@ func TestFoldNonTerminalAfterTerminalKeepsTheOutcome(t *testing.T) {
 	assert.Equal(t, t20, *c.End, "the recorded end must survive the annotation")
 }
 
-// F8: spec §7 says start falls back to the EARLIEST occurred_at seen for the ref. The
+// F8: start falls back to the EARLIEST occurred_at seen for the ref, not the first one. The
 // implementation used to keep the FIRST FOLDED one, which differs precisely when a
 // later non-start, non-terminal event carries an earlier timestamp — the case below.
 func TestFoldStartFallsBackToTheEarliestOccurredAt(t *testing.T) {
@@ -301,7 +301,7 @@ func TestFoldStartFallsBackToTheEarliestOccurredAt(t *testing.T) {
 	assert.Equal(t, t30, c.Start, "the real start must overwrite the fallback, not be min'd with it")
 }
 
-// F9: the case decisions/2026-09-15-change-start-time-provenance.md was written to fix.
+// F9: the case the two-fact start model was introduced to fix.
 // A stray annotation carrying a timestamp EARLIER than the change's declared start used
 // to drag the recorded start backwards behind the event that authoritatively declared it
 // — silently, and only in one of the two arrival orders. The assertion must win, and the

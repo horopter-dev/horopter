@@ -12,7 +12,7 @@ events in; observability tools read them out to enrich graphs.
 
 ## Status
 
-v0.1 in development. See `docs/superpowers/specs/` for the design.
+v0.1 in development.
 
 ## Quick start
 
@@ -245,9 +245,16 @@ envelope.
 ## Attributes
 
 Attribute keys follow OpenTelemetry semantic conventions rather than an invented
-vocabulary — see `docs/superpowers/specs/2026-09-14-horopter-design.md` §5.4 for the
-`service.*`, `deployment.*`, `cicd.*` and `cloudevents.*` keys every producer should aim
-for.
+vocabulary. It costs nothing and buys legibility, plus mechanical mapping into any
+OTel-aware tool. The keys a producer should aim for:
+
+- `service.name`, `service.version`
+- `deployment.environment.name`
+- `cicd.pipeline.name`, `cicd.pipeline.result`, `cicd.pipeline.task.name`,
+  `cicd.pipeline.task.run.id`, `cicd.pipeline.task.run.result`
+- `cloudevents.event_id`, `.event_source`, `.event_type`, `.event_subject`
+
+Nothing rejects an attribute outside this list — it is a convention, not a schema.
 
 One key is a Horopter-specific extension, not an OTel convention, because nothing in
 that vocabulary covers it: **`horopter.description`**. The Grafana annotations adapter

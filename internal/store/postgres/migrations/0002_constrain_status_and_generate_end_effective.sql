@@ -9,8 +9,8 @@
 -- must not guess at, and the CHECK will refuse it loudly rather than rewrite it.
 UPDATE change SET status = 'in_progress' WHERE status = '';
 
--- The vocabulary is internal/core's Status constants (internal/core/change.go), which
--- is also what spec section 5.2 lists. An empty status made a change both unqueryable —
+-- The vocabulary is internal/core's Status constants (internal/core/change.go). An empty
+-- status made a change both unqueryable —
 -- QueryChanges reads an empty Status as "no filter" — and, with end_at NULL, an open
 -- interval matching every overlap query until the year 9999.
 ALTER TABLE change ADD CONSTRAINT change_status_vocabulary

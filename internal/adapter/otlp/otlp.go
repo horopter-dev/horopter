@@ -149,7 +149,8 @@ func (r *Renderer) Render(changes []core.Change, now time.Time) (any, error) {
 	spans := make([]Span, 0, len(changes))
 	for _, c := range changes {
 		// An open change spans to the present; anything else ends where it recorded.
-		// core.Change.IsOpen is the domain's name for that distinction (spec §5.3), so
+		// A change takes one of three shapes — point, open, or closed — and
+		// core.Change.IsOpen is the domain's name for the open/not-open half of that, so
 		// the adapter asks the change which shape it is rather than re-deriving it from
 		// a nil check — the same call the Grafana adapter makes for the same reason.
 		// IsOpen() is false exactly when End is non-nil, so the dereference is safe.

@@ -86,8 +86,8 @@ func TestRenderGoldenJSON(t *testing.T) {
 
 // TestTextForReadsNamespacedDescriptionOnly is C4's guard: it pins that
 // horopter.description populates the annotation body, and that an
-// unnamespaced "description" attribute — the invented, unnamespaced key the
-// spec's attribute vocabulary does not define — no longer does, even when
+// unnamespaced "description" attribute — an invented key the OTel semantic
+// conventions do not define — no longer does, even when
 // both are present on the same change.
 func TestTextForReadsNamespacedDescriptionOnly(t *testing.T) {
 	out, err := grafana.New().Render([]core.Change{{

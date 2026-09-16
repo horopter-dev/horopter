@@ -95,8 +95,9 @@ func Fold(cur *Change, ev Event) Change {
 	//
 	// Both facts are minima, so both are commutative and Start is therefore insensitive
 	// to fold order: a rebuild (id order) and a live append (arrival order) cannot
-	// disagree about it. See
-	// decisions/2026-09-15-change-start-time-provenance.md.
+	// disagree about it. That is why the assertion is a minimum rather than an
+	// assignment — last-one-folded-wins would make the two orders disagree whenever a
+	// ref carries more than one start-type event with differing timestamps.
 	out.Start = out.FirstSeenAt
 	if out.StartedAt != nil {
 		out.Start = *out.StartedAt
@@ -140,7 +141,7 @@ func foldLifecycle(out *Change, ev Event) {
 		} else if out.End == nil {
 			// A correlated event that neither starts nor ends the change —
 			// incident.declared, deployment.triggered, maintenance.scheduled,
-			// deployment.annotated. The spec's three shapes admit no fourth state, so
+			// deployment.annotated. A change has three shapes and admits no fourth, so
 			// this is in flight; leaving Status empty wrote a row that no status filter
 			// could ever select and that rendered as an interval growing to the year
 			// 9999. The End guard is why a late annotation cannot reopen a change that

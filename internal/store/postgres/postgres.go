@@ -558,7 +558,7 @@ func setLockTimeout(ctx context.Context, tx pgx.Tx, d time.Duration, what string
 //
 // Two in-flight requests carrying the same (tenant, idempotency_key) — a CI retry firing
 // while the first attempt is still running — both find nothing at the check above and
-// both insert. The spec calls duplicates normal traffic, not an error condition, so the
+// both insert. Duplicates are normal traffic, not an error condition, so the
 // loser must not surface 23505 to its caller.
 //
 // The lookup runs on the pool, not on tx: Postgres aborts a transaction on any error, so
@@ -667,8 +667,12 @@ func applyToProjection(ctx context.Context, tx pgx.Tx, ev core.Event, out *appen
 // with its own EXCLUDED values, Postgres does not re-run the Go-side fold, and the first
 // event's contribution is overwritten wholesale with no error raised. Locking the ref's
 // *identity* rather than a row that may not exist yet removes that whole class of bug.
-// The reasoning, and the alternatives rejected, are in
-// decisions/2026-09-15-projection-write-concurrency.md.
+//
+// The alternative considered and rejected was INSERT ... ON CONFLICT DO NOTHING followed
+// by a re-SELECT ... FOR UPDATE: it closes the same race, but it costs a second round trip
+// on every append and leaves the correctness resting on a retry loop that has to be right
+// rather than on a lock that cannot be wrong. An advisory lock on the ref's identity is
+// one statement and needs no retry.
 //
 // The tenant-scoped SHARED lock is the other half of RebuildProjection's exclusion. A
 // rebuild deletes and re-inserts every row a tenant has, including refs no appender

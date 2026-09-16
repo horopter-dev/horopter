@@ -246,8 +246,8 @@ func TestConcurrentAppendsToSameRefDoNotLoseUpdates(t *testing.T) {
 
 // TestConcurrentDuplicateIdempotencyKeyReturnsTheOriginal covers a CI retry that fires
 // while the first attempt is still in flight. The check-then-insert is not atomic, so
-// both callers find nothing and both insert; the loser violates uq_event_idem. The spec
-// calls duplicates normal traffic, not an error condition, so the loser must get the
+// both callers find nothing and both insert; the loser violates uq_event_idem. Duplicates
+// are normal traffic, not an error condition, so the loser must get the
 // stored event back exactly as the non-concurrent duplicate path returns it.
 //
 // The hook is a two-party rendezvous, not a sleep: both goroutines block there until

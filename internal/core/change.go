@@ -14,10 +14,10 @@ type Status string
 // StatusOccurred is the ONLY way to recognise a point. Timestamp equality is not:
 // a same-second start/complete pair — routine in backfills and from idempotent
 // producers — is a closed interval of zero duration whose End also equals its Start.
-// Only the no-correlation-ref path in Fold ever sets StatusOccurred. Spec section 5.3
-// states the rule and why it matters to a renderer that draws points and regions
-// differently; neither adapter in this repository needs to, because a zero-duration
-// region already renders the way a point should.
+// Only the no-correlation-ref path in Fold ever sets StatusOccurred. The rule matters
+// to a renderer that draws points and regions differently; neither adapter in this
+// repository needs to, because a zero-duration region already renders the way a point
+// should.
 const (
 	StatusOccurred   Status = "occurred"
 	StatusInProgress Status = "in_progress"
@@ -43,8 +43,15 @@ var OpenSentinel = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 // column, so consumers that only want "when did this start" read Start and are
 // unaffected by the split. FirstSeenAt < StartedAt is a real and queryable
 // anomaly — an event claiming to predate the change's declared start — rather
-// than something the fold has erased. See
-// decisions/2026-09-15-change-start-time-provenance.md.
+// than something the fold has erased.
+//
+// The split exists because one field held two different kinds of claim: a
+// producer's assertion that the change began at T, and an inference that it
+// must have existed by T because evidence of it does. Any rule written over a
+// single field has to destroy one of them — earliest-always discards the
+// assertion, last-write-wins discards the earlier evidence — and the choice was
+// being forced by the data model rather than by the domain. Keeping both facts
+// removes the dilemma instead of resolving it.
 type Change struct {
 	Tenant      string
 	Ref         string
