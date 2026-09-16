@@ -9,6 +9,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -83,7 +85,31 @@ type querier interface {
 }
 
 // Store is the PostgreSQL-backed event store.
-type Store struct{ pool *pgxpool.Pool }
+type Store struct {
+	pool    *pgxpool.Pool
+	appends metric.Int64Counter
+}
+
+// storeFromPool wraps an open pool. The append counter is created here, from the global
+// meter provider as it stands when the store opens — which is why every binary calls
+// telemetry.Setup before opening a store.
+func storeFromPool(pool *pgxpool.Pool) *Store {
+	return &Store{pool: pool, appends: appendCounter()}
+}
+
+// appendCounter creates horopter.event.appends. It counts events submitted to AppendEvent,
+// not changes; see appendOutcome.metricAttributes for what it is attributed by.
+func appendCounter() metric.Int64Counter {
+	counter, err := otel.Meter(telemetry.StoreScope).Int64Counter("horopter.event.appends",
+		metric.WithUnit("{append}"),
+		metric.WithDescription("Events submitted to the store, by outcome"))
+	if err != nil {
+		// The SDK returns a working instrument alongside a name-validation error, so the
+		// store opens either way. The error means this call is wrong, not the environment.
+		slog.Error("create the horopter.event.appends counter", "error", err)
+	}
+	return counter
+}
 
 // Pool exposes the connection pool for tests and for callers needing raw access.
 func (s *Store) Pool() *pgxpool.Pool { return s.pool }
@@ -135,7 +161,7 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		pool.Close()
 		return nil, err
 	}
-	return &Store{pool: pool}, nil
+	return storeFromPool(pool), nil
 }
 
 // Migrate applies the embedded migrations a database has not seen yet, inside one
@@ -396,6 +422,7 @@ func (s *Store) AppendEvent(
 		out.created = created
 		out.errKind = errKindOf(err)
 		span.SetAttributes(out.attributes(submitted)...)
+		s.appends.Add(ctx, 1, metric.WithAttributeSet(out.metricAttributes()))
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, out.errKind)

@@ -69,6 +69,47 @@ func (o appendOutcome) attributes(ev core.Event) []attribute.KeyValue {
 	return attrs
 }
 
+// The outcomes horopter.event.appends distinguishes. They are derived from created and
+// errKind rather than stored, so the counter cannot disagree with the telemetry span, which
+// records the same two facts.
+const (
+	outcomeCreated      = "created"
+	outcomeDeduplicated = "deduplicated"
+	outcomeFailed       = "failed"
+)
+
+// result names what the append did. A failure is checked first: an append can fail after
+// its event was written, when the commit itself fails.
+func (o appendOutcome) result() string {
+	switch {
+	case o.errKind != "":
+		return outcomeFailed
+	case o.created:
+		return outcomeCreated
+	default:
+		return outcomeDeduplicated
+	}
+}
+
+// metricAttributes is the bounded part of the outcome, for horopter.event.appends. Every
+// value comes from a set fixed in code, and nothing identifies a caller or an entity: a
+// metric keeps a series for every distinct set it has seen, and on the unauthenticated side
+// a tenant is whatever string a caller sends. Tenant, ref and event id stay on the span.
+//
+// The keys match the span's, so a metric and a span describing the same append can be
+// matched.
+func (o appendOutcome) metricAttributes() attribute.Set {
+	attrs := []attribute.KeyValue{
+		attribute.String("horopter.append.outcome", o.result()),
+		attribute.String("horopter.append.dedupe_path", o.dedupePath),
+		attribute.Bool("horopter.fold.out_of_order", o.outOfOrder),
+	}
+	if o.errKind != "" {
+		attrs = append(attrs, attribute.String("horopter.error.kind", o.errKind))
+	}
+	return attribute.NewSet(attrs...)
+}
+
 func (o appendOutcome) baseAttributes(ev core.Event) []attribute.KeyValue {
 	return []attribute.KeyValue{
 		// Repeated from the server span deliberately: a query that slices store spans by
