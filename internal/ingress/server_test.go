@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -556,4 +558,61 @@ func TestReadyzReports503WhenTheDatabaseIsUnreachable(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "database unreachable",
 		"an operator reading the probe's body must be told what is wrong")
+}
+
+// captureLogs sends slog's default logger to a buffer until the test ends, and returns a
+// function decoding every record written so far. Swapping a process-wide default is safe
+// only because no test in this package calls t.Parallel.
+//
+// This is a copy of internal/egress/server_test.go's helper of the same name, not an
+// import: both files are external test packages, so neither can import the other.
+func captureLogs(t *testing.T) func() []map[string]any {
+	t.Helper()
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return func() []map[string]any {
+		var records []map[string]any
+		dec := json.NewDecoder(bytes.NewReader(buf.Bytes()))
+		for dec.More() {
+			var record map[string]any
+			require.NoError(t, dec.Decode(&record))
+			records = append(records, record)
+		}
+		return records
+	}
+}
+
+// TestReadyzDoesNotRelayTheDatabaseError pins what the 503 body withholds. The probe sits
+// outside the bearer-token check — an orchestrator has no token to send — and pgx formats
+// a failed connection with the database user, database name, host and port, so relaying
+// the error handed all four to anyone who could reach the port during an outage. That
+// contradicted appendFailed's rule on the same daemon.
+func TestReadyzDoesNotRelayTheDatabaseError(t *testing.T) {
+	h, s := newServer(t)
+	s.Close()
+
+	rec := getUnauthenticated(t, h, "/readyz")
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "closed pool",
+		"the database error must not reach an unauthenticated caller")
+}
+
+// TestFailedReadinessProbeLogsItsCause is the other half: withholding the error from the
+// body must not lose it. A pod that drops out of rotation with no record of why leaves an
+// operator reproducing the probe by hand to find out.
+func TestFailedReadinessProbeLogsItsCause(t *testing.T) {
+	h, s := newServer(t)
+	s.Close()
+	records := captureLogs(t)
+
+	rec := getUnauthenticated(t, h, "/readyz")
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+
+	logged := slices.ContainsFunc(records(), func(r map[string]any) bool {
+		cause, _ := r["error"].(string)
+		return r["level"] == "ERROR" && strings.Contains(cause, "closed pool")
+	})
+	assert.True(t, logged, "the probe's failure must reach the server log; got %v", records())
 }

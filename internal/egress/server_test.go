@@ -708,6 +708,38 @@ func TestReadyzReports503WhenTheDatabaseIsUnreachable(t *testing.T) {
 		"an operator reading the probe's body must be told what is wrong")
 }
 
+// TestReadyzDoesNotRelayTheDatabaseError pins what the 503 body withholds. The probe is
+// unauthenticated — an orchestrator has no credential to send — and pgx formats a failed
+// connection with the database user, database name, host and port, so relaying the error
+// handed all four to anyone who could reach the port during an outage.
+func TestReadyzDoesNotRelayTheDatabaseError(t *testing.T) {
+	h, s, _ := newServer(t)
+	s.Close()
+
+	rec := get(t, h, "/readyz")
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "closed pool",
+		"the database error must not reach an unauthenticated caller")
+}
+
+// TestFailedReadinessProbeLogsItsCause is the other half: withholding the error from the
+// body must not lose it. A pod that drops out of rotation with no record of why leaves an
+// operator reproducing the probe by hand to find out.
+func TestFailedReadinessProbeLogsItsCause(t *testing.T) {
+	h, s, _ := newServer(t)
+	s.Close()
+	records := captureLogs(t)
+
+	rec := get(t, h, "/readyz")
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+
+	logged := slices.ContainsFunc(records(), func(r map[string]any) bool {
+		cause, _ := r["error"].(string)
+		return r["level"] == "ERROR" && strings.Contains(cause, "closed pool")
+	})
+	assert.True(t, logged, "the probe's failure must reach the server log; got %v", records())
+}
+
 // TestEgressRejectsAnInvertedWindow pins from > to as the caller's error on every window
 // parser egress has. It was accepted: the overlap predicate is
 // "start_at <= :to AND end_effective >= :from", so an inverted window does not return
