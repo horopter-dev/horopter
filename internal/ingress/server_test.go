@@ -112,6 +112,14 @@ func TestPostEventCreatesChange(t *testing.T) {
 // TestPostEventRecordsTheTenantOnTheSpan pins horopter.tenant on the request's server
 // span. Task 6 and Task 7 rely on it being set once per request, on the span that
 // exists for every request, rather than only on the ones that reach the store.
+//
+// The loop below must skip the store's own "AppendEvent" span. Task 6 gave that span
+// the same horopter.tenant attribute (internal/store/postgres/outcome.go), and this
+// request reaches the store, so both spans land in one recorder carrying the attribute
+// this test checks for. Scanning every span for it — as an earlier version of this test
+// did — proves nothing about recordTenant specifically: deleting its call in postEvent
+// would still leave AppendEvent's own attribute for this loop to find, and the test
+// would stay green over a dead guard.
 func TestPostEventRecordsTheTenantOnTheSpan(t *testing.T) {
 	rec := tracetest.NewSpanRecorder()
 	prev := otel.GetTracerProvider()
@@ -126,13 +134,16 @@ func TestPostEventRecordsTheTenantOnTheSpan(t *testing.T) {
 
 	var found bool
 	for _, span := range rec.Ended() {
+		if span.Name() == "AppendEvent" {
+			continue
+		}
 		for _, kv := range span.Attributes() {
 			if kv.Key == "horopter.tenant" && kv.Value.AsString() == "acme" {
 				found = true
 			}
 		}
 	}
-	assert.True(t, found, "the request's tenant must be recorded on a span")
+	assert.True(t, found, "the request's tenant must be recorded on the server span")
 }
 
 func TestPostDuplicateIdempotencyKeyReturns200(t *testing.T) {

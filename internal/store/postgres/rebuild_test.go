@@ -177,6 +177,9 @@ func TestRebuildDoesNotLoseConcurrentAppends(t *testing.T) {
 // timeout fire rather than the append merely being slow. Like the other hooks it must be a
 // sleep, not a rendezvous: the appender cannot reach any rendezvous while the lock is held.
 func TestAppendFailsFastWhileARebuildHoldsTheTenantLock(t *testing.T) {
+	rec, restore := recordSpans(t)
+	defer restore()
+
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 
@@ -218,6 +221,9 @@ func TestAppendFailsFastWhileARebuildHoldsTheTenantLock(t *testing.T) {
 		"the message must let an operator tell a running rebuild from a dead database")
 	assert.Contains(t, err.Error(), "nothing was written",
 		"the message must say the append is safe to retry")
+
+	assert.Contains(t, spanAttrValues(rec, "AppendEvent", "horopter.lock.timed_out"), "true",
+		"the blocked append's span must record the timeout, not just the returned error")
 }
 
 // TestRebuildRecordsItsShapeOnASpan pins RebuildProjection's span attributes: the

@@ -702,8 +702,6 @@ func lockProjectionWrite(
 	if err != nil {
 		if isLockTimeout(err) {
 			out.lockTimeout = true
-		}
-		if isLockTimeout(err) {
 			return fmt.Errorf(
 				"gave up after %s waiting for the projection lock on %q/%q: %w; the "+
 					"usual cause is a projection rebuild for this tenant, which holds "+
