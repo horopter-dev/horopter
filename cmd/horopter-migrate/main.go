@@ -41,13 +41,17 @@ func run(ctx context.Context, dsn, rebuildTenant string) error {
 			"postgres://user:pass@host:5432/horopter")
 	}
 
-	shutdownTelemetry := telemetry.Setup(ctx, "horopter-migrate")
+	tel, err := telemetry.Setup(ctx, "horopter-migrate")
+	if err != nil {
+		return err
+	}
 	// Flush builds a fresh context because a daemon's signal handler has already
 	// cancelled the one it was serving on. horopter-migrate has no signal handler —
 	// main passes context.Background() straight through — so there is no cancelled
 	// context to avoid here; what the fresh context and its timeout still buy is a
-	// bound on a collector that has become unreachable.
-	defer telemetry.Flush(shutdownTelemetry)
+	// bound on a collector that has become unreachable. horopter-migrate serves no
+	// /metrics: it exits before anything could scrape it.
+	defer tel.Flush()
 
 	store, err := postgres.Open(ctx, dsn) // Open applies migrations under an advisory lock
 	if err != nil {
