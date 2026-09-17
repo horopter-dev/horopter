@@ -69,17 +69,21 @@ type Server struct {
 	limits  Limits
 	limiter *admission.Limiter
 	memory  *admission.BytePool
+	metrics readMetrics
 }
 
 // New returns an egress Server admitting reads against limits. clock is injected so rendering an
 // open change stays deterministic under test.
 func New(s *postgres.Store, clock func() time.Time, limits Limits) *Server {
 	floor, initial, ceiling := concurrencyBounds(s)
-	return &Server{
+	srv := &Server{
 		store: s, clock: clock, grafana: grafana.New(), otlp: otlp.New(),
-		limits: limits, limiter: admission.NewLimiter(floor, initial, ceiling),
-		memory: admission.NewBytePool(limits.ReadMemoryBytes),
+		limits:  limits,
+		limiter: admission.NewLimiter(floor, initial, ceiling),
+		memory:  admission.NewBytePool(limits.ReadMemoryBytes),
 	}
+	srv.metrics = newReadMetrics(srv.limiter, srv.memory)
+	return srv
 }
 
 // concurrencyBounds derives the read concurrency limit from the store's connection pool: it

@@ -11,6 +11,7 @@ import (
 	"github.com/yo61/horopter/internal/admission"
 	"github.com/yo61/horopter/internal/store/postgres"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -151,6 +152,8 @@ func (s *Server) shed(
 	fields := []any{"route", r.Pattern, "tenant", tenantID, "gate", gate,
 		"waited_ms", state.waited.Milliseconds(), "retry_after_s", retryAfter}
 	slog.WarnContext(r.Context(), "read shed", append(fields, figures...)...)
+	s.metrics.shed.Add(r.Context(), 1,
+		metric.WithAttributes(attribute.String("horopter.read.shed.gate", gate)))
 	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 	writeError(w, http.StatusServiceUnavailable,
 		"egress is at capacity; retry after the interval in Retry-After")
