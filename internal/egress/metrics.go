@@ -22,6 +22,15 @@ type readMetrics struct {
 // it stands, which is why horopter-egress calls telemetry.Setup before egress.New. No instrument
 // carries a tenant or anything else a caller chooses. An instrument the SDK reports an error for
 // is logged, and egress serves reads regardless.
+//
+// Each gauge's callback is registered once, when its instrument is created here — not
+// re-registered on every collection. A second call to newReadMetrics against the same meter
+// provider would register a second Server's gauges under the same names, units and
+// descriptions, and the SDK's own instrument cache would keep only the first: the second
+// Server's callbacks are dropped (logged as "Repeated observable instrument creation with
+// callbacks"), and every gauge goes on reporting the first Server's gates forever. This is safe
+// because horopter-egress's main creates exactly one Server, hence exactly one call here, per
+// process.
 func newReadMetrics(limiter *admission.Limiter, memory *admission.BytePool) readMetrics {
 	meter := otel.Meter(meterScope)
 	shed, err := meter.Int64Counter("horopter.read.shed", metric.WithUnit("{read}"),

@@ -2,8 +2,8 @@ package egress_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -16,22 +16,6 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
-
-// TestMain installs a real, readerless MeterProvider before any test runs. The
-// go.opentelemetry.io/otel global package delegates to whichever provider is installed FIRST via
-// otel.SetMeterProvider, replaying every instrument created against the no-op default onto it —
-// and every test in this package that builds a Server (every newServerWith call) creates one via
-// egress.New's otel.Meter(meterScope) call. Without this, recordMetrics's own SetMeterProvider,
-// the first real one the test binary installs, would be the one instruments from every EARLIER
-// test's Server delegate to — so an earlier test's read concurrency limiter, still holding a live
-// observable-gauge callback, would keep reporting into a LATER test's ManualReader. Installing a
-// real (if inert) provider first, before any Server exists, makes that one-time replay a no-op,
-// so recordMetrics's own SetMeterProvider calls are plain swaps that only this package's own
-// tests observe.
-func TestMain(m *testing.M) {
-	otel.SetMeterProvider(sdkmetric.NewMeterProvider())
-	os.Exit(m.Run())
-}
 
 // recordMetrics installs a meter provider with a manual reader for the rest of the test. Call it
 // before egress.New, which creates its instruments from the global provider as it stands.
@@ -82,6 +66,57 @@ func addPoints(t *testing.T, points map[string]int64, m metricdata.Metrics) {
 	}
 }
 
+// instrumentShape is what TestReadAdmissionMetrics checks about each instrument beyond its data
+// points: the scope it was created under, its unit, and its aggregation kind.
+type instrumentShape struct {
+	scope, unit, kind string
+}
+
+// wantShape is spec §7.1's scope for every read admission instrument, paired with the unit and
+// kind under test — the one property every instrument shares, spelled once rather than five
+// times.
+func wantShape(unit, kind string) instrumentShape {
+	return instrumentShape{
+		scope: "github.com/yo61/horopter/internal/egress", unit: unit, kind: kind,
+	}
+}
+
+// readMetricShapes collects every horopter.read.* instrument's scope, unit and kind, keyed by
+// name. A name appears at most once here regardless of how many attribute sets its data points
+// carry, unlike readMetricPoints.
+func readMetricShapes(t *testing.T, reader *sdkmetric.ManualReader) map[string]instrumentShape {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	shapes := map[string]instrumentShape{}
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if strings.HasPrefix(m.Name, "horopter.read.") {
+				shapes[m.Name] = instrumentShape{scope: scope.Scope.Name, unit: m.Unit, kind: kindOf(m)}
+			}
+		}
+	}
+	return shapes
+}
+
+// kindOf names m's aggregation: "gauge" for an observable gauge, "monotonic_sum" for a counter,
+// "sum" for a non-monotonic one such as an UpDownCounter — the shape wantShape's callers never
+// ask for, so a counter built as one is caught by differing from every entry under test rather
+// than by a dedicated check here.
+func kindOf(m metricdata.Metrics) string {
+	switch data := m.Data.(type) {
+	case metricdata.Gauge[int64]:
+		return "gauge"
+	case metricdata.Sum[int64]:
+		if data.IsMonotonic {
+			return "monotonic_sum"
+		}
+		return "sum"
+	default:
+		return fmt.Sprintf("unexpected aggregation %T", m.Data)
+	}
+}
+
 // TestReadAdmissionMetrics drives a shed at each gate and checks every instrument, with exactly
 // the attribute sets spec §7.1 allows: none on the gauges, the gate alone on the shed counter.
 func TestReadAdmissionMetrics(t *testing.T) {
@@ -127,4 +162,13 @@ func TestReadAdmissionMetrics(t *testing.T) {
 		"horopter.read.shed|horopter.read.shed.gate=concurrency",
 		"horopter.read.shed|horopter.read.shed.gate=memory",
 	}, keys)
+
+	assert.Equal(t, map[string]instrumentShape{
+		"horopter.read.admission.limit":     wantShape("{read}", "gauge"),
+		"horopter.read.admission.in_flight": wantShape("{read}", "gauge"),
+		"horopter.read.memory.reserved":     wantShape("By", "gauge"),
+		"horopter.read.memory.capacity":     wantShape("By", "gauge"),
+		"horopter.read.shed":                wantShape("{read}", "monotonic_sum"),
+	}, readMetricShapes(t, reader),
+		"spec §7.1's exact scope, unit and kind for every read admission instrument")
 }
