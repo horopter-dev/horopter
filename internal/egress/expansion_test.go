@@ -148,7 +148,14 @@ func allocatedDuring(fn func()) uint64 {
 // than it reserved. Decoding, rendering, dependencies and the Go runtime all move the ratio, and
 // this test runs on every change to any of them.
 func TestReadAllocationsStayWithinExpansionFactor(t *testing.T) {
-	srv, s, base := newServerWith(t, 0, egress.DefaultLimits())
+	// This test measures what a whole read allocates, so admission must never cut one of its
+	// reads short: a pool sized for production would legitimately cut the heaviest shapes below,
+	// which would fail on the no-truncation precondition before any ratio was even computed. A
+	// reservation is only a count against a semaphore, not an allocation, so a 16 GiB pool costs
+	// this test nothing.
+	limits := egress.DefaultLimits()
+	limits.ReadMemoryBytes = 1 << 34
+	srv, s, base := newServerWith(t, 0, limits)
 	h := srv.Routes()
 	for _, shape := range expansionShapes() {
 		tn := base + "-" + shape.name
