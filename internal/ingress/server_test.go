@@ -64,13 +64,13 @@ func idemKey(t *testing.T, suffix string) string {
 	return uniqueToken() + "-" + t.Name() + "-" + suffix
 }
 
-func newServer(t *testing.T) (http.Handler, *postgres.Store) {
+func newServer(t *testing.T, opts ...postgres.Option) (http.Handler, *postgres.Store) {
 	t.Helper()
 	v := os.Getenv("HOROPTER_TEST_DSN")
 	if v == "" {
 		t.Skip("set HOROPTER_TEST_DSN to run ingress tests (docker compose up -d db)")
 	}
-	s, err := postgres.Open(context.Background(), v)
+	s, err := postgres.Open(context.Background(), v, opts...)
 	require.NoError(t, err)
 	t.Cleanup(s.Close)
 	// entropy is crypto/rand.Reader, not a seeded math/rand source, and that is
@@ -615,4 +615,22 @@ func TestFailedReadinessProbeLogsItsCause(t *testing.T) {
 		return r["level"] == "ERROR" && strings.Contains(cause, "closed pool")
 	})
 	assert.True(t, logged, "the probe's failure must reach the server log; got %v", records())
+}
+
+// TestPostEventRefusesAttributesOverTheCap drives the cap through the handler: the store
+// refuses the event as invalid, so the producer gets a 400 naming the size and the limit, not
+// a retryable 503.
+func TestPostEventRefusesAttributesOverTheCap(t *testing.T) {
+	h, _ := newServer(t, postgres.WithMaxEventAttributeBytes(26))
+	body := fmt.Sprintf(`{
+		"tenant":%q,"source":"buildkite","type":"deployment.started",
+		"subject":"acme/prod","occurred_at":"2026-09-14T10:00:00Z",
+		"idempotency_key":%q,"attributes":{"service.version":"2.5.0"}}`,
+		tenant(t), idemKey(t, "1"))
+
+	rec := post(t, h, "/v1/events", body, testToken)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(),
+		"attributes encode to 27 bytes of JSON; the limit is 26")
 }
