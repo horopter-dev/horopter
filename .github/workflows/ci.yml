@@ -110,3 +110,12 @@ jobs:
         run: |
           set -euo pipefail
           go test -race -count=1 ./...
+
+      - name: Test the read expansion factor without the race detector
+        run: |
+          set -euo pipefail
+          go test -count=1 -v -run '^TestReadAllocationsStayWithinExpansionFactor$' \
+            ./internal/egress | tee /tmp/expansion.log
+          # A renamed test makes -run match nothing: go test still exits 0 and prints "ok",
+          # so this grep is what turns that into a step failure instead of a silent pass.
+          grep -q -- '--- PASS: TestReadAllocationsStayWithinExpansionFactor ' /tmp/expansion.log

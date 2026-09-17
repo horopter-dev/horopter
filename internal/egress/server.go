@@ -22,6 +22,7 @@ import (
 
 	"github.com/yo61/horopter/internal/adapter/grafana"
 	"github.com/yo61/horopter/internal/adapter/otlp"
+	"github.com/yo61/horopter/internal/admission"
 	"github.com/yo61/horopter/internal/core"
 	"github.com/yo61/horopter/internal/store/postgres"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -65,28 +66,53 @@ type Server struct {
 	clock   func() time.Time
 	grafana *grafana.Renderer
 	otlp    *otlp.Renderer
+	limits  Limits
+	limiter *admission.Limiter
+	memory  *admission.BytePool
+	metrics readMetrics
 }
 
-// New returns an egress Server. clock is injected so rendering an open change stays
-// deterministic under test.
-func New(s *postgres.Store, clock func() time.Time) *Server {
-	return &Server{store: s, clock: clock, grafana: grafana.New(), otlp: otlp.New()}
+// New returns an egress Server admitting reads against limits. clock is injected so rendering an
+// open change stays deterministic under test.
+func New(s *postgres.Store, clock func() time.Time, limits Limits) *Server {
+	floor, initial, ceiling := concurrencyBounds(s)
+	srv := &Server{
+		store: s, clock: clock, grafana: grafana.New(), otlp: otlp.New(),
+		limits:  limits,
+		limiter: admission.NewLimiter(floor, initial, ceiling),
+		memory:  admission.NewBytePool(limits.ReadMemoryBytes),
+	}
+	srv.metrics = newReadMetrics(srv.limiter, srv.memory)
+	return srv
+}
+
+// concurrencyBounds derives the read concurrency limit from the store's connection pool: it
+// starts at the pool's size, may fall to one read, and may rise to four times the pool, since
+// part of each read's time is spent rendering rather than holding a connection. A nil store
+// serves only the probes, which pass no gate, so its bounds are never used.
+func concurrencyBounds(s *postgres.Store) (floor, initial, ceiling int) {
+	if s == nil {
+		return 1, 1, 1
+	}
+	conns := int(s.Pool().Config().MaxConns)
+	return 1, conns, 4 * conns
 }
 
 // Routes returns the handler for every egress endpoint.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/changes", s.queryChanges)
-	mux.HandleFunc("GET /v1/events", s.listEvents)
-	mux.HandleFunc("GET /adapters/grafana/annotations", s.grafanaAnnotations)
-	mux.HandleFunc("POST /adapters/grafana/annotations", s.grafanaAnnotationsPOST)
-	mux.HandleFunc("POST /adapters/grafana/{tenant}/annotations", s.grafanaAnnotationsPOST)
-	mux.HandleFunc("GET /adapters/otlp/spans", s.otlpSpans)
+	mux.Handle("GET /v1/changes", s.admit(s.queryChanges))
+	mux.Handle("GET /v1/events", s.admit(s.listEvents))
+	mux.Handle("GET /adapters/grafana/annotations", s.admit(s.grafanaAnnotations))
+	mux.Handle("POST /adapters/grafana/annotations", s.admit(s.grafanaAnnotationsPOST))
+	mux.Handle("POST /adapters/grafana/{tenant}/annotations", s.admit(s.grafanaAnnotationsPOST))
+	mux.Handle("GET /adapters/otlp/spans", s.admit(s.otlpSpans))
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 	// otelhttp gives every route a server span carrying the http.* semantic
 	// conventions. It wraps the mux rather than each handler so a route added later is
 	// covered without anyone remembering. With no provider installed it is a no-op.
+	// Every route but the probes passes admit, so a probe answers while reads are being shed.
 	//
 	// The operation argument is empty because it has no effect here. Without a
 	// WithSpanNameFormatter option, otelhttp's default formatter ignores the operation
@@ -327,13 +353,18 @@ func windowFromAnnotationBody(r *http.Request) (window, error) {
 	return newWindow(from, to, limit)
 }
 
-func (s *Server) changesFor(r *http.Request, win window) ([]core.Change, bool, error) {
+// changesFor reads the changes win selects: it estimates their size, has admission reserve
+// their memory, then queries them. It answers the request itself on any failure, and then
+// reports ok false.
+func (s *Server) changesFor(
+	w http.ResponseWriter, r *http.Request, win window, adapter string,
+) (changes []core.Change, truncated, ok bool) {
 	tenantID, source := tenantOf(r)
 	trace.SpanFromContext(r.Context()).SetAttributes(
 		attribute.String("horopter.tenant", tenantID),
 		attribute.String("horopter.tenant.source", source),
 	)
-	return s.store.QueryChanges(r.Context(), postgres.ChangeQuery{
+	q := postgres.ChangeQuery{
 		Tenant:  tenantID,
 		From:    win.from,
 		To:      win.to,
@@ -341,7 +372,23 @@ func (s *Server) changesFor(r *http.Request, win window) ([]core.Change, bool, e
 		Type:    r.URL.Query().Get("type"),
 		Status:  r.URL.Query().Get("status"),
 		Limit:   win.limit,
-	})
+	}
+	est, err := s.store.EstimateChanges(r.Context(), q)
+	if err != nil {
+		readFailed(w, r, adapter, err)
+		return nil, false, false
+	}
+	budget, admitted := s.admitMemory(w, r, est)
+	if !admitted {
+		return nil, false, false
+	}
+	q.MaxRowTextBytes = budget
+	changes, truncated, err = s.store.QueryChanges(r.Context(), q)
+	if err != nil {
+		readFailed(w, r, adapter, err)
+		return nil, false, false
+	}
+	return changes, truncated, true
 }
 
 func (s *Server) queryChanges(w http.ResponseWriter, r *http.Request) {
@@ -352,9 +399,8 @@ func (s *Server) queryChanges(w http.ResponseWriter, r *http.Request) {
 	}
 	trace.SpanFromContext(r.Context()).SetAttributes(
 		attribute.String("horopter.adapter", "neutral"))
-	changes, truncated, err := s.changesFor(r, win)
-	if err != nil {
-		readFailed(w, r, "neutral", err)
+	changes, truncated, ok := s.changesFor(w, r, win, "neutral")
+	if !ok {
 		return
 	}
 	markTruncated(w, truncated)
@@ -379,11 +425,18 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		attribute.String("horopter.tenant", tenantID),
 		attribute.String("horopter.tenant.source", source),
 	)
-	events, truncated, err := s.store.ListEvents(r.Context(), postgres.EventQuery{
-		Tenant: tenantID,
-		Ref:    r.URL.Query().Get("ref"),
-		Limit:  limit,
-	})
+	q := postgres.EventQuery{Tenant: tenantID, Ref: r.URL.Query().Get("ref"), Limit: limit}
+	est, err := s.store.EstimateEvents(r.Context(), q)
+	if err != nil {
+		readFailed(w, r, "neutral", err)
+		return
+	}
+	budget, admitted := s.admitMemory(w, r, est)
+	if !admitted {
+		return
+	}
+	q.MaxRowTextBytes = budget
+	events, truncated, err := s.store.ListEvents(r.Context(), q)
 	if err != nil {
 		readFailed(w, r, "neutral", err)
 		return
@@ -457,9 +510,8 @@ func (s *Server) render(
 	trace.SpanFromContext(r.Context()).SetAttributes(
 		attribute.String("horopter.adapter", adapter))
 
-	changes, truncated, err := s.changesFor(r, win)
-	if err != nil {
-		readFailed(w, r, adapter, err)
+	changes, truncated, ok := s.changesFor(w, r, win, adapter)
+	if !ok {
 		return
 	}
 	payload, err := render(changes, s.clock())

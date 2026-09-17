@@ -35,6 +35,12 @@ func run() error {
 		return errors.New("DATABASE_URL is required, e.g. " +
 			"postgres://user:pass@host:5432/horopter")
 	}
+
+	maxAttributeBytes, err := ingress.MaxAttributeBytesFromEnv()
+	if err != nil {
+		return err
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -48,7 +54,8 @@ func run() error {
 		return err
 	}
 
-	store, err := postgres.OpenNoMigrate(ctx, *dsn)
+	store, err := postgres.OpenNoMigrate(ctx, *dsn,
+		postgres.WithMaxEventAttributeBytes(maxAttributeBytes))
 	if err != nil {
 		return err
 	}

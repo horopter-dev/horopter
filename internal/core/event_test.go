@@ -1,6 +1,7 @@
 package core_test
 
 import (
+	"math"
 	"math/rand"
 	"testing"
 	"time"
@@ -117,4 +118,57 @@ func TestValidateFailuresAreInvalidEvent(t *testing.T) {
 				"the message must still name the field the caller got wrong")
 		})
 	}
+}
+
+// TestCheckAttributeSize pins the measure the ingest cap uses. Every size below is counted by
+// hand from the JSON text in the comment beside it, not computed by the code under test.
+func TestCheckAttributeSize(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		attrs map[string]any
+		limit int
+		want  string
+	}{
+		// {"k":"xxxx"} is 1+3+1+6+1 = 12 bytes.
+		{"exactly the limit", map[string]any{"k": "xxxx"}, 12, ""},
+		{"one byte over", map[string]any{"k": "xxxx"}, 11,
+			"attributes encode to 12 bytes of JSON; the limit is 11"},
+		// A nil map is stored as {}: 2 bytes. Encoded as-is it would be null, 4 bytes.
+		{"nil map at its size", nil, 2, ""},
+		{"nil map over", nil, 1, "attributes encode to 2 bytes of JSON; the limit is 1"},
+		// {"a":{"b":[1,2]}} is 1+3+1+1+3+1+5+1+1 = 17 bytes.
+		{"nested values count", map[string]any{"a": map[string]any{"b": []any{1, 2}}}, 16,
+			"attributes encode to 17 bytes of JSON; the limit is 16"},
+		// {"t":"a&b"} is 1+3+1+5+1 = 11 bytes. Escaped for HTML, & would be & and the
+		// total 16, counting five bytes the producer never sent.
+		{"ampersand counts once", map[string]any{"t": "a&b"}, 11, ""},
+		{"unencodable value", map[string]any{"x": math.Inf(1)}, 1024,
+			"attributes cannot be encoded as JSON"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := validEvent()
+			e.Attributes = tc.attrs
+			err := e.CheckAttributeSize(tc.limit)
+			if tc.want == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, core.ErrInvalidEvent)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+// TestCheckAttributeSizeTellsTheProducerWhatToDo pins the whole message: a producer reading
+// the 400 has nothing else to go on.
+func TestCheckAttributeSizeTellsTheProducerWhatToDo(t *testing.T) {
+	e := validEvent()
+	e.Attributes = map[string]any{"k": "xxxx"}
+
+	err := e.CheckAttributeSize(11)
+
+	require.Error(t, err)
+	assert.Equal(t, `invalid event "01J0000000000000000000000A": attributes encode to 12 `+
+		`bytes of JSON; the limit is 11 — keep attributes to identifiers and short text, `+
+		`and link to anything larger`, err.Error())
 }

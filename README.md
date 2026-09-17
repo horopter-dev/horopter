@@ -37,6 +37,18 @@ Each service is configured with environment variables:
   refuses to start without one.
 - `HOROPTER_ADDR` — listen address for `horopter-ingress` and `horopter-egress`
   (defaults to `0.0.0.0:8080` and `0.0.0.0:8081` respectively).
+- `HOROPTER_INGRESS_MAX_EVENT_ATTRIBUTE_BYTES` — the largest attribute map
+  `horopter-ingress` accepts, in bytes of JSON: default `4096`, from `1` to `1048576`. See
+  Attributes below.
+- `HOROPTER_EGRESS_READ_MEMORY_BYTES` — the memory pool `horopter-egress` reserves reads
+  against: default `268435456` (256 MiB), at least `1048576`.
+- `HOROPTER_EGRESS_ADMISSION_WAIT` — how long a read waits at each admission gate before it
+  is shed: default `500ms`, above 0 and at most `10s`.
+- `HOROPTER_EGRESS_DB_WAIT_THRESHOLD` — the database connection wait above which a read
+  counts as overloaded: default `100ms`, above 0. See Read admission below.
+
+A value that does not parse, or is out of range, stops the daemon at startup with an error
+naming the variable and the value.
 
 ## Security
 
@@ -51,6 +63,12 @@ attached, including whatever was put in `horopter.description`.
 A read that fails is answered `500` with a generic body, and the underlying error — which
 can name tables, constraints and the database host — is written to the daemon's log
 instead, so a failure does not hand internal detail to that same caller.
+
+A read refused because egress is at capacity is answered `503`, and one too large to serve at
+all `422`. Neither body carries anything from the store: the `422` names only the configured
+memory limit. That admission control limits what egress spends on reads — database connections
+and memory. It is not protection against a flood of requests, which belongs in front of the
+port, in a WAF or equivalent.
 
 The missing authentication is a deliberate decision for v0.1, not an oversight.
 `horopter-ingress` does require a bearer token (`HOROPTER_INGRESS_TOKEN`) on writes, so
@@ -126,10 +144,10 @@ Tracing is **off by default** in all three binaries.
   while tracing is otherwise on. It affects tracing only; metrics have no per-area switch.
   Recognised areas:
   - `http` — the server span `otelhttp` wraps every request in.
-  - `store` — the spans the store package creates around each store-level operation: append
-    an event, list events, list changes, and rebuild a tenant's projection. Disabling it on
-    `horopter-migrate` silences the rebuild span, which is the one an operator running
-    `--rebuild-tenant` most wants.
+  - `store` — the spans the store package creates around each store-level operation: append an
+    event, list events, list changes, estimate a read's size, and rebuild a tenant's
+    projection. Disabling it on `horopter-migrate` silences the rebuild span, which is the one
+    an operator running `--rebuild-tenant` most wants.
   - `sql` — the per-statement spans `otelpgx` creates around every SQL statement the store
     issues.
 
@@ -148,6 +166,13 @@ spans buy much less for much more: a dashboard refreshing every ten seconds acro
 engineers turns them into a permanent, high-volume stream, while the one fact worth knowing
 on a read — whether the result was truncated — is already an attribute on the `store`-area
 span itself, not something a `sql`-area span would add.
+
+Every read `horopter-egress` gates carries what admission decided on its server span:
+`horopter.admission.outcome` (`admitted`, `shed_concurrency`, `shed_memory` or `too_large`) and
+`horopter.admission.wait_ms`; once past the concurrency gate, `horopter.db.connection_wait_ms`,
+the longest it waited for a database connection; once estimated,
+`horopter.read.estimated_bytes`; and once memory is reserved, `horopter.read.reserved_bytes`
+and `horopter.read.byte_cut`.
 
 ### Metrics
 
@@ -193,6 +218,11 @@ What is recorded:
   `horopter_append_dedupe_path="unique_violation"` counts concurrent retries of one
   idempotency key racing each other, as distinct from a retry that lands after the first
   attempt has already committed.
+- `horopter_read_admission_limit` and `horopter_read_admission_in_flight` — `horopter-egress`'s
+  read concurrency limit, and the reads holding a place under it;
+  `horopter_read_memory_reserved_bytes` and `horopter_read_memory_capacity_bytes` — its read
+  memory pool; and `horopter_read_shed_total`, labelled with `horopter_read_shed_gate`
+  (`concurrency` or `memory`) — reads refused with `503`. See Read admission.
 - HTTP server request durations and sizes, by method, route and status code. Ingress answers
   each append outcome with its own status code — 201, 200, 400 or 503 — so these split
   appends by outcome too.
@@ -298,6 +328,14 @@ If you are carrying data you care about, quiesce producers across the upgrade, o
 and later reconcile the duplicates. `POST /v1/events` is unaffected — its `idempotency_key`
 is supplied by the caller verbatim.
 
+### v0.1 pre-release: event attributes are capped at 4 KiB
+
+`horopter-ingress` now refuses, with `400`, an event whose attributes encode to more than 4096
+bytes of JSON. A producer sending larger attribute maps has those events refused, and a producer
+that does not act on a `400` loses them. Shrink the attributes — link to large text rather than
+embedding it — or raise `HOROPTER_INGRESS_MAX_EVENT_ATTRIBUTE_BYTES`, up to `1048576`. Events
+already stored are not re-checked.
+
 ## Truncated responses
 
 Every read endpoint caps its result set at 1000 rows. When rows were discarded, the
@@ -310,6 +348,9 @@ is absent entirely. All four read endpoints set it, across six registered routes
   (including the `/adapters/grafana/{tenant}/annotations` variant)
 - `GET /adapters/otlp/spans`
 
+The header is also set when a read was larger than egress's read memory pool and was cut to the
+oldest rows that fit; see Read admission. The same advice applies.
+
 Act on it. Changes are returned oldest first, so truncation discards the **most recent**
 rows — during an incident, exactly the ones being looked for — and a truncated response
 is otherwise indistinguishable from a complete one. Narrow the time window, or filter by
@@ -319,6 +360,70 @@ query parameter below 1000 asks for fewer rows; it cannot raise the cap.
 The signal is a header rather than a field in the body because two of these routes render
 vendor-owned shapes — Grafana annotations and OTLP spans — that cannot carry a Horopter
 envelope.
+
+## Read admission
+
+`horopter-egress` serves a read only when it has the capacity to. Every read route passes two
+gates; `/healthz` and `/readyz` pass neither, so probes answer normally while reads are refused.
+
+1. **A concurrency limit.** It starts at the size of egress's database connection pool and
+   adapts. A read that waited longer than `HOROPTER_EGRESS_DB_WAIT_THRESHOLD` for a connection,
+   or failed to get one, halves it; every other read raises it by one, up to four times the
+   pool's size.
+2. **A memory pool** of `HOROPTER_EGRESS_READ_MEMORY_BYTES`. Before a read runs, egress asks
+   Postgres how large its rows are, and reserves a multiple of that from the pool until the
+   response has been written.
+
+A read that cannot pass a gate within `HOROPTER_EGRESS_ADMISSION_WAIT` is answered **`503` with
+`Retry-After`**: the wait, rounded up to whole seconds. Retry after that interval.
+
+A read larger than the whole pool is served as far as the pool allows — the oldest rows that
+fit, with `X-Horopter-Truncated: true` — exactly as for the row cap.
+
+A read whose **first row alone** needs more than the pool is answered **`422`**, naming the
+limit. Narrowing the time window does not help when that row is a long-running change that
+overlaps every window: narrowing to a subject, type or status that the oversized row does not
+have, or (on `/v1/events`) to a `ref`, avoids it; otherwise raise
+`HOROPTER_EGRESS_READ_MEMORY_BYTES`.
+
+| Variable | Default | Valid values |
+|---|---|---|
+| `HOROPTER_EGRESS_READ_MEMORY_BYTES` | `268435456` (256 MiB) | whole number, at least `1048576` |
+| `HOROPTER_EGRESS_ADMISSION_WAIT` | `500ms` | Go duration, above 0 and at most `10s` |
+| `HOROPTER_EGRESS_DB_WAIT_THRESHOLD` | `100ms` | Go duration, above 0 |
+
+**Sizing.** Set `HOROPTER_EGRESS_READ_MEMORY_BYTES` to about half the memory available to
+egress: at the default `GOGC`, the Go heap grows to twice its live size before it is collected.
+The concurrency limit follows the pool, which is `max(4, NumCPU)` connections unless
+`DATABASE_URL` sets `pool_max_conns`. Each replica has its own limit and pool, and they do not
+coordinate, so size the replicas' pools together within Postgres's `max_connections`. A read
+waits at most twice `HOROPTER_EGRESS_ADMISSION_WAIT`, once at each gate, and that comes out of
+egress's 30-second write timeout, so keep the wait short.
+
+The connection wait egress measures, and compares against `HOROPTER_EGRESS_DB_WAIT_THRESHOLD`,
+covers the whole pool acquisition, not just time queued behind other reads: it also includes
+opening a new connection when the pool has none idle, and pgxpool's liveness ping of a
+connection that has been idle for over a second. Set `HOROPTER_EGRESS_DB_WAIT_THRESHOLD`
+comfortably above the time to open a connection to the database plus a round trip, or that
+ordinary setup cost reads as congestion and halves the concurrency limit for no reason.
+
+**Worth alerting on:**
+
+- `horopter_read_shed_total`, by `horopter_read_shed_gate`: any sustained rate means reads are
+  being refused.
+- `read shed` and `read too large` log lines, at `WARN`: one per refused read, naming the route,
+  the tenant and the gate's figures.
+- `read concurrency limit halved …` at `WARN`: each time reads found the connection pool
+  congested.
+- `horopter_read_admission_in_flight` against `horopter_read_admission_limit`, and
+  `horopter_read_memory_reserved_bytes` against `horopter_read_memory_capacity_bytes`: how
+  close to each gate egress is running.
+- Reads waiting at the memory gate hold their concurrency permit, so once the memory pool is
+  full, later reads are shed at the concurrency gate instead. When concurrency sheds rise,
+  compare `horopter_read_memory_reserved_bytes` with `horopter_read_memory_capacity_bytes` too.
+
+Admission control protects the database and egress's memory. It is not protection against a
+flood of requests; put that in front of Horopter.
 
 ## CloudEvents: reserved data keys
 
@@ -356,7 +461,17 @@ OTel-aware tool. The keys a producer should aim for:
   `cicd.pipeline.task.run.id`, `cicd.pipeline.task.run.result`
 - `cloudevents.event_id`, `.event_source`, `.event_type`, `.event_subject`
 
-Nothing rejects an attribute outside this list — it is a convention, not a schema.
+Nothing rejects an attribute outside this list — it is a convention, not a schema. What is
+limited is size: `horopter-ingress` refuses, with `400`, an event whose attributes encode to more
+than `HOROPTER_INGRESS_MAX_EVENT_ATTRIBUTE_BYTES` (default 4 KiB) of compact JSON, measured
+without HTML escaping:
+
+    invalid event "01J8Z3Q4R5S6T7V8W9X0Y1Z2A3": attributes encode to 5120 bytes of JSON;
+    the limit is 4096 — keep attributes to identifiers and short text, and link to anything
+    larger
+
+(one line, wrapped here). The keys above, fully populated, come to about 560 bytes, and a
+40-line release note as `horopter.description` to about 3.2 KiB.
 
 One key is a Horopter-specific extension, not an OTel convention, because nothing in
 that vocabulary covers it: **`horopter.description`**. The Grafana annotations adapter
