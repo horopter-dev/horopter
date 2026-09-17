@@ -28,8 +28,9 @@ const gateConcurrency = "concurrency"
 var afterAdmissionHook func()
 
 // readState is what admission learned about one read, recorded on the read's server span when
-// the read finishes. The connection-wait observer fills in the last two fields; it runs on the
-// read's own goroutine, as pgxpool acquires connections on the caller's.
+// the read finishes. The connection-wait observer fills in longestConnectionWait and
+// acquisitionFailed; it runs on the read's own goroutine, as pgxpool acquires connections on the
+// caller's.
 type readState struct {
 	outcome               string
 	waited                time.Duration

@@ -2,6 +2,7 @@ package egress_test
 
 import (
 	"context"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -127,6 +128,9 @@ func TestAReadOverTheConcurrencyLimitIsShed(t *testing.T) {
 	assert.ElementsMatch(t, []string{"admitted", "admitted", "shed_concurrency"},
 		spanAttrValues(rec, "", "horopter.admission.outcome"),
 		"the held read, the shed read and the post-release check each contribute one outcome")
+	assert.Len(t, spanAttrValues(rec, "", "horopter.db.connection_wait_ms"), 2,
+		"the held read and the follow-up read acquired a connection and so carry the "+
+			"connection-wait attribute; the shed read never acquired one and must not")
 }
 
 func TestProbesPassNoGate(t *testing.T) {
@@ -285,8 +289,10 @@ func TestAReadWhoseClientGivesUpDoesNotLowerTheLimit(t *testing.T) {
 	assert.GreaterOrEqual(t, egress.ReadConcurrencyLimit(srv), 2)
 }
 
-// TestAFailedConnectionAcquisitionHalvesTheLimit closes the pool under a live request: a pool
-// that cannot hand out connections is overloaded, however briefly the read waited.
+// TestAFailedConnectionAcquisitionHalvesTheLimit closes the pool, then reads with a live request
+// context: a pool that cannot hand out connections is overloaded, however briefly the read
+// waited. A second read against the still-closed pool must not log a second decrease: the limit
+// is already at its floor, so releasing it again changes nothing to report.
 func TestAFailedConnectionAcquisitionHalvesTheLimit(t *testing.T) {
 	srv, s, tn := newServerWith(t, 2, egress.DefaultLimits())
 	h := srv.Routes()
@@ -294,12 +300,20 @@ func TestAFailedConnectionAcquisitionHalvesTheLimit(t *testing.T) {
 	s.Close()
 
 	require.Equal(t, http.StatusInternalServerError, get(t, h, changesURL(tn)).Code)
+	require.Equal(t, http.StatusInternalServerError, get(t, h, changesURL(tn)).Code)
 
 	assert.Equal(t, 1, egress.ReadConcurrencyLimit(srv))
-	assert.True(t, slices.ContainsFunc(records(), func(r map[string]any) bool {
-		return r["level"] == "WARN" && r["msg"] == "read concurrency limit halved from 2 to 1 "+
-			"after a failed database connection acquisition"
-	}), "got %v", records())
+	var halved []map[string]any
+	for _, r := range records() {
+		if msg, _ := r["msg"].(string); strings.HasPrefix(msg, "read concurrency limit halved") {
+			halved = append(halved, r)
+		}
+	}
+	require.Len(t, halved, 1, "the limit is already at its floor after the first decrease, so "+
+		"a second congested read must not log a second one; got %v", records())
+	assert.Equal(t, "WARN", halved[0]["level"])
+	assert.Equal(t, "read concurrency limit halved from 2 to 1 after a failed database "+
+		"connection acquisition", halved[0]["msg"])
 }
 
 func TestOverloadIsDecidedByTheLongestConnectionWait(t *testing.T) {
@@ -312,4 +326,25 @@ func TestOverloadIsDecidedByTheLongestConnectionWait(t *testing.T) {
 		"a wait at the threshold is not over it")
 	assert.False(t, egress.ReadOverloaded(threshold),
 		"a read that acquired nothing waited for nothing")
+}
+
+// TestAClientThatGaveUpAfterALongWaitStillCountsAsOverloaded pins spec §5.3: "a failed
+// acquisition still reports how long it waited." Whether the acquisition's own FAILURE counts
+// against the database depends on the request's context being live — a client that disconnected
+// says nothing about the database — but the wait itself is recorded regardless, and still weighs
+// against threshold either way.
+func TestAClientThatGaveUpAfterALongWaitStillCountsAsOverloaded(t *testing.T) {
+	threshold := 100 * time.Millisecond
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	assert.True(t, egress.ReadOverloadedByAcquisition(
+		cancelled, threshold, 150*time.Millisecond, context.Canceled),
+		"a long wait must count even though the client had already given up")
+	assert.False(t, egress.ReadOverloadedByAcquisition(
+		cancelled, threshold, 10*time.Millisecond, context.Canceled),
+		"a short wait under a gone client is not overloaded")
+	assert.True(t, egress.ReadOverloadedByAcquisition(
+		context.Background(), threshold, 10*time.Millisecond, errors.New("pool exhausted")),
+		"a failed acquisition on a live request context is overloaded however briefly it waited")
 }

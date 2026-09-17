@@ -25,3 +25,13 @@ func ReadOverloaded(threshold time.Duration, waits ...time.Duration) bool {
 	}
 	return state.overloaded(threshold)
 }
+
+// ReadOverloadedByAcquisition reports whether a single connection acquisition that waited wait
+// and ended with err, observed under requestCtx, counts as overloaded against threshold.
+func ReadOverloadedByAcquisition(
+	requestCtx context.Context, threshold, wait time.Duration, err error,
+) bool {
+	state := &readState{}
+	state.connectionWaitObserver(requestCtx)(wait, err)
+	return state.overloaded(threshold)
+}
