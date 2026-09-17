@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -578,4 +579,82 @@ func TestAppendRecordsTheErrorKindOnAFailure(t *testing.T) {
 	assert.Equal(t, []string{"deployment.started"},
 		spanAttrValues(rec, "AppendEvent", "horopter.event.type"),
 		"a rejected event must still say what type it claimed to be")
+}
+
+// newCappedStore opens a store that refuses events whose attributes are larger than
+// maxAttributeBytes. Call recordMetrics first when counting appends, as with newStore.
+func newCappedStore(t *testing.T, maxAttributeBytes int) *postgres.Store {
+	t.Helper()
+	s, err := postgres.Open(context.Background(), dsn(t),
+		postgres.WithMaxEventAttributeBytes(maxAttributeBytes))
+	require.NoError(t, err)
+	t.Cleanup(s.Close)
+	return s
+}
+
+// mkEventAttributeBytes is the size of mkEvent's attributes, {"service.version":"2.5.0"}:
+// 1+17+1+7+1 bytes of JSON, counted by hand.
+const mkEventAttributeBytes = 27
+
+// TestAppendRefusesAnEventOverTheAttributeCap checks the refusal is an invalid append in every
+// place an invalid append shows: the error, the stored log, the counter and the span.
+func TestAppendRefusesAnEventOverTheAttributeCap(t *testing.T) {
+	reader := recordMetrics(t)
+	rec, restore := recordSpans(t)
+	defer restore()
+	ctx, tn := context.Background(), tenant(t)
+	s := newCappedStore(t, mkEventAttributeBytes-1)
+	at := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+
+	_, _, err := s.AppendEvent(ctx,
+		mkEvent(tn, eventID(t, "big"), "k1", "dep-cap", "deployment.started", at))
+
+	require.ErrorIs(t, err, core.ErrInvalidEvent)
+	assert.Contains(t, err.Error(), "attributes encode to 27 bytes of JSON; the limit is 26")
+	evs, _, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn})
+	require.NoError(t, err)
+	assert.Empty(t, evs, "a refused event must not be stored")
+	assert.Equal(t, map[string]int64{appendFailedInvalid: 1}, appendCounts(t, reader))
+	assert.Equal(t, []string{"invalid_event"},
+		spanAttrValues(rec, "AppendEvent", "horopter.error.kind"))
+}
+
+func TestAppendAcceptsAnEventAtTheAttributeCap(t *testing.T) {
+	ctx, tn := context.Background(), tenant(t)
+	s := newCappedStore(t, mkEventAttributeBytes)
+	at := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+
+	_, created, err := s.AppendEvent(ctx,
+		mkEvent(tn, eventID(t, "fits"), "k1", "dep-fit", "deployment.started", at))
+
+	require.NoError(t, err)
+	assert.True(t, created)
+}
+
+func TestAppendAppliesNoAttributeCapByDefault(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	ev := mkEvent(tn, eventID(t, "large"), "k1", "dep-large", "deployment.started",
+		time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC))
+	ev.Attributes = map[string]any{"horopter.description": strings.Repeat("x", 64<<10)}
+
+	_, created, err := s.AppendEvent(ctx, ev)
+
+	require.NoError(t, err)
+	assert.True(t, created, "a store opened without WithMaxEventAttributeBytes caps nothing")
+}
+
+// TestOpenNoMigrateAppliesTheAttributeCap covers the constructor horopter-ingress actually
+// uses. newStore runs first because OpenNoMigrate needs the schema to exist.
+func TestOpenNoMigrateAppliesTheAttributeCap(t *testing.T) {
+	ctx, tn := context.Background(), tenant(t)
+	newStore(t)
+	s, err := postgres.OpenNoMigrate(ctx, dsn(t),
+		postgres.WithMaxEventAttributeBytes(mkEventAttributeBytes-1))
+	require.NoError(t, err)
+	t.Cleanup(s.Close)
+
+	_, _, err = s.AppendEvent(ctx, mkEvent(tn, eventID(t, "big"), "k1", "dep-cap",
+		"deployment.started", time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)))
+
+	require.ErrorIs(t, err, core.ErrInvalidEvent)
 }

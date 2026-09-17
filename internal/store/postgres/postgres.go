@@ -87,15 +87,31 @@ type querier interface {
 
 // Store is the PostgreSQL-backed event store.
 type Store struct {
-	pool    *pgxpool.Pool
-	appends metric.Int64Counter
+	pool              *pgxpool.Pool
+	appends           metric.Int64Counter
+	maxAttributeBytes int
 }
 
-// storeFromPool wraps an open pool. The append counter is created here, from the global
-// meter provider as it stands when the store opens — which is why every binary calls
-// telemetry.Setup before opening a store.
-func storeFromPool(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool, appends: appendCounter()}
+// Option configures a Store as it opens.
+type Option func(*Store)
+
+// WithMaxEventAttributeBytes makes AppendEvent refuse, as an invalid event, one whose
+// attributes are larger than n bytes of JSON as core.Event.CheckAttributeSize measures them.
+// A store opened without it applies no cap: horopter-migrate never appends, and
+// horopter-ingress passes the cap its operator configured.
+func WithMaxEventAttributeBytes(n int) Option {
+	return func(s *Store) { s.maxAttributeBytes = n }
+}
+
+// storeFromPool wraps an open pool and applies opts. The append counter is created here, from
+// the global meter provider as it stands when the store opens — which is why every binary
+// calls telemetry.Setup before opening a store.
+func storeFromPool(pool *pgxpool.Pool, opts []Option) *Store {
+	s := &Store{pool: pool, appends: appendCounter()}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // appendCounter creates horopter.event.appends. It counts events submitted to AppendEvent,
@@ -170,7 +186,7 @@ func recordPoolStats(pool *pgxpool.Pool) {
 func tracer() trace.Tracer { return otel.Tracer(telemetry.StoreScope) }
 
 // Open connects to dsn and applies all migrations.
-func Open(ctx context.Context, dsn string) (*Store, error) {
+func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 	pool, err := connect(ctx, dsn, "check the dsn is a valid postgres connection string")
 	if err != nil {
 		return nil, err
@@ -179,7 +195,7 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		pool.Close()
 		return nil, err
 	}
-	return storeFromPool(pool), nil
+	return storeFromPool(pool, opts), nil
 }
 
 // Migrate applies the embedded migrations a database has not seen yet, inside one
@@ -447,7 +463,7 @@ func (s *Store) AppendEvent(
 		}
 	}()
 
-	ev, err = prepareEvent(ev)
+	ev, err = prepareEvent(ev, s.maxAttributeBytes)
 	if err != nil {
 		return core.Event{}, false, err
 	}
@@ -482,9 +498,16 @@ func (s *Store) AppendEvent(
 // here, so this is where the contract is owned: normalising once at the store boundary
 // covers every caller (ingress, CloudEvents mapping, a future egress seed, any other
 // producer) instead of repairing them one at a time at their call sites.
-func prepareEvent(ev core.Event) (core.Event, error) {
+// A store opened WithMaxEventAttributeBytes also refuses attributes over that size here,
+// after validation, so the refusal is an invalid event like any other.
+func prepareEvent(ev core.Event, maxAttributeBytes int) (core.Event, error) {
 	if err := ev.Validate(); err != nil {
 		return core.Event{}, err
+	}
+	if maxAttributeBytes > 0 {
+		if err := ev.CheckAttributeSize(maxAttributeBytes); err != nil {
+			return core.Event{}, err
+		}
 	}
 	if ev.Attributes == nil {
 		ev.Attributes = map[string]any{}

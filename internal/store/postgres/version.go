@@ -43,10 +43,10 @@ func (s *Store) AssertSchemaVersion(ctx context.Context) error {
 
 // OpenNoMigrate connects without applying migrations, for daemons that must not
 // migrate. Only horopter-migrate changes the schema.
-func OpenNoMigrate(ctx context.Context, dsn string) (*Store, error) {
+func OpenNoMigrate(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 	pool, err := connect(ctx, dsn, "check DATABASE_URL")
 	if err != nil {
 		return nil, err
 	}
-	return storeFromPool(pool), nil
+	return storeFromPool(pool, opts), nil
 }
