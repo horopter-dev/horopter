@@ -9,6 +9,9 @@ import (
 // permit, or clears it when fn is nil. Holding a read there is how a test fills the limit.
 func SetAfterAdmissionHook(fn func()) { afterAdmissionHook = fn }
 
+// ReadExpansionFactor exposes readExpansionFactor.
+const ReadExpansionFactor = readExpansionFactor
+
 // RetryAfterSeconds exposes retryAfterSeconds.
 var RetryAfterSeconds = retryAfterSeconds
 

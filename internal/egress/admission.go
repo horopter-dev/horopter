@@ -23,6 +23,14 @@ const (
 // The gates a read can be shed at, as the "gate" log field names them.
 const gateConcurrency = "concurrency"
 
+// readExpansionFactor is how many bytes of heap a read may allocate per byte of row text it was
+// estimated at. TestReadAllocationsStayWithinExpansionFactor measures the ratio on the costliest
+// data shapes through every rendering, and fails if any ratio exceeds this. It is set to the
+// smallest whole number at least 10% above the largest ratio that test measured. Allocation, not
+// peak heap, is measured: a read cannot add more to the live heap than it allocates, and
+// allocation is repeatable where peak heap depends on when the collector ran.
+const readExpansionFactor = 46
+
 // afterAdmissionHook is nil in production. Tests set it to hold an admitted read in flight so
 // the next read finds the concurrency limit full.
 var afterAdmissionHook func()

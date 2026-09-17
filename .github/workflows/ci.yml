@@ -110,3 +110,8 @@ jobs:
         run: |
           set -euo pipefail
           go test -race -count=1 ./...
+
+      - name: Test the read expansion factor without the race detector
+        run: |
+          set -euo pipefail
+          go test -count=1 -run '^TestReadAllocationsStayWithinExpansionFactor$' ./internal/egress
