@@ -150,8 +150,8 @@ func connect(ctx context.Context, dsn, connectErrHint string) (*pgxpool.Pool, er
 	// otelpgx traces each statement. Bound values are NOT included: they carry event
 	// payloads, and query parameters are exactly where user data would leak into
 	// telemetry. The statement text itself is this project's own SQL and is what makes
-	// a span identifiable.
-	cfg.ConnConfig.Tracer = otelpgx.NewTracer()
+	// a span identifiable. poolTracer wraps it to report connection waits to egress.
+	cfg.ConnConfig.Tracer = poolTracer{Tracer: otelpgx.NewTracer()}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect to postgres: %w; %s", err, connectErrHint)
