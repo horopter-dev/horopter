@@ -68,6 +68,7 @@ type Server struct {
 	otlp    *otlp.Renderer
 	limits  Limits
 	limiter *admission.Limiter
+	memory  *admission.BytePool
 }
 
 // New returns an egress Server admitting reads against limits. clock is injected so rendering an
@@ -77,6 +78,7 @@ func New(s *postgres.Store, clock func() time.Time, limits Limits) *Server {
 	return &Server{
 		store: s, clock: clock, grafana: grafana.New(), otlp: otlp.New(),
 		limits: limits, limiter: admission.NewLimiter(floor, initial, ceiling),
+		memory: admission.NewBytePool(limits.ReadMemoryBytes),
 	}
 }
 
@@ -347,13 +349,17 @@ func windowFromAnnotationBody(r *http.Request) (window, error) {
 	return newWindow(from, to, limit)
 }
 
-func (s *Server) changesFor(r *http.Request, win window) ([]core.Change, bool, error) {
+// changesFor reads the changes win selects once admission has estimated them and reserved their
+// memory. It answers the request itself on any failure, and then reports ok false.
+func (s *Server) changesFor(
+	w http.ResponseWriter, r *http.Request, win window, adapter string,
+) (changes []core.Change, truncated, ok bool) {
 	tenantID, source := tenantOf(r)
 	trace.SpanFromContext(r.Context()).SetAttributes(
 		attribute.String("horopter.tenant", tenantID),
 		attribute.String("horopter.tenant.source", source),
 	)
-	return s.store.QueryChanges(r.Context(), postgres.ChangeQuery{
+	q := postgres.ChangeQuery{
 		Tenant:  tenantID,
 		From:    win.from,
 		To:      win.to,
@@ -361,7 +367,23 @@ func (s *Server) changesFor(r *http.Request, win window) ([]core.Change, bool, e
 		Type:    r.URL.Query().Get("type"),
 		Status:  r.URL.Query().Get("status"),
 		Limit:   win.limit,
-	})
+	}
+	est, err := s.store.EstimateChanges(r.Context(), q)
+	if err != nil {
+		readFailed(w, r, adapter, err)
+		return nil, false, false
+	}
+	budget, admitted := s.admitMemory(w, r, est)
+	if !admitted {
+		return nil, false, false
+	}
+	q.MaxRowTextBytes = budget
+	changes, truncated, err = s.store.QueryChanges(r.Context(), q)
+	if err != nil {
+		readFailed(w, r, adapter, err)
+		return nil, false, false
+	}
+	return changes, truncated, true
 }
 
 func (s *Server) queryChanges(w http.ResponseWriter, r *http.Request) {
@@ -372,9 +394,8 @@ func (s *Server) queryChanges(w http.ResponseWriter, r *http.Request) {
 	}
 	trace.SpanFromContext(r.Context()).SetAttributes(
 		attribute.String("horopter.adapter", "neutral"))
-	changes, truncated, err := s.changesFor(r, win)
-	if err != nil {
-		readFailed(w, r, "neutral", err)
+	changes, truncated, ok := s.changesFor(w, r, win, "neutral")
+	if !ok {
 		return
 	}
 	markTruncated(w, truncated)
@@ -399,11 +420,18 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		attribute.String("horopter.tenant", tenantID),
 		attribute.String("horopter.tenant.source", source),
 	)
-	events, truncated, err := s.store.ListEvents(r.Context(), postgres.EventQuery{
-		Tenant: tenantID,
-		Ref:    r.URL.Query().Get("ref"),
-		Limit:  limit,
-	})
+	q := postgres.EventQuery{Tenant: tenantID, Ref: r.URL.Query().Get("ref"), Limit: limit}
+	est, err := s.store.EstimateEvents(r.Context(), q)
+	if err != nil {
+		readFailed(w, r, "neutral", err)
+		return
+	}
+	budget, admitted := s.admitMemory(w, r, est)
+	if !admitted {
+		return
+	}
+	q.MaxRowTextBytes = budget
+	events, truncated, err := s.store.ListEvents(r.Context(), q)
 	if err != nil {
 		readFailed(w, r, "neutral", err)
 		return
@@ -477,9 +505,8 @@ func (s *Server) render(
 	trace.SpanFromContext(r.Context()).SetAttributes(
 		attribute.String("horopter.adapter", adapter))
 
-	changes, truncated, err := s.changesFor(r, win)
-	if err != nil {
-		readFailed(w, r, adapter, err)
+	changes, truncated, ok := s.changesFor(w, r, win, adapter)
+	if !ok {
 		return
 	}
 	payload, err := render(changes, s.clock())

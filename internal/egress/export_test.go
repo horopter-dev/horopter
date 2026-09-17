@@ -38,3 +38,15 @@ func ReadOverloadedByAcquisition(
 	state.connectionWaitObserver(requestCtx)(wait, err)
 	return state.overloaded(threshold)
 }
+
+// ReserveReadMemory takes n bytes from s's read memory pool as though a read held them, and
+// returns the function that gives them back.
+func ReserveReadMemory(s *Server, n int64) (func(), error) {
+	if err := s.memory.Reserve(context.Background(), n); err != nil {
+		return nil, err
+	}
+	return func() { s.memory.Release(n) }, nil
+}
+
+// ReadMemoryReserved returns how many bytes of s's read memory pool are reserved.
+func ReadMemoryReserved(s *Server) int64 { return s.memory.Reserved() }

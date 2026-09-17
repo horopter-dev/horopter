@@ -136,6 +136,9 @@ func TestAReadOverTheConcurrencyLimitIsShed(t *testing.T) {
 func TestProbesPassNoGate(t *testing.T) {
 	srv, _, tn := newServerWith(t, 1, testLimits())
 	h := srv.Routes()
+	release, err := egress.ReserveReadMemory(srv, testLimits().ReadMemoryBytes)
+	require.NoError(t, err)
+	t.Cleanup(release)
 	holdRead(t, h, changesURL(tn))
 	require.Equal(t, http.StatusServiceUnavailable, get(t, h, changesURL(tn)).Code,
 		"the concurrency limit must be full, or this test proves nothing")

@@ -65,10 +65,10 @@ func run() error {
 		// ReadHeaderTimeout bounds a slowloris header dribble. ReadTimeout bounds the
 		// whole request; every egress route is a GET carrying no body, so 15s is already
 		// generous. WriteTimeout bounds handler time plus the response write, which for a
-		// MaxLimit result set is an admission wait LimitsFromEnv keeps well inside it, one
-		// indexed query and a JSON encode. IdleTimeout bounds a kept-alive connection between
-		// requests so idle clients cannot accumulate file descriptors. Without the last three
-		// a client could hold a connection forever.
+		// MaxLimit result set is up to two admission waits — LimitsFromEnv keeps both well
+		// inside it — a size estimate, one indexed query and a JSON encode. IdleTimeout
+		// bounds a kept-alive connection between requests so idle clients cannot accumulate
+		// file descriptors. Without the last three a client could hold a connection forever.
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
