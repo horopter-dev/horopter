@@ -1,19 +1,25 @@
 package egress_test
 
 import (
+	"context"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/yo61/horopter/internal/egress"
+	"github.com/yo61/horopter/internal/store/postgres"
 )
 
 // testLimits are the defaults with a short admission wait, so a shed read answers quickly.
@@ -199,4 +205,111 @@ func TestRetryAfterRoundsTheAdmissionWaitUpToWholeSeconds(t *testing.T) {
 	} {
 		assert.Equal(t, want, egress.RetryAfterSeconds(wait), "wait %s", wait)
 	}
+}
+
+// holdConnections takes n of the store's pool connections outside any read, and returns a
+// function giving them back. They are given back when the test ends if not before.
+func holdConnections(t *testing.T, s *postgres.Store, n int) func() {
+	t.Helper()
+	conns := make([]*pgxpool.Conn, 0, n)
+	for range n {
+		conn, err := s.Pool().Acquire(context.Background())
+		require.NoError(t, err)
+		conns = append(conns, conn)
+	}
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			for _, conn := range conns {
+				conn.Release()
+			}
+		})
+	}
+	t.Cleanup(release)
+	return release
+}
+
+// TestAReadThatWaitsForAConnectionHalvesTheLimit holds a two-connection pool's connections
+// while a read starts, so the read waits past the threshold before it gets one.
+func TestAReadThatWaitsForAConnectionHalvesTheLimit(t *testing.T) {
+	rec, restore := recordSpans(t)
+	defer restore()
+	limits := egress.DefaultLimits()
+	limits.DBWaitThreshold = 50 * time.Millisecond
+	srv, s, tn := newServerWith(t, 2, limits)
+	h := srv.Routes()
+	records := captureLogs(t)
+	require.Equal(t, 2, egress.ReadConcurrencyLimit(srv), "the limit starts at the pool size")
+
+	release := holdConnections(t, s, 2)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		release()
+	}()
+	require.Equal(t, http.StatusOK, get(t, h, changesURL(tn)).Code)
+
+	assert.Equal(t, 1, egress.ReadConcurrencyLimit(srv))
+	halved := slices.ContainsFunc(records(), func(r map[string]any) bool {
+		msg, _ := r["msg"].(string)
+		return r["level"] == "WARN" &&
+			strings.HasPrefix(msg, "read concurrency limit halved from 2 to 1 after a ") &&
+			strings.HasSuffix(msg, "ms database connection wait")
+	})
+	assert.True(t, halved, "a decrease is logged; got %v", records())
+	waits := spanAttrValues(rec, "", "horopter.db.connection_wait_ms")
+	require.Len(t, waits, 1)
+	waited, err := strconv.Atoi(waits[0])
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, waited, 150)
+
+	require.Equal(t, http.StatusOK, get(t, h, changesURL(tn)).Code)
+	assert.Equal(t, 2, egress.ReadConcurrencyLimit(srv), "a healthy read raises the limit again")
+}
+
+// TestAReadWhoseClientGivesUpDoesNotLowerTheLimit ends the request's context while the read waits
+// for a connection, briefly: a client giving up says nothing about the database.
+func TestAReadWhoseClientGivesUpDoesNotLowerTheLimit(t *testing.T) {
+	limits := egress.DefaultLimits()
+	limits.DBWaitThreshold = 500 * time.Millisecond
+	srv, s, tn := newServerWith(t, 2, limits)
+	h := srv.Routes()
+	holdConnections(t, s, 2)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, changesURL(tn), nil).WithContext(ctx))
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code,
+		"the read must have failed to get a connection, or this test proves nothing")
+	assert.GreaterOrEqual(t, egress.ReadConcurrencyLimit(srv), 2)
+}
+
+// TestAFailedConnectionAcquisitionHalvesTheLimit closes the pool under a live request: a pool
+// that cannot hand out connections is overloaded, however briefly the read waited.
+func TestAFailedConnectionAcquisitionHalvesTheLimit(t *testing.T) {
+	srv, s, tn := newServerWith(t, 2, egress.DefaultLimits())
+	h := srv.Routes()
+	records := captureLogs(t)
+	s.Close()
+
+	require.Equal(t, http.StatusInternalServerError, get(t, h, changesURL(tn)).Code)
+
+	assert.Equal(t, 1, egress.ReadConcurrencyLimit(srv))
+	assert.True(t, slices.ContainsFunc(records(), func(r map[string]any) bool {
+		return r["level"] == "WARN" && r["msg"] == "read concurrency limit halved from 2 to 1 "+
+			"after a failed database connection acquisition"
+	}), "got %v", records())
+}
+
+func TestOverloadIsDecidedByTheLongestConnectionWait(t *testing.T) {
+	threshold := 100 * time.Millisecond
+
+	assert.True(t, egress.ReadOverloaded(threshold, 150*time.Millisecond, 10*time.Millisecond))
+	assert.True(t, egress.ReadOverloaded(threshold, 10*time.Millisecond, 150*time.Millisecond),
+		"a long wait after a short one still counts")
+	assert.False(t, egress.ReadOverloaded(threshold, 10*time.Millisecond, 100*time.Millisecond),
+		"a wait at the threshold is not over it")
+	assert.False(t, egress.ReadOverloaded(threshold),
+		"a read that acquired nothing waited for nothing")
 }
