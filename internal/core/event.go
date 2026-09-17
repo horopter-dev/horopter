@@ -3,6 +3,8 @@
 package core
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -92,6 +94,44 @@ func (e Event) Validate() error {
 			ErrInvalidEvent, e.ID, e.SchemaVersion, CurrentSchemaVersion)
 	}
 	return nil
+}
+
+// CheckAttributeSize reports whether the event's attributes fit within limit bytes of JSON.
+// Every failure wraps ErrInvalidEvent: an event over the limit stays over it however often it
+// is offered, so the producer must not retry it.
+//
+// The size is compact JSON without HTML escaping, which is the form a producer sends, so the
+// number in the error is one the producer can check against its own payload. encoding/json
+// escapes <, > and & as six bytes each by default, which would count bytes nobody sent. A nil
+// map measures as {}, the value the store writes for it.
+func (e Event) CheckAttributeSize(limit int) error {
+	size, err := attributeJSONSize(e.Attributes)
+	if err != nil {
+		return fmt.Errorf("%w %q: attributes cannot be encoded as JSON: %w",
+			ErrInvalidEvent, e.ID, err)
+	}
+	if size > limit {
+		return fmt.Errorf(
+			"%w %q: attributes encode to %d bytes of JSON; the limit is %d — keep "+
+				"attributes to identifiers and short text, and link to anything larger",
+			ErrInvalidEvent, e.ID, size, limit)
+	}
+	return nil
+}
+
+// attributeJSONSize returns the length of attrs as compact, unescaped JSON.
+func attributeJSONSize(attrs map[string]any) (int, error) {
+	if attrs == nil {
+		attrs = map[string]any{}
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(attrs); err != nil {
+		return 0, err
+	}
+	// Encode ends its output with a newline that is not part of the JSON value.
+	return buf.Len() - 1, nil
 }
 
 // NewULID returns a time-sortable 26-character identifier. Callers supply the
