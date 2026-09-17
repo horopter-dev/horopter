@@ -40,9 +40,12 @@ Each service is configured with environment variables:
 - `HOROPTER_INGRESS_MAX_EVENT_ATTRIBUTE_BYTES` — the largest attribute map
   `horopter-ingress` accepts, in bytes of JSON: default `4096`, from `1` to `1048576`. See
   Attributes below.
-- `HOROPTER_EGRESS_READ_MEMORY_BYTES`, `HOROPTER_EGRESS_ADMISSION_WAIT` and
-  `HOROPTER_EGRESS_DB_WAIT_THRESHOLD` — how `horopter-egress` admits reads. See Read admission
-  below.
+- `HOROPTER_EGRESS_READ_MEMORY_BYTES` — the memory pool `horopter-egress` reserves reads
+  against: default `268435456` (256 MiB), at least `1048576`.
+- `HOROPTER_EGRESS_ADMISSION_WAIT` — how long a read waits at each admission gate before it
+  is shed: default `500ms`, above 0 and at most `10s`.
+- `HOROPTER_EGRESS_DB_WAIT_THRESHOLD` — the database connection wait above which a read
+  counts as overloaded: default `100ms`, above 0. See Read admission below.
 
 A value that does not parse, or is out of range, stops the daemon at startup with an error
 naming the variable and the value.
@@ -339,14 +342,14 @@ Every read endpoint caps its result set at 1000 rows. When rows were discarded, 
 response carries **`X-Horopter-Truncated: true`**; when nothing was discarded the header
 is absent entirely. All four read endpoints set it, across six registered routes:
 
-The header is also set when a read was larger than egress's read memory pool and was cut to the
-oldest rows that fit; see Read admission. The same advice applies.
-
 - `GET /v1/changes`
 - `GET /v1/events`
 - `GET /adapters/grafana/annotations` and `POST /adapters/grafana/annotations`
   (including the `/adapters/grafana/{tenant}/annotations` variant)
 - `GET /adapters/otlp/spans`
+
+The header is also set when a read was larger than egress's read memory pool and was cut to the
+oldest rows that fit; see Read admission. The same advice applies.
 
 Act on it. Changes are returned oldest first, so truncation discards the **most recent**
 rows — during an incident, exactly the ones being looked for — and a truncated response
