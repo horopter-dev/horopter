@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -396,6 +397,11 @@ type ChangeQuery struct {
 	Type    string
 	Status  string
 	Limit   int
+	// MaxRowTextBytes cuts the result after the leading rows whose row text, summed in order,
+	// fits within it; zero means no cut. Row text is a row's size as Postgres renders the whole
+	// row as text, octet_length(row::text). A cut that discards rows reports the result
+	// truncated.
+	MaxRowTextBytes int64
 }
 
 // EventQuery selects raw events for audit, export, and debugging.
@@ -403,6 +409,19 @@ type EventQuery struct {
 	Tenant string
 	Ref    string
 	Limit  int
+	// MaxRowTextBytes cuts the result after the leading rows whose row text, summed in order,
+	// fits within it; zero means no cut. Row text is a row's size as Postgres renders the whole
+	// row as text, octet_length(row::text). A cut that discards rows reports the result
+	// truncated.
+	MaxRowTextBytes int64
+}
+
+// ReadEstimate is the size of what a read will fetch, measured before it runs: how many rows,
+// their total row text, and the first row's row text, in the read's order.
+type ReadEstimate struct {
+	Rows          int
+	TotalBytes    int64
+	FirstRowBytes int64
 }
 
 // overFetch returns the LIMIT to send for a caller-requested limit, and reports whether a
@@ -425,6 +444,89 @@ func trimToLimit[T any](rows []T, limit int) ([]T, bool) {
 		return rows, false
 	}
 	return rows[:limit], true
+}
+
+// selection is SQL selecting whole rows of one table for a read — its tenant, filters, order
+// and over-fetch limit — with the arguments it takes and the order its columns are sorted by.
+// A read's query, its estimate and its byte cut all select from the same selection, which is
+// what makes an estimate describe exactly the rows the read then fetches.
+type selection struct {
+	sql   string
+	args  []any
+	order string
+}
+
+// changeColumns are the columns scanChanges reads, in its order.
+const changeColumns = `tenant, ref, subject, type, title, actor, start_at, started_at,
+	first_seen_at, end_at, status, attributes, last_event_id`
+
+// eventColumns are the columns scanEvents reads, in its order.
+const eventColumns = `id, tenant, idempotency_key, schema_version, source, type, subject,
+	actor, title, occurred_at, received_at, correlation_ref, attributes`
+
+// changeSelection selects the change rows q reads.
+func changeSelection(q ChangeQuery) selection {
+	sb := strings.Builder{}
+	sb.WriteString(`
+		SELECT c.* FROM change c
+		WHERE c.tenant = $1 AND c.start_at <= $2 AND c.end_effective >= $3`)
+	args := appendChangeFilters(&sb, []any{q.Tenant, q.To.UTC(), q.From.UTC()}, q)
+	sb.WriteString(" ORDER BY c.start_at ASC, c.ref ASC")
+	if limit, bounded := overFetch(q.Limit); bounded {
+		args = append(args, limit)
+		fmt.Fprintf(&sb, " LIMIT $%d", len(args))
+	}
+	return selection{sql: sb.String(), args: args, order: "start_at ASC, ref ASC"}
+}
+
+// eventSelection selects the event rows q reads. See ListEvents for the ref predicate.
+func eventSelection(q EventQuery) selection {
+	query := `SELECT e.* FROM event e WHERE e.tenant = $1`
+	args := []any{q.Tenant}
+	if q.Ref != "" {
+		args = append(args, q.Ref)
+		query += fmt.Sprintf(
+			" AND (e.correlation_ref = $%d OR (e.correlation_ref = '' AND e.id = $%d))",
+			len(args), len(args))
+	}
+	query += " ORDER BY e.id ASC"
+	if limit, bounded := overFetch(q.Limit); bounded {
+		args = append(args, limit)
+		query += fmt.Sprintf(" LIMIT $%d", len(args))
+	}
+	return selection{sql: query, args: args, order: "id ASC"}
+}
+
+// byteCutSQL wraps sel so it returns only the leading rows whose row text, summed in sel's
+// order, fits within the budget bound at $budgetArg, selecting columns and then whether another
+// row followed each one before the cut. For the last row returned, that says whether the cut
+// discarded anything.
+//
+// The running sum is taken over rows already limited, so it never measures a row the read could
+// not have returned, and it is filtered one level up because a WHERE clause is applied before
+// the window functions at its own level.
+func byteCutSQL(columns string, sel selection, budgetArg int) string {
+	return fmt.Sprintf(`
+		SELECT %[1]s, more FROM (
+			SELECT l.*,
+			       sum(octet_length(l::text))
+			         OVER (ORDER BY %[2]s ROWS UNBOUNDED PRECEDING) AS running,
+			       lead(true, 1, false) OVER (ORDER BY %[2]s) AS more
+			FROM (%[3]s) l
+		) w
+		WHERE running <= $%[4]d
+		ORDER BY %[2]s`, columns, sel.order, sel.sql, budgetArg)
+}
+
+// anyRows reports whether sel selects any row. A byte cut that returns no rows cannot tell
+// from its rows whether there were any to discard, so it asks.
+func (s *Store) anyRows(ctx context.Context, sel selection) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx, "SELECT EXISTS ("+sel.sql+")", sel.args...).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check whether a cut read had rows: %w", err)
+	}
+	return exists, nil
 }
 
 // AppendEvent stores an event and folds it into the projection in one transaction.
@@ -920,25 +1022,12 @@ func (s *Store) ListEvents(
 		}
 	}()
 
-	query := `
-		SELECT id, tenant, idempotency_key, schema_version, source, type, subject,
-		       actor, title, occurred_at, received_at, correlation_ref, attributes
-		FROM event WHERE tenant = $1`
-	args := []any{q.Tenant}
-
-	if q.Ref != "" {
-		args = append(args, q.Ref)
-		query += fmt.Sprintf(
-			" AND (correlation_ref = $%d OR (correlation_ref = '' AND id = $%d))",
-			len(args), len(args))
+	sel := eventSelection(q)
+	if q.MaxRowTextBytes > 0 {
+		return s.listEventsWithinBytes(ctx, q, sel)
 	}
-	query += " ORDER BY id ASC"
-	if limit, bounded := overFetch(q.Limit); bounded {
-		args = append(args, limit)
-		query += fmt.Sprintf(" LIMIT $%d", len(args))
-	}
-
-	rows, err := s.pool.Query(ctx, query, args...)
+	rows, err := s.pool.Query(ctx,
+		"SELECT "+eventColumns+" FROM ("+sel.sql+") l ORDER BY "+sel.order, sel.args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("list events for tenant %q: %w", q.Tenant, err)
 	}
@@ -952,18 +1041,44 @@ func (s *Store) ListEvents(
 	return evs, truncated, nil
 }
 
+// listEventsWithinBytes is ListEvents with q.MaxRowTextBytes applied.
+func (s *Store) listEventsWithinBytes(
+	ctx context.Context, q EventQuery, sel selection,
+) ([]core.Event, bool, error) {
+	args := append(slices.Clip(sel.args), q.MaxRowTextBytes)
+	rows, err := s.pool.Query(ctx, byteCutSQL(eventColumns, sel, len(args)), args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("list events within %d bytes for tenant %q: %w",
+			q.MaxRowTextBytes, q.Tenant, err)
+	}
+	defer rows.Close()
+
+	var more bool
+	evs, err := scanEvents(rows, q.Tenant, &more)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(evs) == 0 {
+		cut, err := s.anyRows(ctx, sel)
+		return nil, cut, err
+	}
+	evs, truncated := trimToLimit(evs, q.Limit)
+	return evs, truncated || more, nil
+}
+
 // scanEvents reads every event row, naming tenantID in any error so a failure identifies
-// the query it came from.
-func scanEvents(rows pgx.Rows, tenantID string) ([]core.Event, error) {
+// the query it came from. Extra destinations are scanned after the row's own columns.
+func scanEvents(rows pgx.Rows, tenantID string, extra ...any) ([]core.Event, error) {
 	var evs []core.Event
 	for rows.Next() {
 		var (
 			ev   core.Event
 			idem *string
 		)
-		if err := rows.Scan(&ev.ID, &ev.Tenant, &idem, &ev.SchemaVersion, &ev.Source, &ev.Type,
+		dest := []any{&ev.ID, &ev.Tenant, &idem, &ev.SchemaVersion, &ev.Source, &ev.Type,
 			&ev.Subject, &ev.Actor, &ev.Title, &ev.OccurredAt, &ev.ReceivedAt,
-			&ev.CorrelationRef, &ev.Attributes); err != nil {
+			&ev.CorrelationRef, &ev.Attributes}
+		if err := rows.Scan(append(dest, extra...)...); err != nil {
 			return nil, fmt.Errorf("scan event row for tenant %q: %w", tenantID, err)
 		}
 		if idem != nil {
@@ -1013,21 +1128,12 @@ func (s *Store) QueryChanges(
 		}
 	}()
 
-	sb := strings.Builder{}
-	sb.WriteString(`
-		SELECT tenant, ref, subject, type, title, actor, start_at, started_at,
-		       first_seen_at, end_at, status, attributes, last_event_id
-		FROM change
-		WHERE tenant = $1 AND start_at <= $2 AND end_effective >= $3`)
-	args := appendChangeFilters(&sb, []any{q.Tenant, q.To.UTC(), q.From.UTC()}, q)
-
-	sb.WriteString(" ORDER BY start_at ASC, ref ASC")
-	if limit, bounded := overFetch(q.Limit); bounded {
-		args = append(args, limit)
-		fmt.Fprintf(&sb, " LIMIT $%d", len(args))
+	sel := changeSelection(q)
+	if q.MaxRowTextBytes > 0 {
+		return s.queryChangesWithinBytes(ctx, q, sel)
 	}
-
-	rows, err := s.pool.Query(ctx, sb.String(), args...)
+	rows, err := s.pool.Query(ctx,
+		"SELECT "+changeColumns+" FROM ("+sel.sql+") l ORDER BY "+sel.order, sel.args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("query changes for tenant %q: %w", q.Tenant, err)
 	}
@@ -1039,6 +1145,31 @@ func (s *Store) QueryChanges(
 	}
 	out, truncated = trimToLimit(out, q.Limit)
 	return out, truncated, nil
+}
+
+// queryChangesWithinBytes is QueryChanges with q.MaxRowTextBytes applied.
+func (s *Store) queryChangesWithinBytes(
+	ctx context.Context, q ChangeQuery, sel selection,
+) ([]core.Change, bool, error) {
+	args := append(slices.Clip(sel.args), q.MaxRowTextBytes)
+	rows, err := s.pool.Query(ctx, byteCutSQL(changeColumns, sel, len(args)), args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("query changes within %d bytes for tenant %q: %w",
+			q.MaxRowTextBytes, q.Tenant, err)
+	}
+	defer rows.Close()
+
+	var more bool
+	out, err := scanChanges(rows, &more)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(out) == 0 {
+		cut, err := s.anyRows(ctx, sel)
+		return nil, cut, err
+	}
+	out, truncated := trimToLimit(out, q.Limit)
+	return out, truncated || more, nil
 }
 
 // appendChangeFilters adds the optional equality filters to the query and returns the
@@ -1062,8 +1193,8 @@ func appendChangeFilters(sb *strings.Builder, args []any, q ChangeQuery) []any {
 
 // scanChanges reads every change row. start_at is read as well as the two facts it is
 // generated from, so a loaded Change carries the same start the database holds rather than
-// one recomputed from them.
-func scanChanges(rows pgx.Rows) ([]core.Change, error) {
+// one recomputed from them. Extra destinations are scanned after the row's own columns.
+func scanChanges(rows pgx.Rows, extra ...any) ([]core.Change, error) {
 	var out []core.Change
 	for rows.Next() {
 		var (
@@ -1072,9 +1203,10 @@ func scanChanges(rows pgx.Rows) ([]core.Change, error) {
 			endAt     *time.Time
 			st        string
 		)
-		if err := rows.Scan(&c.Tenant, &c.Ref, &c.Subject, &c.Type, &c.Title,
+		dest := []any{&c.Tenant, &c.Ref, &c.Subject, &c.Type, &c.Title,
 			&c.Actor, &c.Start, &startedAt, &c.FirstSeenAt, &endAt, &st,
-			&c.Attributes, &c.LastEventID); err != nil {
+			&c.Attributes, &c.LastEventID}
+		if err := rows.Scan(append(dest, extra...)...); err != nil {
 			return nil, fmt.Errorf("scan change row: %w", err)
 		}
 		c.StartedAt = startedAt
@@ -1086,6 +1218,44 @@ func scanChanges(rows pgx.Rows) ([]core.Change, error) {
 		return nil, fmt.Errorf("iterate change rows: %w", err)
 	}
 	return out, nil
+}
+
+// EstimateChanges measures the rows QueryChanges would fetch for q without fetching them: the
+// same tenant, window, filters, order and over-fetch limit. q.MaxRowTextBytes is ignored; an
+// estimate is what decides whether to set it.
+func (s *Store) EstimateChanges(ctx context.Context, q ChangeQuery) (ReadEstimate, error) {
+	return s.estimate(ctx, "EstimateChanges", q.Tenant, changeSelection(q))
+}
+
+// EstimateEvents measures the rows ListEvents would fetch for q, as EstimateChanges does.
+func (s *Store) EstimateEvents(ctx context.Context, q EventQuery) (ReadEstimate, error) {
+	return s.estimate(ctx, "EstimateEvents", q.Tenant, eventSelection(q))
+}
+
+// estimate sums the row text of every row sel selects and takes the first row's by sel's
+// order, under a span named operation.
+func (s *Store) estimate(
+	ctx context.Context, operation, tenantID string, sel selection,
+) (est ReadEstimate, err error) {
+	ctx, span := tracer().Start(ctx, operation)
+	defer span.End()
+	defer func() {
+		span.SetAttributes(attribute.String("horopter.tenant", tenantID))
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "")
+		}
+	}()
+
+	query := fmt.Sprintf(`
+		SELECT count(*), coalesce(sum(b), 0), coalesce((array_agg(b ORDER BY %s))[1], 0)
+		FROM (SELECT octet_length(l::text) AS b, l.* FROM (%s) l) s`, sel.order, sel.sql)
+	err = s.pool.QueryRow(ctx, query, sel.args...).Scan(
+		&est.Rows, &est.TotalBytes, &est.FirstRowBytes)
+	if err != nil {
+		return ReadEstimate{}, fmt.Errorf("estimate a read for tenant %q: %w", tenantID, err)
+	}
+	return est, nil
 }
 
 // RebuildProjection discards a tenant's projection and replays its event log in ULID
