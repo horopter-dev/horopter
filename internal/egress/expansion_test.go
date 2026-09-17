@@ -26,9 +26,9 @@ type expansionShape struct {
 }
 
 // expansionShapes are the data the factor is measured on: what producers are documented to send;
-// H-3's shape of many keys of about 60 bytes; and short keys with small numbers, which cost the
-// most heap per byte of text, since each number becomes a boxed float64 in a map entry. Row counts
-// give each shape megabytes of row text, so background allocation is noise.
+// H-3's shape of many entries of about 60 bytes; and short keys with small numbers, which cost
+// the most heap per byte of text, since each number becomes a boxed float64 in a map entry. Row
+// counts give each shape megabytes of row text, so background allocation is noise.
 func expansionShapes() []expansionShape {
 	manyKeys := make(map[string]any, 500)
 	for i := range 500 {
@@ -40,7 +40,7 @@ func expansionShapes() []expansionShape {
 	}
 	return []expansionShape{
 		{"realistic", 1000, realisticAttributes()},
-		{"many-60-byte-keys", 200, manyKeys},
+		{"many-60-byte-entries", 200, manyKeys},
 		{"short-numeric-keys", 250, numbers},
 	}
 }

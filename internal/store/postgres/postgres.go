@@ -502,9 +502,9 @@ func eventSelection(q EventQuery) selection {
 // row followed each one before the cut. For the last row returned, that says whether the cut
 // discarded anything.
 //
-// The running sum is taken over rows already limited, so it never measures a row the read could
-// not have returned, and it is filtered one level up because a WHERE clause is applied before
-// the window functions at its own level.
+// The running sum is taken over rows already limited to sel's own over-fetch (the caller's
+// limit plus one), so it never scans past them, and it is filtered one level up because a WHERE
+// clause is applied before the window functions at its own level.
 func byteCutSQL(columns string, sel selection, budgetArg int) string {
 	return fmt.Sprintf(`
 		SELECT %[1]s, more FROM (

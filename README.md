@@ -382,8 +382,9 @@ fit, with `X-Horopter-Truncated: true` — exactly as for the row cap.
 
 A read whose **first row alone** needs more than the pool is answered **`422`**, naming the
 limit. Narrowing the time window does not help when that row is a long-running change that
-overlaps every window: filter it out with `subject`, `type` or `status` (`ref` on
-`/v1/events`), or raise the limit.
+overlaps every window: narrowing to a subject, type or status that the oversized row does not
+have, or (on `/v1/events`) to a `ref`, avoids it; otherwise raise
+`HOROPTER_EGRESS_READ_MEMORY_BYTES`.
 
 | Variable | Default | Valid values |
 |---|---|---|
@@ -399,6 +400,13 @@ coordinate, so size the replicas' pools together within Postgres's `max_connecti
 waits at most twice `HOROPTER_EGRESS_ADMISSION_WAIT`, once at each gate, and that comes out of
 egress's 30-second write timeout, so keep the wait short.
 
+The connection wait egress measures, and compares against `HOROPTER_EGRESS_DB_WAIT_THRESHOLD`,
+covers the whole pool acquisition, not just time queued behind other reads: it also includes
+opening a new connection when the pool has none idle, and pgxpool's liveness ping of a
+connection that has been idle for over a second. Set `HOROPTER_EGRESS_DB_WAIT_THRESHOLD`
+comfortably above the time to open a connection to the database plus a round trip, or that
+ordinary setup cost reads as congestion and halves the concurrency limit for no reason.
+
 **Worth alerting on:**
 
 - `horopter_read_shed_total`, by `horopter_read_shed_gate`: any sustained rate means reads are
@@ -410,6 +418,9 @@ egress's 30-second write timeout, so keep the wait short.
 - `horopter_read_admission_in_flight` against `horopter_read_admission_limit`, and
   `horopter_read_memory_reserved_bytes` against `horopter_read_memory_capacity_bytes`: how
   close to each gate egress is running.
+- Reads waiting at the memory gate hold their concurrency permit, so once the memory pool is
+  full, later reads are shed at the concurrency gate instead. When concurrency sheds rise,
+  compare `horopter_read_memory_reserved_bytes` with `horopter_read_memory_capacity_bytes` too.
 
 Admission control protects the database and egress's memory. It is not protection against a
 flood of requests; put that in front of Horopter.
