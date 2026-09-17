@@ -349,8 +349,9 @@ func windowFromAnnotationBody(r *http.Request) (window, error) {
 	return newWindow(from, to, limit)
 }
 
-// changesFor reads the changes win selects once admission has estimated them and reserved their
-// memory. It answers the request itself on any failure, and then reports ok false.
+// changesFor reads the changes win selects: it estimates their size, has admission reserve
+// their memory, then queries them. It answers the request itself on any failure, and then
+// reports ok false.
 func (s *Server) changesFor(
 	w http.ResponseWriter, r *http.Request, win window, adapter string,
 ) (changes []core.Change, truncated, ok bool) {

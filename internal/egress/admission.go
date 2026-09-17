@@ -62,7 +62,8 @@ type readStateKey struct{}
 
 // admit gates a read route on the concurrency limit. A read that gets no permit within
 // Limits.AdmissionWait is shed with 503; an admitted read holds its permit until its response
-// has been written.
+// has been written. It also attaches the read's state and connection-wait observer to the
+// context the handler runs with, which the handler's own memory gate (admitMemory) uses.
 func (s *Server) admit(read http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		state := &readState{outcome: outcomeAdmitted}
@@ -112,8 +113,9 @@ func (st *readState) overloaded(threshold time.Duration) bool {
 	return st.longestConnectionWait > threshold || st.acquisitionFailed
 }
 
-// release ends an admitted read: it returns the read's permit, reporting whether the read found
-// the pool congested, and logs the limit if that halved it.
+// release ends an admitted read: it gives back the read's memory reservation, if any, then
+// returns its concurrency permit, reporting whether the read found the pool congested, and logs
+// the limit if that halved it.
 func (s *Server) release(ctx context.Context, permit admission.Permit, state *readState) {
 	if state.reserved {
 		s.memory.Release(state.reservedBytes)
