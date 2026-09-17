@@ -22,6 +22,7 @@ import (
 
 	"github.com/yo61/horopter/internal/adapter/grafana"
 	"github.com/yo61/horopter/internal/adapter/otlp"
+	"github.com/yo61/horopter/internal/admission"
 	"github.com/yo61/horopter/internal/core"
 	"github.com/yo61/horopter/internal/store/postgres"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -65,28 +66,47 @@ type Server struct {
 	clock   func() time.Time
 	grafana *grafana.Renderer
 	otlp    *otlp.Renderer
+	limits  Limits
+	limiter *admission.Limiter
 }
 
-// New returns an egress Server. clock is injected so rendering an open change stays
-// deterministic under test.
-func New(s *postgres.Store, clock func() time.Time) *Server {
-	return &Server{store: s, clock: clock, grafana: grafana.New(), otlp: otlp.New()}
+// New returns an egress Server admitting reads against limits. clock is injected so rendering an
+// open change stays deterministic under test.
+func New(s *postgres.Store, clock func() time.Time, limits Limits) *Server {
+	floor, initial, ceiling := concurrencyBounds(s)
+	return &Server{
+		store: s, clock: clock, grafana: grafana.New(), otlp: otlp.New(),
+		limits: limits, limiter: admission.NewLimiter(floor, initial, ceiling),
+	}
+}
+
+// concurrencyBounds derives the read concurrency limit from the store's connection pool: it
+// starts at the pool's size, may fall to one read, and may rise to four times the pool, since
+// part of each read's time is spent rendering rather than holding a connection. A nil store
+// serves only the probes, which pass no gate, so its bounds are never used.
+func concurrencyBounds(s *postgres.Store) (floor, initial, ceiling int) {
+	if s == nil {
+		return 1, 1, 1
+	}
+	conns := int(s.Pool().Config().MaxConns)
+	return 1, conns, 4 * conns
 }
 
 // Routes returns the handler for every egress endpoint.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/changes", s.queryChanges)
-	mux.HandleFunc("GET /v1/events", s.listEvents)
-	mux.HandleFunc("GET /adapters/grafana/annotations", s.grafanaAnnotations)
-	mux.HandleFunc("POST /adapters/grafana/annotations", s.grafanaAnnotationsPOST)
-	mux.HandleFunc("POST /adapters/grafana/{tenant}/annotations", s.grafanaAnnotationsPOST)
-	mux.HandleFunc("GET /adapters/otlp/spans", s.otlpSpans)
+	mux.Handle("GET /v1/changes", s.admit(s.queryChanges))
+	mux.Handle("GET /v1/events", s.admit(s.listEvents))
+	mux.Handle("GET /adapters/grafana/annotations", s.admit(s.grafanaAnnotations))
+	mux.Handle("POST /adapters/grafana/annotations", s.admit(s.grafanaAnnotationsPOST))
+	mux.Handle("POST /adapters/grafana/{tenant}/annotations", s.admit(s.grafanaAnnotationsPOST))
+	mux.Handle("GET /adapters/otlp/spans", s.admit(s.otlpSpans))
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 	// otelhttp gives every route a server span carrying the http.* semantic
 	// conventions. It wraps the mux rather than each handler so a route added later is
 	// covered without anyone remembering. With no provider installed it is a no-op.
+	// Every route but the probes passes admit, so a probe answers while reads are being shed.
 	//
 	// The operation argument is empty because it has no effect here. Without a
 	// WithSpanNameFormatter option, otelhttp's default formatter ignores the operation

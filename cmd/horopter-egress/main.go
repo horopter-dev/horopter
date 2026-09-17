@@ -35,6 +35,11 @@ func run() error {
 			"postgres://user:pass@host:5432/horopter")
 	}
 
+	limits, err := egress.LimitsFromEnv()
+	if err != nil {
+		return err
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -56,13 +61,15 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:    *addr,
-		Handler: egress.New(store, time.Now).Routes(),
+		Handler: egress.New(store, time.Now, limits).Routes(),
 		// ReadHeaderTimeout bounds a slowloris header dribble. ReadTimeout bounds the
 		// whole request; every egress route is a GET carrying no body, so 15s is already
 		// generous. WriteTimeout bounds handler time plus the response write, which for a
-		// MaxLimit result set is one indexed query and a JSON encode. IdleTimeout bounds
-		// a kept-alive connection between requests so idle clients cannot accumulate file
-		// descriptors. Without the last three a client could hold a connection forever.
+		// MaxLimit result set is an admission wait LimitsFromEnv keeps well inside it, one
+		// indexed query and a JSON encode. Task 12 extends it once a read has two waits and
+		// an estimate. IdleTimeout bounds a kept-alive connection between requests so idle
+		// clients cannot accumulate file descriptors. Without the last three a client could
+		// hold a connection forever.
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"slices"
 	"sort"
@@ -47,16 +48,45 @@ var (
 
 func newServer(t *testing.T) (http.Handler, *postgres.Store, string) {
 	t.Helper()
+	srv, s, tn := newServerWith(t, 0, egress.DefaultLimits())
+	return srv.Routes(), s, tn
+}
+
+// newServerWith serves a store whose pool holds poolMaxConns connections — zero leaves pgxpool's
+// default — under limits. The concurrency limit starts at the pool size, so a small pool is how a
+// test lets one held read fill it.
+func newServerWith(
+	t *testing.T, poolMaxConns int, limits egress.Limits,
+) (*egress.Server, *postgres.Store, string) {
+	t.Helper()
+	s, tn := openTestStore(t, poolMaxConns)
+	return egress.New(s, fixedClock, limits), s, tn
+}
+
+// openTestStore opens the test database with a pool of poolMaxConns connections, zero for
+// pgxpool's default, and returns it with a tenant no other test uses.
+func openTestStore(t *testing.T, poolMaxConns int) (*postgres.Store, string) {
+	t.Helper()
 	v := os.Getenv("HOROPTER_TEST_DSN")
 	if v == "" {
 		t.Skip("set HOROPTER_TEST_DSN to run egress tests (docker compose up -d db)")
+	}
+	if poolMaxConns > 0 {
+		u, err := url.Parse(v)
+		require.NoError(t, err)
+		q := u.Query()
+		q.Set("pool_max_conns", strconv.Itoa(poolMaxConns))
+		u.RawQuery = q.Encode()
+		v = u.String()
 	}
 	s, err := postgres.Open(context.Background(), v)
 	require.NoError(t, err)
 	t.Cleanup(s.Close)
 	tn := "eg-" + t.Name() + "-" + procToken + "-" + strconv.FormatUint(tenantSeq.Add(1), 36)
-	return egress.New(s, func() time.Time { return fixed }).Routes(), s, tn
+	return s, tn
 }
+
+func fixedClock() time.Time { return fixed }
 
 // seed writes directly through the store: egress has no write path of its own.
 // core.Event.Validate requires event.id to be a syntactically valid ULID, so id comes
@@ -503,7 +533,7 @@ func TestReadyzReportsReadyWithLiveDatabase(t *testing.T) {
 // would have zero coverage in that environment. If a future change reintroduces a
 // Pool().Ping call into healthz, this test panics on the nil store and fails.
 func TestHealthzWorksWithNilStore(t *testing.T) {
-	srv := egress.New(nil, func() time.Time { return fixed })
+	srv := egress.New(nil, fixedClock, egress.DefaultLimits())
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, req)
