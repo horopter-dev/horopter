@@ -524,8 +524,9 @@ func TestReadyzReportsReadyWithLiveDatabase(t *testing.T) {
 }
 
 // TestHealthzWorksWithNilStore proves healthz never touches the database, without
-// needing a live one: New never dereferences its store argument, and a Server built
-// with a nil store still has to answer 200 from healthz for that to hold. It runs
+// needing a live one: New does not dereference a nil store — concurrencyBounds
+// special-cases nil rather than calling its Pool() — and a Server built with a nil
+// store still has to answer 200 from healthz for that to hold. It runs
 // unconditionally — no HOROPTER_TEST_DSN skip, and driven through the real Routes()
 // mux rather than calling the handler directly — because it is the one property in
 // this suite that a database-less CI leg can actually exercise: every other test here

@@ -49,7 +49,14 @@ func holdRead(t *testing.T, h http.Handler, url string) func() *httptest.Respons
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, url, nil))
 		done <- rec
 	}()
-	<-held
+	select {
+	case <-held:
+	case rec := <-done:
+		t.Fatalf("read finished without reaching the admission hook: status %d, body %q",
+			rec.Code, rec.Body.String())
+	case <-time.After(5 * time.Second):
+		t.Fatal("read never reached the admission hook")
+	}
 
 	var once sync.Once
 	var rec *httptest.ResponseRecorder
@@ -88,6 +95,11 @@ func TestAReadOverTheConcurrencyLimitIsShed(t *testing.T) {
 	held := finish()
 
 	require.Equal(t, http.StatusOK, held.Code, held.Body.String())
+
+	after := get(t, h, changesURL(tn))
+	assert.Equal(t, http.StatusOK, after.Code,
+		"the held read must have given its permit back: %s", after.Body.String())
+
 	require.Equal(t, http.StatusServiceUnavailable, shed.Code, shed.Body.String())
 	assert.Equal(t, "1", shed.Header().Get("Retry-After"))
 	assert.JSONEq(t,
@@ -106,8 +118,9 @@ func TestAReadOverTheConcurrencyLimitIsShed(t *testing.T) {
 	assert.Equal(t, float64(1), w["in_flight"])
 	assert.GreaterOrEqual(t, w["waited_ms"], float64(40), "the read waited before it was shed")
 
-	assert.ElementsMatch(t, []string{"admitted", "shed_concurrency"},
-		spanAttrValues(rec, "", "horopter.admission.outcome"))
+	assert.ElementsMatch(t, []string{"admitted", "admitted", "shed_concurrency"},
+		spanAttrValues(rec, "", "horopter.admission.outcome"),
+		"the held read, the shed read and the post-release check each contribute one outcome")
 }
 
 func TestProbesPassNoGate(t *testing.T) {
