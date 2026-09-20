@@ -10,6 +10,10 @@ set -euo pipefail
 url="${HOROPTER_INGRESS_URL:-http://localhost:8080}"
 token="${HOROPTER_INGRESS_TOKEN:-local-dev-token}"
 run="$(date +%s)"
+# A hex rendering of run, so a dashboard showing the commit attribute sees something shaped
+# like a commit ref instead of a bare epoch-second number. run itself still does the
+# uniqueness work, in idempotency keys and correlation refs below.
+commit="$(printf '%07x' "$run")"
 
 for tool in curl jq; do
   command -v "$tool" > /dev/null || {
@@ -35,11 +39,12 @@ post() {
     --arg tenant "$tenant" --arg source "$source" --arg type "$type" \
     --arg subject "$subject" --arg occurred "$occurred" --arg title "$title" \
     --arg key "${run}-${ref:-$type}-${ago}" --arg ref "$ref" --arg run "$run" \
+    --arg commit "$commit" \
     '{tenant: $tenant, source: $source, type: $type, subject: $subject,
       occurred_at: $occurred, title: $title, actor: "seed.sh",
       idempotency_key: $key,
       attributes: {
-        commit: ($run | tostring),
+        commit: $commit,
         version: "1.4.0",
         "horopter.description": "seeded by hack/seed.sh run \($run)"
       }}
