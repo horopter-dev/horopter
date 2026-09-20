@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -132,4 +134,35 @@ func TestSetupReturnsTheLevelError(t *testing.T) {
 
 	require.Error(t, Setup())
 	assert.Same(t, previous, slog.Default(), "a failed Setup must not replace the default")
+}
+
+// TestSetupInstallsTheTraceCorrelatingHandler proves Setup wires the trace-correlating
+// wrapper, not a bare slog.NewJSONHandler. A mutation that swaps in the bare handler leaves
+// every other test in this file, and go vet, silent: this is the only test that would catch
+// it, so it stands in for Setup's only production path.
+func TestSetupInstallsTheTraceCorrelatingHandler(t *testing.T) {
+	previousStderr := os.Stderr
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = previousStderr })
+
+	previous := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	t.Setenv(LevelVar, "info")
+
+	require.NoError(t, Setup())
+
+	ctx, traceID, spanID := spanContext(t)
+	slog.Default().InfoContext(ctx, "trace correlated")
+
+	require.NoError(t, w.Close())
+	data, err := io.ReadAll(r)
+	require.NoError(t, err)
+
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(data, &out), "Setup's default logger wrote %q", data)
+	assert.Equal(t, traceID, out["trace_id"])
+	assert.Equal(t, spanID, out["span_id"])
 }
