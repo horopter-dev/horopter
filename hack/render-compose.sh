@@ -11,7 +11,12 @@ set -euo pipefail
 
 tag="${1:?usage: render-compose.sh <tag>}"
 mkdir -p .render
-sed "s|\${HOROPTER_IMAGE_TAG}|${tag}|g" deploy/docker-compose.yml > .render/docker-compose.yml
+
+# Escapes backslash, &, and the | delimiter, any of which would otherwise be read as sed
+# syntax inside the replacement rather than as literal characters of the tag.
+escaped_tag="$(printf '%s' "$tag" | sed -e 's/[\&|]/\\&/g')"
+sed "s|\${HOROPTER_IMAGE_TAG}|${escaped_tag}|g" deploy/docker-compose.yml \
+  > .render/docker-compose.yml
 
 # A rendered file that still holds the variable would publish a stack nobody can start.
 if grep -q 'HOROPTER_IMAGE_TAG' .render/docker-compose.yml; then
