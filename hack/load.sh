@@ -30,7 +30,8 @@ command -v curl > /dev/null || {
 # from_rfc/to_rfc/from_ms/to_ms are the same six-hour window ending now, in the two formats
 # the four renderings expect. -v-6H is BSD date (macOS); GNU date (Linux, and the containers)
 # needs -d instead.
-from_rfc="$(date -u -v-6H +%Y-%m-%dT%H:%M:%SZ 2> /dev/null || date -u -d '6 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+from_rfc="$(date -u -v-6H +%Y-%m-%dT%H:%M:%SZ 2> /dev/null \
+  || date -u -d '6 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
 to_rfc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 from_ms="$((($(date +%s) - 21600) * 1000))"
 to_ms="$(($(date +%s) * 1000))"
