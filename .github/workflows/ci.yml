@@ -46,7 +46,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # zizmor: ignore[cache-poisoning] v7.0.0; this job only runs goreleaser install-only / --snapshot, which never publishes
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go.mod
 
@@ -99,6 +99,45 @@ jobs:
           advanced-security: false
           annotations: true
 
+      - name: Apply database migrations
+        run: |
+          set -euo pipefail
+          # DATABASE_URL comes from the job's env: block above, not this script.
+          # shellcheck disable=SC2154
+          go run ./cmd/horopter-migrate -dsn "$DATABASE_URL"
+
+      - name: Test
+        run: |
+          set -euo pipefail
+          go test -race -count=1 ./...
+
+      - name: Test the read expansion factor without the race detector
+        run: |
+          set -euo pipefail
+          go test -count=1 -v -run '^TestReadAllocationsStayWithinExpansionFactor$' \
+            ./internal/egress | tee /tmp/expansion.log
+          # A renamed test makes -run match nothing: go test still exits 0 and prints "ok",
+          # so this grep is what turns that into a step failure instead of a silent pass.
+          grep -q -- '--- PASS: TestReadAllocationsStayWithinExpansionFactor ' /tmp/expansion.log
+
+  release-check:
+    name: Check the release configuration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+          # No build cache in a job that pairs with goreleaser-action: zizmor's
+          # cache-poisoning audit, and its documented remedy.
+          cache: false
+
       - name: Install GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94  # v7.2.3
         with:
@@ -123,24 +162,3 @@ jobs:
           set -euo pipefail
           shellcheck hack/*.sh
           shfmt -i 2 -bn -ci -sr -d hack/*.sh
-
-      - name: Apply database migrations
-        run: |
-          set -euo pipefail
-          # DATABASE_URL comes from the job's env: block above, not this script.
-          # shellcheck disable=SC2154
-          go run ./cmd/horopter-migrate -dsn "$DATABASE_URL"
-
-      - name: Test
-        run: |
-          set -euo pipefail
-          go test -race -count=1 ./...
-
-      - name: Test the read expansion factor without the race detector
-        run: |
-          set -euo pipefail
-          go test -count=1 -v -run '^TestReadAllocationsStayWithinExpansionFactor$' \
-            ./internal/egress | tee /tmp/expansion.log
-          # A renamed test makes -run match nothing: go test still exits 0 and prints "ok",
-          # so this grep is what turns that into a step failure instead of a silent pass.
-          grep -q -- '--- PASS: TestReadAllocationsStayWithinExpansionFactor ' /tmp/expansion.log
