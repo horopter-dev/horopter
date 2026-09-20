@@ -36,14 +36,6 @@ func main() {
 	}
 }
 
-func validateMigrateInput(dsn, rebuildTenant string) (string, error) {
-	if dsn == "" {
-		return "", errors.New("DATABASE_URL is required, e.g. " +
-			"postgres://user:pass@host:5432/horopter")
-	}
-	return rebuildTenant, nil
-}
-
 func verifyAndRebuild(ctx context.Context, store *postgres.Store, rebuildTenant string) error {
 	v, err := store.SchemaVersion(ctx)
 	if err != nil {
@@ -76,9 +68,9 @@ func run(ctx context.Context, dsn, rebuildTenant string) error {
 		return err
 	}
 
-	_, err := validateMigrateInput(dsn, rebuildTenant)
-	if err != nil {
-		return err
+	if dsn == "" {
+		return errors.New("DATABASE_URL is required, e.g. " +
+			"postgres://user:pass@host:5432/horopter")
 	}
 
 	tel, err := telemetry.Setup(ctx, "horopter-migrate")
