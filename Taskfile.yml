@@ -43,6 +43,9 @@ tasks:
   seed:
     cmds:
       - ./hack/seed.sh
+  load:
+    cmds:
+      - ./hack/load.sh {{.CLI_ARGS}}
   fmt:
     cmds:
       - gofmt -l .
