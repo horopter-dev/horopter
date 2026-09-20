@@ -87,5 +87,8 @@ changelog:
   use: github
 
 release:
+  # Any tag containing a hyphen (v0.1.0-dev.1, say) is a semver prerelease, so it publishes
+  # as a GitHub prerelease and never becomes "Latest" — the whole point of the dev-tag scheme.
+  prerelease: auto
   extra_files:
     - glob: .render/docker-compose.yml
