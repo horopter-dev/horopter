@@ -46,7 +46,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # zizmor: ignore[cache-poisoning] v7.0.0; this job only runs goreleaser install-only / --snapshot, which never publishes
         with:
           go-version-file: go.mod
 
@@ -98,6 +98,31 @@ jobs:
           # Annotations are mutually exclusive with it and are what a reviewer sees.
           advanced-security: false
           annotations: true
+
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94  # v7.2.3
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          install-only: true
+
+      # A broken release config should fail on the pull request, not on the tag, when the
+      # only way to retry is another tag.
+      - name: Check the release configuration
+        run: |
+          set -euo pipefail
+          goreleaser check
+
+      - name: Build the release artefacts without publishing
+        run: |
+          set -euo pipefail
+          goreleaser release --snapshot --clean
+
+      - name: Lint the shell scripts
+        run: |
+          set -euo pipefail
+          shellcheck hack/*.sh
+          shfmt -i 2 -bn -ci -sr -d hack/*.sh
 
       - name: Apply database migrations
         run: |
