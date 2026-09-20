@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/yo61/horopter/internal/ingress"
+	"github.com/yo61/horopter/internal/logging"
 	"github.com/yo61/horopter/internal/store/postgres"
 	"github.com/yo61/horopter/internal/telemetry"
 )
@@ -27,14 +28,13 @@ func main() {
 }
 
 func run() error {
+	if err := logging.Setup(); err != nil {
+		return err
+	}
+
 	addr := flag.String("addr", envOr("HOROPTER_ADDR", "0.0.0.0:8080"), "listen address")
 	dsn := flag.String("dsn", os.Getenv("DATABASE_URL"), "PostgreSQL connection string")
 	flag.Parse()
-
-	if *dsn == "" {
-		return errors.New("DATABASE_URL is required, e.g. " +
-			"postgres://user:pass@host:5432/horopter")
-	}
 
 	maxAttributeBytes, err := ingress.MaxAttributeBytesFromEnv()
 	if err != nil {

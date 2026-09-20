@@ -8,12 +8,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 
+	"github.com/yo61/horopter/internal/logging"
 	"github.com/yo61/horopter/internal/store/postgres"
 	"github.com/yo61/horopter/internal/telemetry"
 )
@@ -36,9 +36,8 @@ func main() {
 }
 
 func run(ctx context.Context, dsn, rebuildTenant string) error {
-	if dsn == "" {
-		return errors.New("DATABASE_URL is required, e.g. " +
-			"postgres://user:pass@host:5432/horopter")
+	if err := logging.Setup(); err != nil {
+		return err
 	}
 
 	tel, err := telemetry.Setup(ctx, "horopter-migrate")
