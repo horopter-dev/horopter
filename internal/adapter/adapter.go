@@ -5,7 +5,7 @@ package adapter
 import (
 	"time"
 
-	"github.com/yo61/horopter/internal/core"
+	"github.com/horopter-dev/horopter/internal/core"
 )
 
 // Renderer converts neutral changes into one vendor's payload.

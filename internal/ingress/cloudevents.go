@@ -10,7 +10,7 @@ import (
 	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2/event"
-	"github.com/yo61/horopter/internal/core"
+	"github.com/horopter-dev/horopter/internal/core"
 )
 
 // postCloudEvent ingests a CloudEvents-structured JSON body.

@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/horopter-dev/horopter/internal/core"
+	"github.com/horopter-dev/horopter/internal/store/postgres"
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/yo61/horopter/internal/core"
-	"github.com/yo61/horopter/internal/store/postgres"
 )
 
 var sizedBase = time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)

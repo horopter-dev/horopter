@@ -6,7 +6,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 
-	"github.com/yo61/horopter/internal/core"
+	"github.com/horopter-dev/horopter/internal/core"
 )
 
 // The dedupe paths an append can take. Distinguishing them matters because the second

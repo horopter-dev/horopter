@@ -2,7 +2,7 @@
 # horopter-egress has no authentication in v0.1, so anyone who reaches port 8081 can read
 # every tenant's full change and event log. Postgres is not published on the host here, but
 # it still uses the shared dev credentials below, and neither daemon's metrics port (9464) is
-# published either. See https://github.com/yo61/horopter#security
+# published either. See https://github.com/horopter-dev/horopter#security
 services:
   db:
     image: postgres:18
@@ -22,7 +22,7 @@ services:
       retries: 15
 
   migrate:
-    image: ghcr.io/yo61/horopter-migrate:${HOROPTER_IMAGE_TAG}
+    image: ghcr.io/horopter-dev/horopter-migrate:${HOROPTER_IMAGE_TAG}
     environment:
       DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
     depends_on:
@@ -30,7 +30,7 @@ services:
         condition: service_healthy
 
   ingress:
-    image: ghcr.io/yo61/horopter-ingress:${HOROPTER_IMAGE_TAG}
+    image: ghcr.io/horopter-dev/horopter-ingress:${HOROPTER_IMAGE_TAG}
     environment:
       DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
       HOROPTER_INGRESS_TOKEN: local-dev-token
@@ -42,7 +42,7 @@ services:
         condition: service_completed_successfully
 
   egress:
-    image: ghcr.io/yo61/horopter-egress:${HOROPTER_IMAGE_TAG}
+    image: ghcr.io/horopter-dev/horopter-egress:${HOROPTER_IMAGE_TAG}
     environment:
       DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
       HOROPTER_ADDR: 0.0.0.0:8081

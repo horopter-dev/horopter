@@ -22,8 +22,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yo61/horopter/internal/core"
-	"github.com/yo61/horopter/internal/store/postgres"
+	"github.com/horopter-dev/horopter/internal/core"
+	"github.com/horopter-dev/horopter/internal/store/postgres"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"

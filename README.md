@@ -20,22 +20,24 @@ Horopter is published as three container images and a compose file that runs the
 carries a `docker-compose.yml` release asset with that release's image tags already rendered
 in:
 
-    curl -O https://github.com/yo61/horopter/releases/download/v0.1.0-dev.1/docker-compose.yml
+    curl -O https://github.com/horopter-dev/horopter/releases/download/v0.1.0-dev.1/docker-compose.yml
     docker compose up -d
 
-**No release has been cut yet**: there is nothing at that URL, and nothing on
-`ghcr.io/yo61/horopter-*` for `docker compose up -d`, `docker compose pull` or `task up`
-(below) to pull. Once a release exists, **packages stay private while the repository is**, so
-pulling needs a `docker login` first (below) from someone who can read the repository. Both
-become public at v0.1.0.
+**`task up` does not work yet.** v0.1.0-dev.1 exists and the URL above serves its compose
+file, but that release's images were pushed to `ghcr.io/yo61/horopter-*` before the
+repository moved to the `horopter-dev` organisation, and GitHub does not move GHCR packages
+with a repository. Nothing resolves under `ghcr.io/horopter-dev/horopter-*` until the next
+tag is cut, which republishes there. **Packages stay private while the repository is**, so
+pulling then needs a `docker login` first (below) from someone who can read the repository.
+Both become public at v0.1.0.
 
 To work on Horopter today, clone it and run the development stack:
 
     task up:local    # builds images from the working tree with goreleaser release --snapshot
     task seed        # fills the running stack with changes in all three shapes
 
-`task up:local` is the only route that works before a release exists. Once one does, `task up`
-pulls the tag `docker-compose.yml` names instead of building locally:
+`task up:local` is the only route that works today. Once a tag is cut under `horopter-dev`,
+`task up` pulls the tag `docker-compose.yml` names instead of building locally:
 
     gh auth refresh -s read:packages
     gh auth token | docker login ghcr.io -u "$(gh api user --jq .login)" --password-stdin
@@ -51,10 +53,10 @@ Then post an event and read it back:
            "occurred_at":"2026-09-14T10:00:00Z","correlation_ref":"dep-1"}'
     curl "localhost:8081/adapters/grafana/annotations?from=1789376400000&to=1789383600000"
 
-The compose file pulls `ghcr.io/yo61/horopter-{ingress,egress,migrate}` at the tag it names,
-then runs `horopter-migrate` — the only binary permitted to apply schema DDL — to completion
-before starting `horopter-ingress` on port 8080 and `horopter-egress` on port 8081. `task down`
-stops the stack and removes the database volume.
+The compose file pulls `ghcr.io/horopter-dev/horopter-{ingress,egress,migrate}` at the tag it
+names, then runs `horopter-migrate` — the only binary permitted to apply schema DDL — to
+completion before starting `horopter-ingress` on port 8080 and `horopter-egress` on port 8081.
+`task down` stops the stack and removes the database volume.
 
 Each service is configured with environment variables:
 

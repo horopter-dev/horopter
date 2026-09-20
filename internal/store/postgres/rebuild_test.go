@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/horopter-dev/horopter/internal/core"
+	"github.com/horopter-dev/horopter/internal/store/postgres"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/yo61/horopter/internal/core"
-	"github.com/yo61/horopter/internal/store/postgres"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"

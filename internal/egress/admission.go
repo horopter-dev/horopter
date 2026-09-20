@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/yo61/horopter/internal/admission"
-	"github.com/yo61/horopter/internal/store/postgres"
+	"github.com/horopter-dev/horopter/internal/admission"
+	"github.com/horopter-dev/horopter/internal/store/postgres"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"

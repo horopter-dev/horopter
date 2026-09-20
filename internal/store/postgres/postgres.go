@@ -17,11 +17,11 @@ import (
 	"time"
 
 	"github.com/exaring/otelpgx"
+	"github.com/horopter-dev/horopter/internal/core"
+	"github.com/horopter-dev/horopter/internal/telemetry"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/yo61/horopter/internal/core"
-	"github.com/yo61/horopter/internal/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
