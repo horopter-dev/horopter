@@ -58,6 +58,9 @@ stops the stack and removes the database volume.
 
 Each service is configured with environment variables:
 
+- `HOROPTER_IMAGE_TAG` — the published tag the repository's `docker-compose.yml` runs;
+  defaults to the version committed in that file. `task up:local` ignores it, since it builds
+  images from the working tree instead of pulling one.
 - `DATABASE_URL` — PostgreSQL connection string, required by all three binaries.
 - `HOROPTER_INGRESS_TOKEN` — bearer token `horopter-ingress` requires on writes; it
   refuses to start without one.
@@ -245,9 +248,11 @@ The host and port defaults are the OpenTelemetry specification's, which has two 
 - **Inside a container, `localhost` is reachable only from the same network namespace.** A
   collector sidecar in the same pod can scrape it as shipped; anything scraping over the
   network needs `OTEL_EXPORTER_PROMETHEUS_HOST=0.0.0.0`. The images have no shell or `curl`,
-  so `docker exec` cannot reach it either. `docker-compose.yml` sets the host and publishes
-  the ports on the host's loopback: `curl localhost:9464/metrics` for ingress,
-  `curl localhost:9465/metrics` for egress.
+  so `docker exec` cannot reach it either. This applies to the **repository's**
+  `docker-compose.yml` (`task up`/`task up:local`): it sets the host and publishes the ports
+  on the host's loopback — `curl localhost:9464/metrics` for ingress, `curl
+  localhost:9465/metrics` for egress. The released standalone `docker-compose.yml`
+  (`deploy/docker-compose.yml`) publishes neither the Postgres port nor these metrics ports.
 - **Both daemons default to port 9464.** In separate containers or pods that does not matter.
   Running both binaries on one host, or in one pod, needs a different port on one of them.
 

@@ -1,7 +1,8 @@
 # Horopter, a trial stack. Everything runs on one machine and nothing here is a deployment:
-# Postgres is published on the host with the credentials below, and horopter-egress has no
-# authentication in v0.1, so anyone who reaches port 8081 can read every tenant's full change
-# and event log. See the Security section of the README.
+# horopter-egress has no authentication in v0.1, so anyone who reaches port 8081 can read
+# every tenant's full change and event log. Postgres is not published on the host here, but
+# it still uses the shared dev credentials below, and neither daemon's metrics port (9464) is
+# published either. See https://github.com/yo61/horopter#security
 services:
   db:
     image: postgres:18
