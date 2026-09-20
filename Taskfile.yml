@@ -26,6 +26,11 @@ tasks:
     cmds:
       - docker compose pull
       - docker compose up -d
+  up:local:
+    cmds:
+      - goreleaser release --snapshot --clean
+      - ./hack/snapshot-override.sh
+      - docker compose -f docker-compose.yml -f docker-compose.snapshot.yml up -d
   stop:
     cmds:
       - docker compose stop
