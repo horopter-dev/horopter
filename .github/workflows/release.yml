@@ -7,16 +7,22 @@ on:
 permissions:
   contents: read
 
+# A tag pushed again (a retry, or a corrected tag) supersedes the run already building and
+# publishing images for the tag it replaces, rather than racing it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   release:
     name: Build images and cut the release
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # A job-level block replaces the top-level one rather than adding to it, so contents
-    # is restated here. contents: write creates the release; packages: write pushes to GHCR.
+    # is restated here.
     permissions:
-      contents: write
-      packages: write
+      contents: write # creates the GitHub release and uploads its assets
+      packages: write # pushes the built images to GHCR
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
