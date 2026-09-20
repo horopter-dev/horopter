@@ -40,6 +40,9 @@ tasks:
   logs:
     cmds:
       - docker compose logs -f ingress egress
+  seed:
+    cmds:
+      - ./hack/seed.sh
   fmt:
     cmds:
       - gofmt -l .
