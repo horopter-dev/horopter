@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/horopter-dev/horopter/internal/admission"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/yo61/horopter/internal/admission"
 )
 
 // within returns a context that ends after d, for asserting that a wait gives up.

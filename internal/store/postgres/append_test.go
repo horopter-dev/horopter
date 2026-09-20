@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/horopter-dev/horopter/internal/core"
+	"github.com/horopter-dev/horopter/internal/store/postgres"
 	"github.com/oklog/ulid/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/yo61/horopter/internal/core"
-	"github.com/yo61/horopter/internal/store/postgres"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"

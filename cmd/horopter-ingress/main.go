@@ -14,10 +14,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yo61/horopter/internal/ingress"
-	"github.com/yo61/horopter/internal/logging"
-	"github.com/yo61/horopter/internal/store/postgres"
-	"github.com/yo61/horopter/internal/telemetry"
+	"github.com/horopter-dev/horopter/internal/ingress"
+	"github.com/horopter-dev/horopter/internal/logging"
+	"github.com/horopter-dev/horopter/internal/store/postgres"
+	"github.com/horopter-dev/horopter/internal/telemetry"
 )
 
 func main() {

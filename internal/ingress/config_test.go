@@ -4,9 +4,9 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/horopter-dev/horopter/internal/ingress"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/yo61/horopter/internal/ingress"
 )
 
 const maxAttributeBytesVar = "HOROPTER_INGRESS_MAX_EVENT_ATTRIBUTE_BYTES"

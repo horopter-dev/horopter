@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/horopter-dev/horopter/internal/egress"
+	"github.com/horopter-dev/horopter/internal/store/postgres"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/yo61/horopter/internal/egress"
-	"github.com/yo61/horopter/internal/store/postgres"
 )
 
 // memoryFixture is three changes in changesURL's window, each seeded by one event, and estimates

@@ -39,7 +39,7 @@ kos:
     build: ingress
     base_image: gcr.io/distroless/static-debian12:nonroot
     user: "65532:65532"
-    repositories: [ghcr.io/yo61/horopter-ingress]
+    repositories: [ghcr.io/horopter-dev/horopter-ingress]
     platforms: [linux/amd64, linux/arm64]
     tags: ["{{ .Tag }}"]
     bare: true
@@ -52,7 +52,7 @@ kos:
     build: egress
     base_image: gcr.io/distroless/static-debian12:nonroot
     user: "65532:65532"
-    repositories: [ghcr.io/yo61/horopter-egress]
+    repositories: [ghcr.io/horopter-dev/horopter-egress]
     platforms: [linux/amd64, linux/arm64]
     tags: ["{{ .Tag }}"]
     bare: true
@@ -65,7 +65,7 @@ kos:
     build: migrate
     base_image: gcr.io/distroless/static-debian12:nonroot
     user: "65532:65532"
-    repositories: [ghcr.io/yo61/horopter-migrate]
+    repositories: [ghcr.io/horopter-dev/horopter-migrate]
     platforms: [linux/amd64, linux/arm64]
     tags: ["{{ .Tag }}"]
     bare: true

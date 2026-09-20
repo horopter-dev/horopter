@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/horopter-dev/horopter/internal/egress"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/yo61/horopter/internal/egress"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -77,7 +77,7 @@ type instrumentShape struct {
 // times.
 func wantShape(unit, kind string) instrumentShape {
 	return instrumentShape{
-		scope: "github.com/yo61/horopter/internal/egress", unit: unit, kind: kind,
+		scope: "github.com/horopter-dev/horopter/internal/egress", unit: unit, kind: kind,
 	}
 }
 
