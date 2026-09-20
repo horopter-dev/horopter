@@ -161,4 +161,5 @@ jobs:
         run: |
           set -euo pipefail
           shellcheck hack/*.sh
+          go install mvdan.cc/sh/v3/cmd/shfmt@v3.14.1
           shfmt -i 2 -bn -ci -sr -d hack/*.sh
