@@ -24,7 +24,11 @@ tasks:
       - go build -o dist/horopter-migrate ./cmd/horopter-migrate
   up:
     cmds:
-      - docker compose up --build -d
+      - docker compose pull
+      - docker compose up -d
+  stop:
+    cmds:
+      - docker compose stop
   down:
     cmds:
       - docker compose down -v
