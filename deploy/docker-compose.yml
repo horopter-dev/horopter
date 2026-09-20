@@ -1,0 +1,56 @@
+# Horopter, a trial stack. Everything runs on one machine and nothing here is a deployment:
+# horopter-egress has no authentication in v0.1, so anyone who reaches port 8081 can read
+# every tenant's full change and event log. Postgres is not published on the host here, but
+# it still uses the shared dev credentials below, and neither daemon's metrics port (9464) is
+# published either. See https://github.com/yo61/horopter#security
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: horopter
+      POSTGRES_PASSWORD: horopter
+      POSTGRES_DB: horopter
+    volumes:
+      # postgres:18 moved PGDATA to /var/lib/postgresql/18/docker and declares its VOLUME at
+      # the parent, so the older /var/lib/postgresql/data path every pre-18 example uses would
+      # mount an empty directory Postgres ignores.
+      - horopter-db-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U horopter"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  migrate:
+    image: ghcr.io/yo61/horopter-migrate:${HOROPTER_IMAGE_TAG}
+    environment:
+      DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+
+  ingress:
+    image: ghcr.io/yo61/horopter-ingress:${HOROPTER_IMAGE_TAG}
+    environment:
+      DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
+      HOROPTER_INGRESS_TOKEN: local-dev-token
+      HOROPTER_ADDR: 0.0.0.0:8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  egress:
+    image: ghcr.io/yo61/horopter-egress:${HOROPTER_IMAGE_TAG}
+    environment:
+      DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
+      HOROPTER_ADDR: 0.0.0.0:8081
+    ports:
+      - "8081:8081"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  horopter-db-data:

@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/yo61/horopter/internal/logging"
 	"github.com/yo61/horopter/internal/store/postgres"
 	"github.com/yo61/horopter/internal/telemetry"
 )
@@ -35,30 +36,7 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, dsn, rebuildTenant string) error {
-	if dsn == "" {
-		return errors.New("DATABASE_URL is required, e.g. " +
-			"postgres://user:pass@host:5432/horopter")
-	}
-
-	tel, err := telemetry.Setup(ctx, "horopter-migrate")
-	if err != nil {
-		return err
-	}
-	// Flush builds a fresh context because a daemon's signal handler has already
-	// cancelled the one it was serving on. horopter-migrate has no signal handler —
-	// main passes context.Background() straight through — so there is no cancelled
-	// context to avoid here; what the fresh context and its timeout still buy is a
-	// bound on a collector that has become unreachable. horopter-migrate serves no
-	// /metrics: it exits before anything could scrape it.
-	defer tel.Flush()
-
-	store, err := postgres.Open(ctx, dsn) // Open applies migrations under an advisory lock
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-
+func verifyAndRebuild(ctx context.Context, store *postgres.Store, rebuildTenant string) error {
 	v, err := store.SchemaVersion(ctx)
 	if err != nil {
 		return err
@@ -83,4 +61,35 @@ func run(ctx context.Context, dsn, rebuildTenant string) error {
 	}
 	slog.Info("projection rebuilt from the event log", "tenant", rebuildTenant)
 	return nil
+}
+
+func run(ctx context.Context, dsn, rebuildTenant string) error {
+	if err := logging.Setup(); err != nil {
+		return err
+	}
+
+	if dsn == "" {
+		return errors.New("DATABASE_URL is required, e.g. " +
+			"postgres://user:pass@host:5432/horopter")
+	}
+
+	tel, err := telemetry.Setup(ctx, "horopter-migrate")
+	if err != nil {
+		return err
+	}
+	// Flush builds a fresh context because a daemon's signal handler has already
+	// cancelled the one it was serving on. horopter-migrate has no signal handler —
+	// main passes context.Background() straight through — so there is no cancelled
+	// context to avoid here; what the fresh context and its timeout still buy is a
+	// bound on a collector that has become unreachable. horopter-migrate serves no
+	// /metrics: it exits before anything could scrape it.
+	defer tel.Flush()
+
+	store, err := postgres.Open(ctx, dsn) // Open applies migrations under an advisory lock
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	return verifyAndRebuild(ctx, store, rebuildTenant)
 }

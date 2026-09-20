@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+# A tag pushed again (a retry, or a corrected tag) supersedes the run already building and
+# publishing images for the tag it replaces, rather than racing it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    name: Build images and cut the release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # A job-level block replaces the top-level one rather than adding to it, so contents
+    # is restated here.
+    permissions:
+      contents: write # creates the GitHub release and uploads its assets
+      packages: write # pushes the built images to GHCR
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # GoReleaser reads the history and the tags to build a changelog and to know
+          # which version it is releasing; a shallow clone has neither.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+          # This job publishes images and a release; an attacker able to poison the module
+          # or build cache could taint what gets published. The cache buys little here — the
+          # job runs once per tag — so it stays off rather than risk that.
+          cache: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ko reads Docker's keychain for the credentials the step above wrote. It needs no
+      # buildx builder and no QEMU: each platform is a Go cross-compile, and the index is
+      # pushed through the registry API.
+      - name: Release
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94  # v7.2.3
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,94 @@
+version: 2
+project_name: horopter
+
+before:
+  hooks:
+    - go mod tidy -diff
+    - ./hack/render-compose.sh {{ .Tag }}
+
+builds:
+  - id: ingress
+    main: ./cmd/horopter-ingress
+    binary: horopter-ingress
+    env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+  - id: egress
+    main: ./cmd/horopter-egress
+    binary: horopter-egress
+    env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+  - id: migrate
+    main: ./cmd/horopter-migrate
+    binary: horopter-migrate
+    env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+
+# ko compiles each platform and pushes an OCI index straight to the registry: no Dockerfile,
+# no buildx builder, no QEMU, no daemon. Three settings are explicit because ko's defaults are
+# wrong here: platforms (it defaults to linux/amd64 alone and says nothing when it does), user
+# (the docs do not say whether the base image's USER is inherited), and bare with
+# preserve_import_paths, without which ko appends the Go import path to the repository.
+kos:
+  - id: ingress
+    build: ingress
+    base_image: gcr.io/distroless/static-debian12:nonroot
+    user: "65532:65532"
+    repositories: [ghcr.io/yo61/horopter-ingress]
+    platforms: [linux/amd64, linux/arm64]
+    tags: ["{{ .Tag }}"]
+    bare: true
+    preserve_import_paths: false
+    sbom: spdx
+    labels:
+      org.opencontainers.image.source: "{{ .GitURL }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+  - id: egress
+    build: egress
+    base_image: gcr.io/distroless/static-debian12:nonroot
+    user: "65532:65532"
+    repositories: [ghcr.io/yo61/horopter-egress]
+    platforms: [linux/amd64, linux/arm64]
+    tags: ["{{ .Tag }}"]
+    bare: true
+    preserve_import_paths: false
+    sbom: spdx
+    labels:
+      org.opencontainers.image.source: "{{ .GitURL }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+  - id: migrate
+    build: migrate
+    base_image: gcr.io/distroless/static-debian12:nonroot
+    user: "65532:65532"
+    repositories: [ghcr.io/yo61/horopter-migrate]
+    platforms: [linux/amd64, linux/arm64]
+    tags: ["{{ .Tag }}"]
+    bare: true
+    preserve_import_paths: false
+    sbom: spdx
+    labels:
+      org.opencontainers.image.source: "{{ .GitURL }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+
+archives:
+  - id: binaries
+    ids: [ingress, egress, migrate]
+    formats: [tar.gz]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+
+release:
+  # Any tag containing a hyphen (v0.1.0-dev.1, say) is a semver prerelease, so it publishes
+  # as a GitHub prerelease and never becomes "Latest" — the whole point of the dev-tag scheme.
+  prerelease: auto
+  extra_files:
+    - glob: .render/docker-compose.yml

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/yo61/horopter/internal/ingress"
+	"github.com/yo61/horopter/internal/logging"
 	"github.com/yo61/horopter/internal/store/postgres"
 	"github.com/yo61/horopter/internal/telemetry"
 )
@@ -26,17 +27,40 @@ func main() {
 	}
 }
 
-func run() error {
+type ingressConfig struct {
+	addr              string
+	dsn               string
+	maxAttributeBytes int
+}
+
+func setupIngressConfig() (ingressConfig, error) {
 	addr := flag.String("addr", envOr("HOROPTER_ADDR", "0.0.0.0:8080"), "listen address")
 	dsn := flag.String("dsn", os.Getenv("DATABASE_URL"), "PostgreSQL connection string")
 	flag.Parse()
 
 	if *dsn == "" {
-		return errors.New("DATABASE_URL is required, e.g. " +
+		return ingressConfig{}, errors.New("DATABASE_URL is required, e.g. " +
 			"postgres://user:pass@host:5432/horopter")
 	}
 
 	maxAttributeBytes, err := ingress.MaxAttributeBytesFromEnv()
+	if err != nil {
+		return ingressConfig{}, err
+	}
+
+	return ingressConfig{
+		addr:              *addr,
+		dsn:               *dsn,
+		maxAttributeBytes: maxAttributeBytes,
+	}, nil
+}
+
+func run() error {
+	if err := logging.Setup(); err != nil {
+		return err
+	}
+
+	cfg, err := setupIngressConfig()
 	if err != nil {
 		return err
 	}
@@ -54,8 +78,8 @@ func run() error {
 		return err
 	}
 
-	store, err := postgres.OpenNoMigrate(ctx, *dsn,
-		postgres.WithMaxEventAttributeBytes(maxAttributeBytes))
+	store, err := postgres.OpenNoMigrate(ctx, cfg.dsn,
+		postgres.WithMaxEventAttributeBytes(cfg.maxAttributeBytes))
 	if err != nil {
 		return err
 	}
@@ -73,7 +97,7 @@ func run() error {
 	}
 
 	return serve(ctx, &http.Server{
-		Addr:    *addr,
+		Addr:    cfg.addr,
 		Handler: api.Routes(),
 		// ReadHeaderTimeout bounds a slowloris header dribble. ReadTimeout bounds the
 		// whole request including the body, so a client sending one byte a minute cannot

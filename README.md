@@ -16,22 +16,51 @@ v0.1 in development.
 
 ## Quick start
 
+Horopter is published as three container images and a compose file that runs them. A release
+carries a `docker-compose.yml` release asset with that release's image tags already rendered
+in:
+
+    curl -O https://github.com/yo61/horopter/releases/download/v0.1.0-dev.1/docker-compose.yml
+    docker compose up -d
+
+**No release has been cut yet**: there is nothing at that URL, and nothing on
+`ghcr.io/yo61/horopter-*` for `docker compose up -d`, `docker compose pull` or `task up`
+(below) to pull. Once a release exists, **packages stay private while the repository is**, so
+pulling needs a `docker login` first (below) from someone who can read the repository. Both
+become public at v0.1.0.
+
+To work on Horopter today, clone it and run the development stack:
+
+    task up:local    # builds images from the working tree with goreleaser release --snapshot
+    task seed        # fills the running stack with changes in all three shapes
+
+`task up:local` is the only route that works before a release exists. Once one does, `task up`
+pulls the tag `docker-compose.yml` names instead of building locally:
+
+    gh auth refresh -s read:packages
+    gh auth token | docker login ghcr.io -u "$(gh api user --jq .login)" --password-stdin
     task up
+
+`task stop` halts the stack; `task down` also **destroys the database volume**.
+
+Then post an event and read it back:
+
     curl -X POST localhost:8080/v1/events \
       -H 'Authorization: Bearer local-dev-token' -H 'Content-Type: application/json' \
       -d '{"source":"ci","type":"deployment.started","subject":"acme/prod",
            "occurred_at":"2026-09-14T10:00:00Z","correlation_ref":"dep-1"}'
     curl "localhost:8081/adapters/grafana/annotations?from=1789376400000&to=1789383600000"
-    task down
 
-`task up` builds and starts the full stack with `docker compose`: Postgres, then
-`horopter-migrate` (which must run to completion before the daemons start — it is the
-only binary permitted to apply schema DDL), then `horopter-ingress` on port 8080 and
-`horopter-egress` on port 8081. `task down` stops the stack and removes the database
-volume.
+The compose file pulls `ghcr.io/yo61/horopter-{ingress,egress,migrate}` at the tag it names,
+then runs `horopter-migrate` — the only binary permitted to apply schema DDL — to completion
+before starting `horopter-ingress` on port 8080 and `horopter-egress` on port 8081. `task down`
+stops the stack and removes the database volume.
 
 Each service is configured with environment variables:
 
+- `HOROPTER_IMAGE_TAG` — the published tag the repository's `docker-compose.yml` runs;
+  defaults to the version committed in that file. `task up:local` ignores it, since it builds
+  images from the working tree instead of pulling one.
 - `DATABASE_URL` — PostgreSQL connection string, required by all three binaries.
 - `HOROPTER_INGRESS_TOKEN` — bearer token `horopter-ingress` requires on writes; it
   refuses to start without one.
@@ -46,6 +75,8 @@ Each service is configured with environment variables:
   is shed: default `500ms`, above 0 and at most `10s`.
 - `HOROPTER_EGRESS_DB_WAIT_THRESHOLD` — the database connection wait above which a read
   counts as overloaded: default `100ms`, above 0. See Read admission below.
+- `HOROPTER_LOG_LEVEL` — the minimum level to log: `debug`, `info`, `warn` or `error`,
+  case-insensitive. Default `info`. See Logs below.
 
 A value that does not parse, or is out of range, stops the daemon at startup with an error
 naming the variable and the value.
@@ -127,6 +158,24 @@ metric is reported against:
   configures, and no test in this project exercises it — a future SDK upgrade could change or
   drop it with nothing here to notice.
 
+### Logs
+
+All three binaries log JSON to stderr, one object per line, with the fields each call site
+supplies — `route`, `tenant`, `waited_ms` and the rest. Pipe them through `jq` when reading
+them by hand: `docker compose logs --no-log-prefix -f egress | jq -R 'fromjson? // .'`
+(`--no-log-prefix` matters: without it, compose prepends the service name to each line, and
+that no longer parses as JSON).
+
+- `HOROPTER_LOG_LEVEL` — the minimum level to log: `debug`, `info`, `warn` or `error`,
+  case-insensitive. Default `info`. A value that does not parse stops the daemon at startup.
+
+A line logged while a span is active also carries `trace_id` and `span_id`, which is what links
+it to a trace in a backend such as Tempo. Every read-admission line has them **when tracing is
+on** — `read shed`, `read too large` and the halved-limit warning — as do the ingress request
+lines. With tracing at its default off, none of them do: there is no span to attach to. Startup
+and telemetry-failure lines never carry them, tracing on or off — they run before any span
+exists.
+
 ### Tracing
 
 Tracing is **off by default** in all three binaries.
@@ -199,9 +248,11 @@ The host and port defaults are the OpenTelemetry specification's, which has two 
 - **Inside a container, `localhost` is reachable only from the same network namespace.** A
   collector sidecar in the same pod can scrape it as shipped; anything scraping over the
   network needs `OTEL_EXPORTER_PROMETHEUS_HOST=0.0.0.0`. The images have no shell or `curl`,
-  so `docker exec` cannot reach it either. `docker-compose.yml` sets the host and publishes
-  the ports on the host's loopback: `curl localhost:9464/metrics` for ingress,
-  `curl localhost:9465/metrics` for egress.
+  so `docker exec` cannot reach it either. This applies to the **repository's**
+  `docker-compose.yml` (`task up`/`task up:local`): it sets the host and publishes the ports
+  on the host's loopback — `curl localhost:9464/metrics` for ingress, `curl
+  localhost:9465/metrics` for egress. The released standalone `docker-compose.yml`
+  (`deploy/docker-compose.yml`) publishes neither the Postgres port nor these metrics ports.
 - **Both daemons default to port 9464.** In separate containers or pods that does not matter.
   Running both binaries on one host, or in one pod, needs a different port on one of them.
 
@@ -424,6 +475,25 @@ ordinary setup cost reads as congestion and halves the concurrency limit for no 
 
 Admission control protects the database and egress's memory. It is not protection against a
 flood of requests; put that in front of Horopter.
+
+### Seeing it work
+
+`hack/load.sh [concurrency] [iterations]` (also `task load -- [concurrency] [iterations]`)
+drives concurrent reads at every rendering and prints the status codes it saw. Against a
+healthy local database it will not shed: shedding needs connection waits above
+`HOROPTER_EGRESS_DB_WAIT_THRESHOLD`, and an idle database has none. Two settings make the
+interesting paths reachable:
+
+- `pool_max_conns=1` appended to `DATABASE_URL` makes reads queue for the one connection.
+  Measured: `hack/load.sh 20 50` and `hack/load.sh 60 100` shed nothing — a seeded query
+  takes a few milliseconds, so the queue drains inside `HOROPTER_EGRESS_ADMISSION_WAIT`
+  (`500ms` by default). `hack/load.sh 150 200` did shed, all at the concurrency gate, with
+  `"limit":4` in the `read shed` line — the ceiling for a pool of one connection.
+- `HOROPTER_EGRESS_READ_MEMORY_BYTES=1048576`, the minimum, makes ordinary seeded reads
+  larger than the pool, so they are cut — `200` with `X-Horopter-Truncated: true`, and **no
+  log line**: only the `422` and `503` paths log a `WARN` (see Logs above). A `422` needs a
+  single row whose text, times the 46x admission overhead, exceeds the pool by itself —
+  roughly 23 KB of row text, well past anything `hack/seed.sh` writes.
 
 ## CloudEvents: reserved data keys
 

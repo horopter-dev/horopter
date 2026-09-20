@@ -24,13 +24,28 @@ tasks:
       - go build -o dist/horopter-migrate ./cmd/horopter-migrate
   up:
     cmds:
-      - docker compose up --build -d
+      - docker compose pull
+      - docker compose up -d
+  up:local:
+    cmds:
+      - goreleaser release --snapshot --clean
+      - ./hack/snapshot-override.sh
+      - docker compose -f docker-compose.yml -f docker-compose.snapshot.yml up -d
+  stop:
+    cmds:
+      - docker compose stop
   down:
     cmds:
       - docker compose down -v
   logs:
     cmds:
       - docker compose logs -f ingress egress
+  seed:
+    cmds:
+      - ./hack/seed.sh
+  load:
+    cmds:
+      - ./hack/load.sh {{.CLI_ARGS}}
   fmt:
     cmds:
       - gofmt -l .
