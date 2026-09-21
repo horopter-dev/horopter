@@ -1,3 +1,9 @@
+# conventional-pre-commit runs at the commit-msg stage, and `prek install` wires only the
+# pre-commit shim unless told otherwise. Without this key a fresh clone gets no commit-message
+# linting at all, and CI does not check messages either -- so a malformed type, which is what
+# picks the next version number, would have nothing to catch it.
+default_install_hook_types: [pre-commit, commit-msg]
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
