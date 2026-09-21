@@ -24,7 +24,8 @@ in:
     docker compose up -d
 
 **Packages stay private while the repository is**, so pulling needs a `docker login` first
-(below) from someone who can read the repository. Both become public at v0.1.0.
+(below) from someone who can read the repository. Both become public when the project is
+ready to be read by strangers, which no version number triggers.
 
 To work on Horopter today, clone it and run the development stack:
 
