@@ -1,8 +1,10 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -231,6 +233,67 @@ func TestFlushStopsTheMetricsListener(t *testing.T) {
 		_ = conn.Close()
 	}
 	assert.Error(t, err, "Flush must stop the metrics listener")
+}
+
+// syncBuffer collects log output written from another goroutine. serveMetrics logs from the
+// goroutine ServeMetrics spawns, so a plain bytes.Buffer read by the test would be a data
+// race rather than an assertion.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestFlushShutsDownQuietly pins that an ordinary shutdown logs nothing at ERROR.
+//
+// serveMetrics reports any Serve error that is not http.ErrServerClosed, so the order in
+// which Flush closes the server and the listener decides whether every shutdown produces an
+// error line. Closing the listener first wakes Accept with a plain "use of closed network
+// connection" while the server still considers itself running; closing the server first
+// makes Serve report ErrServerClosed instead. Nothing else in this package tells the two
+// apart, which is how the wrong order reached a commit.
+func TestFlushShutsDownQuietly(t *testing.T) {
+	setTelemetryEnv(t)
+	restoreGlobalProviders(t)
+
+	logged := &syncBuffer{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logged, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	port := freePort(t)
+	t.Setenv("OTEL_EXPORTER_PROMETHEUS_HOST", "127.0.0.1")
+	t.Setenv("OTEL_EXPORTER_PROMETHEUS_PORT", port)
+	tel, err := Setup(context.Background(), "horopter-test")
+	require.NoError(t, err)
+	t.Cleanup(tel.Flush)
+	require.NoError(t, tel.ServeMetrics())
+
+	// A served scrape proves the goroutine reached Serve and registered the listener with
+	// the server, which is where a daemon sits for its whole life before Flush arrives.
+	// The wrong close order only produces its error from that state.
+	status, _ := fetch(t, http.MethodGet, "http://127.0.0.1:"+port+"/metrics")
+	require.Equal(t, http.StatusOK, status)
+
+	tel.Flush()
+
+	// Serve returns on its own goroutine, so an error -- if there is going to be one -- is
+	// logged after Flush has returned. Never polls the window instead of reading once.
+	assert.Never(t, func() bool {
+		return strings.Contains(logged.String(), "level=ERROR")
+	}, 250*time.Millisecond, 10*time.Millisecond,
+		"an ordinary shutdown must not log an error")
 }
 
 // TestFlushDoesNotWaitForAnIdleConnection pins Close over Shutdown for the metrics server.
