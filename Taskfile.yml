@@ -1,12 +1,16 @@
 version: '3'
 tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
   db:up:
+    desc: Start the Postgres container
     cmds:
       - docker compose up -d db
-  db:down:
-    cmds:
-      - docker compose down -v
   test:
+    desc: Run the Go tests against the local database
     preconditions:
       - sh: 'docker compose exec -T db pg_isready -U horopter'
         msg: 'the database is not reachable; start it with `task db:up` and retry'
@@ -15,42 +19,57 @@ tasks:
     cmds:
       - go test -race -count=1 {{.CLI_ARGS | default "./..."}}
   lint:
+    desc: Run golangci-lint
     cmds:
       - golangci-lint run ./...
   build:
+    desc: Build the ingress, egress and migrate binaries into dist/
     cmds:
       - go build -o dist/horopter-ingress ./cmd/horopter-ingress
       - go build -o dist/horopter-egress ./cmd/horopter-egress
       - go build -o dist/horopter-migrate ./cmd/horopter-migrate
   up:
+    desc: Pull the pinned images and start the stack
     cmds:
       - docker compose pull
       - docker compose up -d
   up:local:
+    desc: Build images from the working tree and start the stack
     cmds:
       - goreleaser release --snapshot --clean
       - ./hack/snapshot-override.sh
       - docker compose -f docker-compose.yml -f docker-compose.snapshot.yml up -d
   stop:
+    desc: Halt the stack, keeping containers and data
     cmds:
       - docker compose stop
   down:
+    desc: Stop the stack and remove containers, keeping the database
+    cmds:
+      - docker compose down
+  down:wipe:
+    desc: Stop the stack and destroy the database volume
     cmds:
       - docker compose down -v
   logs:
+    desc: Follow the ingress and egress logs
     cmds:
       - docker compose logs -f ingress egress
   seed:
+    desc: Fill the running stack with changes in all three shapes
     cmds:
       - ./hack/seed.sh
   load:
+    desc: Drive concurrent reads at the egress API (task load -- [concurrency] [iterations])
     cmds:
       - ./hack/load.sh {{.CLI_ARGS}}
   fmt:
+    desc: Check formatting with gofmt
     cmds:
       - gofmt -l .
       - test -z "$(gofmt -l .)"
   check:
+    desc: Run fmt, lint and test
     cmds:
       - task: fmt
       - task: lint
