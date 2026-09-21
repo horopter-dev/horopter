@@ -140,6 +140,7 @@ func (t *Telemetry) ServeMetrics() error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+	t.metricsListener = listener
 	slog.Info("serving metrics", "addr", listener.Addr().String())
 	go serveMetrics(t.metricsServer, listener)
 	return nil
