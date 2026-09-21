@@ -131,7 +131,8 @@ func TestMigrateDoesNotDowngradeARecordedSchemaVersion(t *testing.T) {
 	_, err = s.Pool().Exec(ctx, `UPDATE schema_version SET version = 9999`)
 	require.NoError(t, err)
 
-	require.NoError(t, postgres.Migrate(ctx, s.Pool()),
+	_, err = postgres.Migrate(ctx, s.Pool())
+	require.NoError(t, err,
 		"migrating a database ahead of this binary must not fail; it must record the truth")
 
 	v, err := s.SchemaVersion(ctx)

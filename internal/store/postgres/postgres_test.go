@@ -277,3 +277,44 @@ func TestStoreRecordsPoolStatisticsUnderAFixedPoolName(t *testing.T) {
 			"every non-pgxpool otelpgx metric must carry exactly these two attributes")
 	}
 }
+
+// TestMigrateReportsTheFilesItApplied covers the fact horopter-migrate needs to tell an
+// operator what it did. The ledger alone cannot answer it: after the run, a file applied
+// just now and a file applied a year ago are both simply present, so a binary that reads
+// the ledger afterwards cannot say which of the rows it was responsible for.
+//
+// The expectation is the ledger's own contents rather than a hardcoded list of filenames,
+// so adding a migration does not require editing this test to keep it passing — what is
+// asserted is the invariant (a fresh schema reports every file it ran) and not the number
+// of files that happen to exist today.
+func TestMigrateReportsTheFilesItApplied(t *testing.T) {
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, isolatedSchemaDSN(t, dsn(t)))
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	applied, err := postgres.Migrate(ctx, pool)
+	require.NoError(t, err)
+
+	rows, err := pool.Query(ctx, `SELECT filename FROM applied_migration ORDER BY filename`)
+	require.NoError(t, err)
+	defer rows.Close()
+	ledger := []string{}
+	for rows.Next() {
+		var name string
+		require.NoError(t, rows.Scan(&name))
+		ledger = append(ledger, name)
+	}
+	require.NoError(t, rows.Err())
+
+	require.NotEmpty(t, ledger, "the fixture is wrong if the schema migrated to nothing")
+	assert.Equal(t, ledger, applied,
+		"a fresh schema must report every migration it ran, in the order it ran them")
+
+	again, err := postgres.Migrate(ctx, pool)
+	require.NoError(t, err)
+	assert.Empty(t, again,
+		"a second run applies nothing, so it must report nothing; reporting the ledger "+
+			"again would tell an operator DDL ran when none did")
+}
