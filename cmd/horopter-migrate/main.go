@@ -14,9 +14,9 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/horopter-dev/horopter/internal/logging"
-	"github.com/horopter-dev/horopter/internal/store/postgres"
-	"github.com/horopter-dev/horopter/internal/telemetry"
+	"horopter.dev/horopter/internal/logging"
+	"horopter.dev/horopter/internal/store/postgres"
+	"horopter.dev/horopter/internal/telemetry"
 )
 
 // rebuildHelp is the flag's help text. It states the operational cost up front because

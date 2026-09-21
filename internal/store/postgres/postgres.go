@@ -17,8 +17,6 @@ import (
 	"time"
 
 	"github.com/exaring/otelpgx"
-	"github.com/horopter-dev/horopter/internal/core"
-	"github.com/horopter-dev/horopter/internal/telemetry"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -28,6 +26,8 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
+	"horopter.dev/horopter/internal/core"
+	"horopter.dev/horopter/internal/telemetry"
 )
 
 //go:embed migrations/*.sql

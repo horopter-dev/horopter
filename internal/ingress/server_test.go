@@ -20,14 +20,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/horopter-dev/horopter/internal/ingress"
-	"github.com/horopter-dev/horopter/internal/store/postgres"
-	"github.com/horopter-dev/horopter/internal/testdb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"horopter.dev/horopter/internal/ingress"
+	"horopter.dev/horopter/internal/store/postgres"
+	"horopter.dev/horopter/internal/testdb"
 )
 
 var fixed = time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)

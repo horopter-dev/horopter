@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/horopter-dev/horopter/internal/store/postgres"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -17,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"horopter.dev/horopter/internal/store/postgres"
 )
 
 func TestOpenAppliesMigrations(t *testing.T) {

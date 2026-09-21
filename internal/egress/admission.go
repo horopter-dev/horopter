@@ -8,11 +8,11 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/horopter-dev/horopter/internal/admission"
-	"github.com/horopter-dev/horopter/internal/store/postgres"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
+	"horopter.dev/horopter/internal/admission"
+	"horopter.dev/horopter/internal/store/postgres"
 )
 
 // The outcomes a gated read ends in, recorded on its server span as horopter.admission.outcome.

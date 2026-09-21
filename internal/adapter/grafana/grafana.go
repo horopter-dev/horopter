@@ -9,8 +9,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/horopter-dev/horopter/internal/adapter"
-	"github.com/horopter-dev/horopter/internal/core"
+	"horopter.dev/horopter/internal/adapter"
+	"horopter.dev/horopter/internal/core"
 )
 
 // Annotation is Grafana's JSON-datasource annotation shape.

@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/horopter-dev/horopter/internal/core"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"horopter.dev/horopter/internal/core"
 )
 
 func validEvent() core.Event {

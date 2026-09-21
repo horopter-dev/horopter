@@ -22,11 +22,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/horopter-dev/horopter/internal/core"
-	"github.com/horopter-dev/horopter/internal/store/postgres"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"horopter.dev/horopter/internal/core"
+	"horopter.dev/horopter/internal/store/postgres"
 )
 
 // DefaultTenant is used when a request omits one. v0.1 runs single-tenant in practice,
