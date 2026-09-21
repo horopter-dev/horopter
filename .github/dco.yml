@@ -1,0 +1,28 @@
+# Configuration for the DCO app (https://github.com/apps/dco), which checks that every
+# commit in a pull request carries a Signed-off-by line certifying the Developer
+# Certificate of Origin. CONTRIBUTING.md holds the certificate and how to sign off.
+#
+# The app excludes bots and merge commits itself. That exclusion is what keeps
+# Dependabot's pull requests green without an allowlist here: Dependabot authors as
+# app/dependabot and does not sign off.
+#
+# require.members is set explicitly rather than left to the default. The default is already
+# true -- index.js passes `require: { members: true }` to Probot's context.config -- but the
+# option reads either way at a glance, and a reviewer of this file read it as the opposite.
+# Stating it costs two lines and removes the question.
+#
+# Members are checked like everyone else. Exempting them would leave the gate doing nothing
+# until the first outside contribution arrives, and its first run would be on a stranger's
+# pull request, which is the worst moment to find out it is misconfigured. Checking everyone
+# means this project's own pull requests exercise it continuously.
+
+require:
+  members: true
+
+allowRemediationCommits:
+  # A contributor who forgot the sign-off can add a follow-up commit supplying it, rather
+  # than rebasing a branch someone may already have pulled.
+  individual: true
+  # thirdParty stays off. Letting a third party certify on an author's behalf is
+  # convenient, and is not what the certificate says.
+  thirdParty: false
