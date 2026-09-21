@@ -20,7 +20,7 @@ Horopter is published as three container images and a compose file that runs the
 carries a `docker-compose.yml` release asset with that release's image tags already rendered
 in:
 
-    curl -O https://github.com/horopter-dev/horopter/releases/download/v0.1.0-dev.2/docker-compose.yml
+    curl -O https://github.com/horopter-dev/horopter/releases/download/v0.1.0-dev.3/docker-compose.yml
     docker compose up -d
 
 **Packages stay private while the repository is**, so pulling needs a `docker login` first
