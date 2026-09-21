@@ -20,6 +20,14 @@ both must be set to a real name and a reachable address:
 
     Signed-off-by: Jane Doe <jane@example.com>
 
+No configuration adds the line for you. `format.signOff` enables the flag for
+`format-patch` rather than for `git commit`, and Git has no `commit.signOff` at
+all: its own documentation says the trailer "should be a conscious act and means
+that you certify you have the rights to submit this work under the same open
+source license". If typing `-s` every time grates, an alias or a
+`prepare-commit-msg` hook will add it — at the cost of moving that conscious act
+to the moment you install the hook.
+
 The [DCO app][dco-app] checks this on every pull request and fails one whose
 commits are not all signed off. Bots and merge commits are excluded, so
 Dependabot's pull requests are unaffected.
