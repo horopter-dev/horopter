@@ -12,7 +12,11 @@ events in; observability tools read them out to enrich graphs.
 
 ## Status
 
-v0.1 in development.
+v0.1.0. The 0.1 HTTP API and storage schema are settled — a change that breaks
+either gets a new minor or major, not a patch inside the line.
+
+`horopter-egress` still has no authentication; read [Security](#security) before
+putting it anywhere its port can be reached.
 
 ## Quick start
 
@@ -20,7 +24,7 @@ Horopter is published as three container images and a compose file that runs the
 carries a `docker-compose.yml` release asset with that release's image tags already rendered
 in:
 
-    curl -O https://github.com/horopter-dev/horopter/releases/download/v0.1.0-dev.3/docker-compose.yml
+    curl -O https://github.com/horopter-dev/horopter/releases/download/v0.1.0/docker-compose.yml
     docker compose up -d
 
 **Packages stay private while the repository is**, so pulling needs a `docker login` first
