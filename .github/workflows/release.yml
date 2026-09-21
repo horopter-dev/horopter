@@ -16,7 +16,15 @@ concurrency:
 jobs:
   release:
     name: Build images and cut the release
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest: that label migrates to Ubuntu 26.04 between
+    # 2026-10-19 and 2026-11-19, which would swap the runner under this workflow
+    # mid-migration. 24.04 is what ubuntu-latest resolves to today, so pinning changes
+    # nothing now and makes the eventual move a deliberate bump.
+    #
+    # Not 26.04 yet: actionlint 1.7.12 -- the latest release, and what the Lint workflows
+    # step below installs -- does not know that label and exits 1 on it. Revisit when it
+    # does; the image itself is ready (shellcheck 0.11.0, Docker 29.4.2, Compose 5.1.3).
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     # A job-level block replaces the top-level one rather than adding to it, so contents
     # is restated here.
@@ -55,7 +63,9 @@ jobs:
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94  # v7.2.3
         with:
           distribution: goreleaser
-          version: '~> v2'
+          # Exact, not '~> v2'. The CI release-check job pins the same version, so what
+          # validates the config on a pull request is what builds the artefacts on the tag.
+          version: v2.18.2
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
