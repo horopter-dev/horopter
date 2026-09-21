@@ -27,11 +27,11 @@ services:
 
   migrate:
     # The tag after :- is the published version this stack runs. Bump it in the commit the
-    # dev tag is cut from, so the tagged tree names the images that tag builds; bumping it
+    # tag is cut from, so the tagged tree names the images that tag builds; bumping it
     # afterwards leaves the release pointing at the version before it. Set HOROPTER_IMAGE_TAG
     # in the environment to override it for one run; `task up:local` bypasses both and runs
     # images built from the working tree.
-    image: ghcr.io/horopter-dev/horopter-migrate:${HOROPTER_IMAGE_TAG:-v0.1.0-dev.3}
+    image: ghcr.io/horopter-dev/horopter-migrate:${HOROPTER_IMAGE_TAG:-v0.1.0}
     environment:
       DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
     depends_on:
@@ -39,7 +39,7 @@ services:
         condition: service_healthy
 
   ingress:
-    image: ghcr.io/horopter-dev/horopter-ingress:${HOROPTER_IMAGE_TAG:-v0.1.0-dev.3}
+    image: ghcr.io/horopter-dev/horopter-ingress:${HOROPTER_IMAGE_TAG:-v0.1.0}
     environment:
       DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
       HOROPTER_INGRESS_TOKEN: local-dev-token
@@ -55,7 +55,7 @@ services:
         condition: service_completed_successfully
 
   egress:
-    image: ghcr.io/horopter-dev/horopter-egress:${HOROPTER_IMAGE_TAG:-v0.1.0-dev.3}
+    image: ghcr.io/horopter-dev/horopter-egress:${HOROPTER_IMAGE_TAG:-v0.1.0}
     environment:
       DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
       HOROPTER_ADDR: 0.0.0.0:8081
