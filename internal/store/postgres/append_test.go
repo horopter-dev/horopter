@@ -13,6 +13,7 @@ import (
 
 	"github.com/horopter-dev/horopter/internal/core"
 	"github.com/horopter-dev/horopter/internal/store/postgres"
+	"github.com/horopter-dev/horopter/internal/testdb"
 	"github.com/oklog/ulid/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -59,7 +60,9 @@ func uniqueToken() string {
 // tenant returns a tenant id unique to this call, naming the test for traceability.
 func tenant(t *testing.T) string {
 	t.Helper()
-	return "test-" + t.Name() + "-" + uniqueToken()
+	tn := "test-" + t.Name() + "-" + uniqueToken()
+	testdb.DropTenantAfter(t, tn)
+	return tn
 }
 
 // monotonicEntropy makes successive eventID calls sort in call order even when two land

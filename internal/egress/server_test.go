@@ -25,6 +25,7 @@ import (
 	"github.com/horopter-dev/horopter/internal/core"
 	"github.com/horopter-dev/horopter/internal/egress"
 	"github.com/horopter-dev/horopter/internal/store/postgres"
+	"github.com/horopter-dev/horopter/internal/testdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -83,6 +84,7 @@ func openTestStore(t *testing.T, poolMaxConns int) (*postgres.Store, string) {
 	require.NoError(t, err)
 	t.Cleanup(s.Close)
 	tn := "eg-" + t.Name() + "-" + procToken + "-" + strconv.FormatUint(tenantSeq.Add(1), 36)
+	testdb.DropTenantAfter(t, tn)
 	return s, tn
 }
 
@@ -390,12 +392,22 @@ func annotationTitles(t *testing.T, rec *httptest.ResponseRecorder) []string {
 func TestGrafanaAnnotationsPOSTPathTenantIsScoped(t *testing.T) {
 	h, s, tnA := newServer(t)
 	tnB := tnA + "-b"
+	testdb.DropTenantAfter(t, tnB)
 	at := time.Now().UTC()
 	typeA, typeB := closedTypeFor(t, "a"), closedTypeFor(t, "b")
 	typeDefault := closedTypeFor(t, "default")
 	seed(t, s, tnA, "dep-a", typeA, at)
 	seed(t, s, tnB, "dep-b", typeB, at)
-	seed(t, s, egress.DefaultTenant, "dep-default-"+procToken, typeDefault, at)
+	// The ref carries seedSeq, not procToken alone. tnA and tnB are fresh per call so a
+	// repeated ref cannot collide there, but DefaultTenant is fixed: under -count=2 a
+	// process-constant ref folds the second iteration's event into the first's change,
+	// which is already closed and cannot reopen, so the row this test then looks for is
+	// never written. Every other identifier in this file already pairs procToken with a
+	// counter for the same reason.
+	defaultRef := fmt.Sprintf("dep-default-%s-%s",
+		procToken, strconv.FormatUint(seedSeq.Add(1), 36))
+	testdb.DropRefAfter(t, egress.DefaultTenant, defaultRef)
+	seed(t, s, egress.DefaultTenant, defaultRef, typeDefault, at)
 
 	body := annotationBody(at.Add(-time.Second), at.Add(time.Second))
 

@@ -22,6 +22,7 @@ import (
 
 	"github.com/horopter-dev/horopter/internal/ingress"
 	"github.com/horopter-dev/horopter/internal/store/postgres"
+	"github.com/horopter-dev/horopter/internal/testdb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -54,7 +55,9 @@ func uniqueToken() string {
 // tenant returns a tenant id unique to this call, naming the test for traceability.
 func tenant(t *testing.T) string {
 	t.Helper()
-	return "test-" + t.Name() + "-" + uniqueToken()
+	tn := "test-" + t.Name() + "-" + uniqueToken()
+	testdb.DropTenantAfter(t, tn)
+	return tn
 }
 
 // idemKey returns an idempotency key unique to this call. suffix names the call for
@@ -129,8 +132,12 @@ func TestPostEventRecordsTheTenantOnTheSpan(t *testing.T) {
 	t.Cleanup(func() { otel.SetTracerProvider(prev) })
 
 	h, _ := newServer(t)
-	body := `{"tenant":"acme","source":"ci","type":"deployment.started",` +
-		`"subject":"acme/prod","occurred_at":"2026-09-15T10:00:00Z"}`
+	// A tenant of this test's own, not a literal: "acme" is a name the seeded demo data
+	// also uses, so a literal wrote a row per run into a tenant an operator looks at.
+	tn := tenant(t)
+	body := fmt.Sprintf(
+		`{"tenant":%q,"source":"ci","type":"deployment.started",`+
+			`"subject":"acme/prod","occurred_at":"2026-09-15T10:00:00Z"}`, tn)
 	resp := post(t, h, "/v1/events", body, testToken)
 	require.Equal(t, http.StatusCreated, resp.Code)
 
@@ -140,7 +147,7 @@ func TestPostEventRecordsTheTenantOnTheSpan(t *testing.T) {
 			continue
 		}
 		for _, kv := range span.Attributes() {
-			if kv.Key == "horopter.tenant" && kv.Value.AsString() == "acme" {
+			if kv.Key == "horopter.tenant" && kv.Value.AsString() == tn {
 				found = true
 			}
 		}

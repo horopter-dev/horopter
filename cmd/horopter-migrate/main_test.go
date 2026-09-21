@@ -14,6 +14,7 @@ import (
 
 	"github.com/horopter-dev/horopter/internal/core"
 	"github.com/horopter-dev/horopter/internal/store/postgres"
+	"github.com/horopter-dev/horopter/internal/testdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -47,6 +48,7 @@ func TestRunRebuildsATenantsProjection(t *testing.T) {
 	// core.NewULID rather than the token embedded in the tenant id below.
 	token := strconv.FormatInt(time.Now().UnixNano(), 36)
 	tn := "migrate-rebuild-" + token
+	testdb.DropTenantAfter(t, tn)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	_, _, err = store.AppendEvent(ctx, core.Event{
 		ID: core.NewULID(time.Now(), rand.Reader), Tenant: tn, SchemaVersion: 1,
@@ -92,6 +94,7 @@ func TestRunWithoutRebuildTenantLeavesTheProjectionAlone(t *testing.T) {
 
 	token := strconv.FormatInt(time.Now().UnixNano(), 36)
 	tn := "migrate-norebuild-" + token
+	testdb.DropTenantAfter(t, tn)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	_, _, err = store.AppendEvent(ctx, core.Event{
 		ID: core.NewULID(time.Now(), rand.Reader), Tenant: tn, SchemaVersion: 1,

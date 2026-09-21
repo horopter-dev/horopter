@@ -66,7 +66,7 @@ func TestRebuildReproducesProjectionForIDOrderedEvents(t *testing.T) {
 func TestRebuildIsTenantScoped(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
-	other := tn + "-keep"
+	other := siblingTenant(t, tn, "keep")
 
 	// sharedRef must be unique to this test run, not a common literal like "d1": the
 	// tests in this package share one never-truncated database, and "d1" is reused by
