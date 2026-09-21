@@ -565,15 +565,13 @@ this purpose.
 
 ## Licence
 
-None yet, deliberately. This repository is private, and the licensing decision is
-deferred rather than pending — there is nothing to decide while the only readers
-are people who already have access.
+Apache License 2.0 — `SPDX-License-Identifier: Apache-2.0`. [`LICENSE`](LICENSE)
+holds the canonical text, unmodified.
 
-Note what the absence of a licence means, because it is the opposite of what an
-unlicensed repository is often assumed to mean: with no licence granted, default
-copyright applies and all rights are reserved. Nobody may use, copy, modify or
-redistribute this. That is the correct and intended position for private code.
+The licence conveys the code and nothing else. Section 6 withholds trademark
+rights explicitly: the name Horopter, the `horopter-dev` organisation and the
+project's domains are not granted by it.
 
-**Settle this before making the repository public**, not after — the default
-above does not become permissive by publication, and contributions accepted
-without a licence in place are awkward to relicense later.
+Contributions are accepted under the same licence, certified by a `Signed-off-by`
+line per the Developer Certificate of Origin. There is no CLA. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
