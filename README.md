@@ -20,24 +20,19 @@ Horopter is published as three container images and a compose file that runs the
 carries a `docker-compose.yml` release asset with that release's image tags already rendered
 in:
 
-    curl -O https://github.com/horopter-dev/horopter/releases/download/v0.1.0-dev.1/docker-compose.yml
+    curl -O https://github.com/horopter-dev/horopter/releases/download/v0.1.0-dev.2/docker-compose.yml
     docker compose up -d
 
-**`task up` does not work yet.** v0.1.0-dev.1 exists and the URL above serves its compose
-file, but that release's images were pushed to `ghcr.io/yo61/horopter-*` before the
-repository moved to the `horopter-dev` organisation, and GitHub does not move GHCR packages
-with a repository. Nothing resolves under `ghcr.io/horopter-dev/horopter-*` until the next
-tag is cut, which republishes there. **Packages stay private while the repository is**, so
-pulling then needs a `docker login` first (below) from someone who can read the repository.
-Both become public at v0.1.0.
+**Packages stay private while the repository is**, so pulling needs a `docker login` first
+(below) from someone who can read the repository. Both become public at v0.1.0.
 
 To work on Horopter today, clone it and run the development stack:
 
     task up:local    # builds images from the working tree with goreleaser release --snapshot
     task seed        # fills the running stack with changes in all three shapes
 
-`task up:local` is the only route that works today. Once a tag is cut under `horopter-dev`,
-`task up` pulls the tag `docker-compose.yml` names instead of building locally:
+`task up:local` builds from the working tree; `task up` pulls the tag `docker-compose.yml`
+names instead of building locally:
 
     gh auth refresh -s read:packages
     gh auth token | docker login ghcr.io -u "$(gh api user --jq .login)" --password-stdin
@@ -388,6 +383,19 @@ bytes of JSON. A producer sending larger attribute maps has those events refused
 that does not act on a `400` loses them. Shrink the attributes — link to large text rather than
 embedding it — or raise `HOROPTER_INGRESS_MAX_EVENT_ATTRIBUTE_BYTES`, up to `1048576`. Events
 already stored are not re-checked.
+
+### v0.1 pre-release: the images moved to the horopter-dev organisation
+
+The repository moved from `yo61` to `horopter-dev`, and the images moved with it — to
+`ghcr.io/horopter-dev/horopter-{ingress,egress,migrate}`. GitHub does not move GHCR packages
+with a repository, so **v0.1.0-dev.1's images stay at `ghcr.io/yo61/horopter-*`**, and the
+`docker-compose.yml` asset that release carries names an address this project no longer
+controls. That asset cannot be rewritten, only superseded: take v0.1.0-dev.2's instead, or
+re-pull this repository's `docker-compose.yml`.
+
+Nothing in the database changes. An operator on v0.1.0-dev.1 needs new image references and
+a `docker login` that can read the new organisation's packages; the schema version is
+untouched.
 
 ## Truncated responses
 
