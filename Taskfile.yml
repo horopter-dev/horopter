@@ -9,10 +9,6 @@ tasks:
     desc: Start the Postgres container
     cmds:
       - docker compose up -d db
-  db:down:
-    desc: Stop the stack and remove the database volume
-    cmds:
-      - docker compose down -v
   test:
     desc: Run the Go tests against the local database
     preconditions:
@@ -44,11 +40,15 @@ tasks:
       - ./hack/snapshot-override.sh
       - docker compose -f docker-compose.yml -f docker-compose.snapshot.yml up -d
   stop:
-    desc: Halt the stack, keeping the database volume
+    desc: Halt the stack, keeping containers and data
     cmds:
       - docker compose stop
   down:
-    desc: Stop the stack and remove the database volume
+    desc: Stop the stack and remove containers, keeping the database
+    cmds:
+      - docker compose down
+  down:wipe:
+    desc: Stop the stack and destroy the database volume
     cmds:
       - docker compose down -v
   logs:

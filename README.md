@@ -38,7 +38,8 @@ names instead of building locally:
     gh auth token | docker login ghcr.io -u "$(gh api user --jq .login)" --password-stdin
     task up
 
-`task stop` halts the stack; `task down` also **destroys the database volume**.
+`task stop` halts the stack and `task down` removes its containers, both keeping the
+database; `task down:wipe` also **destroys the database volume**.
 
 Then post an event and read it back:
 
@@ -51,7 +52,8 @@ Then post an event and read it back:
 The compose file pulls `ghcr.io/horopter-dev/horopter-{ingress,egress,migrate}` at the tag it
 names, then runs `horopter-migrate` — the only binary permitted to apply schema DDL — to
 completion before starting `horopter-ingress` on port 8080 and `horopter-egress` on port 8081.
-`task down` stops the stack and removes the database volume.
+`task down` stops the stack and removes its containers, keeping the database volume;
+`task down:wipe` destroys that volume too.
 
 Each service is configured with environment variables:
 
