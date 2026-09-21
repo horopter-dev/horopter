@@ -156,7 +156,8 @@ func TestQueryChangesIsTenantScoped(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 
-	_, _, err := s.AppendEvent(ctx, mkEvent(tn+"-other", eventID(t, "started"), "k1", "d1",
+	other := siblingTenant(t, tn, "other")
+	_, _, err := s.AppendEvent(ctx, mkEvent(other, eventID(t, "started"), "k1", "d1",
 		"deployment.started", at))
 	require.NoError(t, err)
 

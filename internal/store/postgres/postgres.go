@@ -91,7 +91,17 @@ type Store struct {
 	pool              *pgxpool.Pool
 	appends           metric.Int64Counter
 	maxAttributeBytes int
+	appliedMigrations []string
 }
+
+// AppliedMigrations names the migrations THIS Open applied, in the order it applied them.
+// It is empty when the schema was already current, and always empty from OpenNoMigrate.
+//
+// The applied_migration ledger cannot answer this after the fact: once the transaction
+// commits, a file applied by this run and one applied a year ago are both simply present.
+// horopter-migrate reports the difference to an operator, so the difference has to be
+// carried out of the run that knew it.
+func (s *Store) AppliedMigrations() []string { return s.appliedMigrations }
 
 // Option configures a Store as it opens.
 type Option func(*Store)
@@ -192,15 +202,19 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := Migrate(ctx, pool); err != nil {
+	applied, err := Migrate(ctx, pool)
+	if err != nil {
 		pool.Close()
 		return nil, err
 	}
-	return storeFromPool(pool, opts), nil
+	s := storeFromPool(pool, opts)
+	s.appliedMigrations = applied
+	return s, nil
 }
 
 // Migrate applies the embedded migrations a database has not seen yet, inside one
-// transaction, guarded by a transaction-scoped advisory lock.
+// transaction, guarded by a transaction-scoped advisory lock, and returns the names it
+// applied — empty when the database was already current.
 //
 // The lock is what makes this safe when several daemons start at once, as they do on
 // every rolling deploy: without it, concurrent CREATE INDEX statements race and can
@@ -230,39 +244,43 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 // the ledger, or dropping applied_migration to "start again", produces a database whose
 // migration cannot start: the operator has to insert a row for every file the schema
 // already carries before running this again, not let them replay.
-func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
+func Migrate(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin migration transaction: %w", err)
+		return nil, fmt.Errorf("begin migration transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, migrationLockKey); err != nil {
-		return fmt.Errorf("take migration advisory lock: %w", err)
+		return nil, fmt.Errorf("take migration advisory lock: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS applied_migration (
 		    filename   TEXT PRIMARY KEY,
 		    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`); err != nil {
-		return fmt.Errorf("create the applied_migration ledger: %w", err)
+		return nil, fmt.Errorf("create the applied_migration ledger: %w", err)
 	}
 
 	names, err := migrationNames()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := applyPendingMigrations(ctx, tx, names); err != nil {
-		return err
+	applied, err := applyPendingMigrations(ctx, tx, names)
+	if err != nil {
+		return nil, err
 	}
 	if err := recordSchemaVersion(ctx, tx); err != nil {
-		return err
+		return nil, err
 	}
 
+	// Reported only past this point. Every file ran inside the transaction above, so a
+	// commit that fails applied nothing — and a caller told otherwise would log DDL that
+	// the database rolled back.
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit migration transaction: %w", err)
+		return nil, fmt.Errorf("commit migration transaction: %w", err)
 	}
-	return nil
+	return applied, nil
 }
 
 // migrationNames lists the embedded migration filenames in the order they must run.
@@ -306,30 +324,32 @@ func readLedger(ctx context.Context, tx pgx.Tx) (map[string]bool, error) {
 }
 
 // applyPendingMigrations executes, in order, every named migration the ledger does not
-// already record, adding each to the ledger as it goes.
-func applyPendingMigrations(ctx context.Context, tx pgx.Tx, names []string) error {
+// already record, adding each to the ledger as it goes, and returns the names it ran.
+func applyPendingMigrations(ctx context.Context, tx pgx.Tx, names []string) ([]string, error) {
 	applied, err := readLedger(ctx, tx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
+	ran := []string{}
 	for _, name := range names {
 		if applied[name] {
 			continue
 		}
 		stmt, err := migrationFS.ReadFile("migrations/" + name)
 		if err != nil {
-			return fmt.Errorf("read migration %q: %w", name, err)
+			return nil, fmt.Errorf("read migration %q: %w", name, err)
 		}
 		if _, err := tx.Exec(ctx, string(stmt)); err != nil {
-			return fmt.Errorf("apply migration %q: %w", name, err)
+			return nil, fmt.Errorf("apply migration %q: %w", name, err)
 		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO applied_migration (filename) VALUES ($1)`, name); err != nil {
-			return fmt.Errorf("record migration %q in the ledger: %w", name, err)
+			return nil, fmt.Errorf("record migration %q in the ledger: %w", name, err)
 		}
+		ran = append(ran, name)
 	}
-	return nil
+	return ran, nil
 }
 
 // recordSchemaVersion writes the version implied by the highest migration filename the

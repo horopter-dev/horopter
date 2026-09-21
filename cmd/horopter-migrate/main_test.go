@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"fmt"
+	"log/slog"
+	"net/url"
 	"os"
 	"strconv"
 	"testing"
@@ -11,6 +14,9 @@ import (
 
 	"github.com/horopter-dev/horopter/internal/core"
 	"github.com/horopter-dev/horopter/internal/store/postgres"
+	"github.com/horopter-dev/horopter/internal/testdb"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -42,6 +48,7 @@ func TestRunRebuildsATenantsProjection(t *testing.T) {
 	// core.NewULID rather than the token embedded in the tenant id below.
 	token := strconv.FormatInt(time.Now().UnixNano(), 36)
 	tn := "migrate-rebuild-" + token
+	testdb.DropTenantAfter(t, tn)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	_, _, err = store.AppendEvent(ctx, core.Event{
 		ID: core.NewULID(time.Now(), rand.Reader), Tenant: tn, SchemaVersion: 1,
@@ -87,6 +94,7 @@ func TestRunWithoutRebuildTenantLeavesTheProjectionAlone(t *testing.T) {
 
 	token := strconv.FormatInt(time.Now().UnixNano(), 36)
 	tn := "migrate-norebuild-" + token
+	testdb.DropTenantAfter(t, tn)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	_, _, err = store.AppendEvent(ctx, core.Event{
 		ID: core.NewULID(time.Now(), rand.Reader), Tenant: tn, SchemaVersion: 1,
@@ -108,4 +116,89 @@ func TestRunWithoutRebuildTenantLeavesTheProjectionAlone(t *testing.T) {
 		`SELECT title FROM change WHERE tenant = $1 AND ref = $2`, tn, "dep-1").Scan(&got))
 	assert.Equal(t, marker, got,
 		"migrating without --rebuild-tenant must not replay anyone's event log")
+}
+
+// isolatedSchemaDSN gives a test its own empty schema, so a migration run inside it starts
+// from nothing however many times the suite has run against this database before.
+func isolatedSchemaDSN(t *testing.T, base string) string {
+	t.Helper()
+	ctx := context.Background()
+
+	admin, err := pgxpool.New(ctx, base)
+	require.NoError(t, err)
+	t.Cleanup(admin.Close)
+
+	schema := fmt.Sprintf("migratelog_%d", time.Now().UnixNano())
+	ident := pgx.Identifier{schema}.Sanitize()
+	_, err = admin.Exec(ctx, "CREATE SCHEMA "+ident)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = admin.Exec(context.Background(), "DROP SCHEMA "+ident+" CASCADE")
+	})
+
+	u, err := url.Parse(base)
+	require.NoError(t, err)
+	q := u.Query()
+	q.Set("search_path", schema)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// captureLog installs a JSON logger writing to the returned buffer, with the timestamp
+// dropped so two runs that logged the same thing produce byte-identical output. That is
+// what lets the assertion below compare the runs directly rather than by keyword.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	previous := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	})))
+	return &buf
+}
+
+// TestVerifyAndRebuildLogsWhichMigrationsItApplied pins the difference between a run that
+// built the schema and one that found it already current. Both used to log the single line
+// "schema up to date", so an operator reading the logs of a migrate Job could not tell
+// whether any DDL had run against their database — the two cases were indistinguishable.
+//
+// The runs are compared to each other, not only to keywords, because equality is the defect
+// stated exactly: it is the identical output that was the bug.
+func TestVerifyAndRebuildLogsWhichMigrationsItApplied(t *testing.T) {
+	base := os.Getenv("HOROPTER_TEST_DSN")
+	if base == "" {
+		t.Skip("set HOROPTER_TEST_DSN to run migrate tests (docker compose up -d db)")
+	}
+	ctx := context.Background()
+	d := isolatedSchemaDSN(t, base)
+
+	buf := captureLog(t)
+
+	first, err := postgres.Open(ctx, d)
+	require.NoError(t, err)
+	t.Cleanup(first.Close)
+	require.NoError(t, verifyAndRebuild(ctx, first, ""))
+	built := buf.String()
+
+	buf.Reset()
+	second, err := postgres.Open(ctx, d)
+	require.NoError(t, err)
+	t.Cleanup(second.Close)
+	require.NoError(t, verifyAndRebuild(ctx, second, ""))
+	alreadyCurrent := buf.String()
+
+	assert.Contains(t, built, "0001_init.sql",
+		"the run that built the schema must name the files it applied")
+	assert.NotContains(t, alreadyCurrent, "0001_init.sql",
+		"a run that applied nothing must not name files, which would claim DDL it did not run")
+	assert.NotEqual(t, built, alreadyCurrent,
+		"building a schema and finding one already current must not log identically; that "+
+			"identity is the defect this test exists for")
 }

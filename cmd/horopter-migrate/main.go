@@ -36,7 +36,27 @@ func main() {
 	}
 }
 
+// logAppliedMigrations states what this run changed. Without it the only line a migrate
+// Job emitted was "schema up to date", which a run that built the whole schema and a run
+// that found it already current both produced identically — leaving an operator no way to
+// tell from the logs whether any DDL had touched their database.
+//
+// One line naming every file, rather than a line per file, because they are applied in a
+// single transaction: there is no moment at which some are applied and the rest are not,
+// and a line each would imply a sequence that could be caught halfway through.
+func logAppliedMigrations(applied []string) {
+	if len(applied) == 0 {
+		slog.Info("no migrations to apply; the schema was already current")
+		return
+	}
+	slog.Info("applied migrations", "files", applied, "count", len(applied))
+}
+
 func verifyAndRebuild(ctx context.Context, store *postgres.Store, rebuildTenant string) error {
+	// Before the version assertion, so a run that applied migrations and then failed that
+	// assertion still reports the DDL it committed.
+	logAppliedMigrations(store.AppliedMigrations())
+
 	v, err := store.SchemaVersion(ctx)
 	if err != nil {
 		return err
