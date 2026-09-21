@@ -11,7 +11,7 @@ import (
 // StoreScope is the instrumentation scope for spans the store creates itself, as
 // opposed to the per-statement spans otelpgx creates. The two are separately
 // switchable because their cost and value differ by an order of magnitude.
-const StoreScope = "github.com/horopter-dev/horopter/internal/store/postgres"
+const StoreScope = "horopter.dev/horopter/internal/store/postgres"
 
 // areaOf maps an instrumentation scope onto the short area name operators use in
 // HOROPTER_TRACE_DISABLE. Operators name the area, not the scope: scope strings are

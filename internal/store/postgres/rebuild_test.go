@@ -7,13 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/horopter-dev/horopter/internal/core"
-	"github.com/horopter-dev/horopter/internal/store/postgres"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"horopter.dev/horopter/internal/core"
+	"horopter.dev/horopter/internal/store/postgres"
 )
 
 // TestRebuildReproducesProjectionForIDOrderedEvents pins RebuildProjection's guarantee

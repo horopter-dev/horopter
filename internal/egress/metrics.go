@@ -4,13 +4,13 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/horopter-dev/horopter/internal/admission"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
+	"horopter.dev/horopter/internal/admission"
 )
 
 // meterScope is the instrumentation scope egress's read admission metrics are recorded under.
-const meterScope = "github.com/horopter-dev/horopter/internal/egress"
+const meterScope = "horopter.dev/horopter/internal/egress"
 
 // readMetrics are the instruments read admission reports through. Only the shed counter is
 // recorded from a request; the gauges read the gates whenever metrics are collected.

@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/horopter-dev/horopter/internal/testdb"
+	"horopter.dev/horopter/internal/testdb"
 )
 
 // dsn returns the test database DSN, skipping loudly when it is absent.

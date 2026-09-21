@@ -16,11 +16,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/horopter-dev/horopter/internal/egress"
-	"github.com/horopter-dev/horopter/internal/store/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"horopter.dev/horopter/internal/egress"
+	"horopter.dev/horopter/internal/store/postgres"
 )
 
 // testLimits are the defaults with a short admission wait, so a shed read answers quickly.

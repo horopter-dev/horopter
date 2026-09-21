@@ -20,14 +20,14 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/horopter-dev/horopter/internal/adapter/grafana"
-	"github.com/horopter-dev/horopter/internal/adapter/otlp"
-	"github.com/horopter-dev/horopter/internal/admission"
-	"github.com/horopter-dev/horopter/internal/core"
-	"github.com/horopter-dev/horopter/internal/store/postgres"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"horopter.dev/horopter/internal/adapter/grafana"
+	"horopter.dev/horopter/internal/adapter/otlp"
+	"horopter.dev/horopter/internal/admission"
+	"horopter.dev/horopter/internal/core"
+	"horopter.dev/horopter/internal/store/postgres"
 )
 
 // DefaultTenant is used when a request omits one.

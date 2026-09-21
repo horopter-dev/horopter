@@ -8,13 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/horopter-dev/horopter/internal/egress"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"horopter.dev/horopter/internal/egress"
 )
 
 // recordMetrics installs a meter provider with a manual reader for the rest of the test. Call it
@@ -77,7 +77,7 @@ type instrumentShape struct {
 // times.
 func wantShape(unit, kind string) instrumentShape {
 	return instrumentShape{
-		scope: "github.com/horopter-dev/horopter/internal/egress", unit: unit, kind: kind,
+		scope: "horopter.dev/horopter/internal/egress", unit: unit, kind: kind,
 	}
 }
 

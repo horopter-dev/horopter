@@ -14,8 +14,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/horopter-dev/horopter/internal/adapter"
-	"github.com/horopter-dev/horopter/internal/core"
+	"horopter.dev/horopter/internal/adapter"
+	"horopter.dev/horopter/internal/core"
 )
 
 // ExportRequest is the JSON shape of an OTLP ExportTraceServiceRequest — the

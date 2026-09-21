@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/horopter-dev/horopter/internal/egress"
-	"github.com/horopter-dev/horopter/internal/store/postgres"
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"horopter.dev/horopter/internal/egress"
+	"horopter.dev/horopter/internal/store/postgres"
 )
 
 type expansionShape struct {

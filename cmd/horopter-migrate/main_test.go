@@ -12,13 +12,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/horopter-dev/horopter/internal/core"
-	"github.com/horopter-dev/horopter/internal/store/postgres"
-	"github.com/horopter-dev/horopter/internal/testdb"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"horopter.dev/horopter/internal/core"
+	"horopter.dev/horopter/internal/store/postgres"
+	"horopter.dev/horopter/internal/testdb"
 )
 
 // TestRunRebuildsATenantsProjection covers the operator surface for the safety property

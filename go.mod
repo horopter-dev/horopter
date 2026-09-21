@@ -1,4 +1,4 @@
-module github.com/horopter-dev/horopter
+module horopter.dev/horopter
 
 go 1.27.1
 

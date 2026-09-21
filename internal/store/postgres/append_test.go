@@ -11,9 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/horopter-dev/horopter/internal/core"
-	"github.com/horopter-dev/horopter/internal/store/postgres"
-	"github.com/horopter-dev/horopter/internal/testdb"
 	"github.com/oklog/ulid/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,6 +20,9 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"horopter.dev/horopter/internal/core"
+	"horopter.dev/horopter/internal/store/postgres"
+	"horopter.dev/horopter/internal/testdb"
 )
 
 func newStore(t *testing.T) *postgres.Store {

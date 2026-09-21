@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/horopter-dev/horopter/internal/core"
 	"github.com/stretchr/testify/assert"
+	"horopter.dev/horopter/internal/core"
 )
 
 func TestOpenSentinelIsFarFutureNotInfinity(t *testing.T) {
