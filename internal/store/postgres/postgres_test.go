@@ -147,10 +147,12 @@ func TestMigrationLedgerAppliesEachFileOnce(t *testing.T) {
 		"a recorded migration must not re-execute, and its ledger row must not be rewritten")
 
 	t.Run("0002 is genuinely not idempotent", func(t *testing.T) {
+		// The CHECK body is deliberately arbitrary: ADD CONSTRAINT fails on the duplicate
+		// NAME whatever it asserts, so restating 0002's vocabulary here bought nothing and
+		// made this a third hand-copied copy of it — one that no test held against
+		// core.Statuses.
 		_, err := second.Pool().Exec(ctx, `
-			ALTER TABLE change ADD CONSTRAINT change_status_vocabulary
-			    CHECK (status IN ('occurred', 'in_progress', 'completed', 'failed',
-			                      'rolled_back', 'cancelled'))`)
+			ALTER TABLE change ADD CONSTRAINT change_status_vocabulary CHECK (true)`)
 		require.Error(t, err,
 			"if this statement were idempotent the ledger test above would prove nothing")
 	})
