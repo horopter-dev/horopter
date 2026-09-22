@@ -190,14 +190,25 @@ func TestChangeStatusVocabularyIsEnforced(t *testing.T) {
 		})
 	}
 
-	var valid int
-	require.NoError(t, s.Pool().QueryRow(ctx, `
-		INSERT INTO change (tenant, ref, subject, type, title, actor, started_at,
-		                    first_seen_at, end_at, status, attributes, last_event_id)
-		VALUES ($1,$2,'acme/prod','deployment.annotated','','ci-bot',NULL,$3,NULL,
-		        'in_progress','{}'::jsonb,'seed')
-		RETURNING 1`, tn, eventID(t, "good-status"), at).Scan(&valid),
-		"the constraint must still admit every status internal/core can produce")
+	// Every value in core.Statuses, not one sample of it. This half of the test used to
+	// insert 'in_progress' alone while asserting it proved the constraint "must still
+	// admit every status internal/core can produce" — a claim one hardcoded literal
+	// cannot support. Adding a seventh Status without a migration compiled, passed here,
+	// and failed at runtime on the first insert.
+	for _, st := range core.Statuses {
+		t.Run("admits "+string(st), func(t *testing.T) {
+			var valid int
+			require.NoError(t, s.Pool().QueryRow(ctx, `
+				INSERT INTO change (tenant, ref, subject, type, title, actor, started_at,
+				                    first_seen_at, end_at, status, attributes, last_event_id)
+				VALUES ($1,$2,'acme/prod','deployment.annotated','','ci-bot',NULL,$3,NULL,
+				        $4,'{}'::jsonb,'seed')
+				RETURNING 1`,
+				tn, eventID(t, "good-"+string(st)), at, string(st)).Scan(&valid),
+				"migration 0002's CHECK must admit every value in core.Statuses; %q is in "+
+					"the Go vocabulary and not in the SQL one", st)
+		})
+	}
 }
 
 // TestEndEffectiveIsGeneratedFromEndAt pins the one remaining copy of the open-change

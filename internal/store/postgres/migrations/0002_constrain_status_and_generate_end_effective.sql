@@ -9,7 +9,11 @@
 -- must not guess at, and the CHECK will refuse it loudly rather than rewrite it.
 UPDATE change SET status = 'in_progress' WHERE status = '';
 
--- The vocabulary is internal/core's Status constants (internal/core/change.go). An empty
+-- The vocabulary is core.Statuses (internal/core/change.go), and the only thing keeping
+-- this list and that one in agreement is TestChangeStatusVocabularyIsEnforced, which
+-- iterates core.Statuses and asserts this CHECK admits every value. Adding a Status means
+-- adding a migration; the test is what turns forgetting into a red build rather than a
+-- runtime insert failure. An empty
 -- status made a change both unqueryable —
 -- QueryChanges reads an empty Status as "no filter" — and, with end_at NULL, an open
 -- interval matching every overlap query until the year 9999.

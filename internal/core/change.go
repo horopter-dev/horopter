@@ -27,6 +27,21 @@ const (
 	StatusCancelled  Status = "cancelled"
 )
 
+// Statuses is the complete status vocabulary, in the order the constants above declare
+// it. It exists so that anything needing the whole set derives it from here rather than
+// copying it: migration 0002's CHECK constraint restates this list in SQL, and the only
+// thing keeping the two in agreement is a test that iterates this slice. Adding a Status
+// constant without adding it here leaves that test passing against a stale list, which is
+// exactly the drift it exists to catch.
+var Statuses = []Status{
+	StatusOccurred,
+	StatusInProgress,
+	StatusCompleted,
+	StatusFailed,
+	StatusRolledBack,
+	StatusCancelled,
+}
+
 // OpenSentinel stands in for the end of an open change so that the overlap
 // predicate can be served by a plain index. It is a far-future literal rather
 // than Postgres 'infinity' because Go's time.Time cannot represent infinity.
