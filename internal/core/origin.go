@@ -2,16 +2,16 @@ package core
 
 import "fmt"
 
-// Origin indicates whether an event was written by a human or a process.
+// Origin distinguishes human and process event sources.
 type Origin string
 
-// Possible Origin values.
+// Values for Origin.
 const (
 	OriginHuman   Origin = "human"
 	OriginProcess Origin = "process"
 )
 
-// OriginForCredentialType returns the Origin for a credential type.
+// OriginForCredentialType maps credential types to their event source.
 func OriginForCredentialType(credentialType string) (Origin, error) {
 	switch credentialType {
 	case "machine_key":
