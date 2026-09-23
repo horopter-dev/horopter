@@ -370,6 +370,17 @@ func TestListEventsIgnoresARefWithAnEmptyLocus(t *testing.T) {
 // a rebuild reproduces the same merge — and reaching it takes a deliberate choice by a
 // credential that can already append to the tenant. Guarding it would mean refusing every
 // ULID-shaped correlation ref, which refuses producers whose build or trace ids are ULIDs.
+//
+// The merge is asserted where it is observable: the shared ref lists BOTH events, each
+// reaching the result through a different arm of eventSelection's predicate — the point
+// through the id arm, the correlated event through correlation_ref — and the change row's
+// last_event_id names the correlated event, so it demonstrably folded into the point's row
+// rather than merely sharing a name with it.
+//
+// Counting change rows for the ref cannot show any of that. change is PRIMARY KEY (tenant,
+// ref), so the count can only be 0 or 1, and the precondition below already establishes
+// that the point alone creates that row: a count of 1 is entailed before the correlated
+// event is appended, and would read the same if the collision never happened.
 func TestACorrelatedRefMayCollideWithAPointRef(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -381,19 +392,30 @@ func TestACorrelatedRefMayCollideWithAPointRef(t *testing.T) {
 	// The producer posts the point's own id as its correlation ref. mkEvent composes the
 	// locus onto it exactly as ingress's resolveRef would, so this is stored as
 	// "ci/<pointID>" — the same string RefFor gives the point.
+	corrID := eventID(t, "corr")
 	_, _, err = s.AppendEvent(ctx,
-		mkEvent(tn, eventID(t, "corr"), "k2", pointID, "deployment.started", at))
+		mkEvent(tn, corrID, "k2", pointID, "deployment.started", at))
 	require.NoError(t, err)
 
-	assert.Equal(t, "ci/"+pointID, core.RefFor(point),
+	sharedRef := core.RefFor(point)
+	require.Equal(t, "ci/"+pointID, sharedRef,
 		"precondition: the point's ref is what the correlated event claimed")
 
-	var rows int
+	evs, _, err := s.ListEvents(ctx, refQuery(t, tn, sharedRef))
+	require.NoError(t, err)
+	require.Len(t, evs, 2, "the shared ref must list both events; this is the collision "+
+		"itself, not a side effect of it")
+	assert.Equal(t, []string{pointID, corrID}, []string{evs[0].ID, evs[1].ID},
+		"the point arrives through the id arm and the correlated event through "+
+			"correlation_ref, in id order")
+
+	var lastEventID string
 	require.NoError(t, s.Pool().QueryRow(ctx,
-		`SELECT count(*) FROM change WHERE tenant = $1 AND ref = $2`,
-		tn, "ci/"+pointID).Scan(&rows))
-	assert.Equal(t, 1, rows,
-		"both events fold into one change row; this is the accepted limit, not a bug")
+		`SELECT last_event_id FROM change WHERE tenant = $1 AND ref = $2`,
+		tn, sharedRef).Scan(&lastEventID))
+	assert.Equal(t, corrID, lastEventID,
+		"the correlated event folded into the point's own change row; this is the "+
+			"accepted limit, not a bug")
 }
 
 // TestQueryChangesFindsAPointChangeByItsPrefixedRef covers the OTHER read route. Nothing in
