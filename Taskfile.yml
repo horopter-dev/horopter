@@ -23,11 +23,12 @@ tasks:
     cmds:
       - golangci-lint run ./...
   build:
-    desc: Build the ingress, egress and migrate binaries into dist/
+    desc: Build the ingress, egress, horoctl-migrate and horoctl binaries into dist/
     cmds:
       - go build -o dist/horopter-ingress ./cmd/horopter-ingress
       - go build -o dist/horopter-egress ./cmd/horopter-egress
       - go build -o dist/horoctl-migrate ./cmd/horoctl-migrate
+      - go build -o dist/horoctl ./cmd/horoctl
   up:
     desc: Pull the pinned images and start the stack
     cmds:

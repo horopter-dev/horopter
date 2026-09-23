@@ -15,14 +15,15 @@ events in; observability tools read them out to enrich graphs.
 v0.1.0. The 0.1 HTTP API and storage schema are settled — a change that breaks
 either gets a new minor or major, not a patch inside the line.
 
-`horopter-egress` still has no authentication; read [Security](#security) before
-putting it anywhere its port can be reached.
+Every non-probe route on both `horopter-ingress` and `horopter-egress` now requires an
+issued credential; read [Security](#security) for what each role grants before putting
+either daemon anywhere its port can be reached.
 
 ## Quick start
 
-Horopter is published as three container images and a compose file that runs them. A release
-carries a `docker-compose.yml` release asset with that release's image tags already rendered
-in:
+Horopter is published as four container images — `horopter-ingress`, `horopter-egress`,
+`horoctl-migrate` and `horoctl` — and a compose file that runs them. A release carries a
+`docker-compose.yml` release asset with that release's image tags already rendered in:
 
     curl -O https://github.com/horopter-dev/horopter/releases/download/v0.1.0/docker-compose.yml
     docker compose up -d
@@ -46,28 +47,41 @@ names instead of building locally:
 `task stop` halts the stack and `task down` removes its containers, both keeping the
 database; `task down:wipe` also **destroys the database volume**.
 
+The stack starts with no credentials of its own. After `horoctl-migrate` applies the schema,
+a `bootstrap` service runs `horoctl admin bootstrap`, which creates a `default` tenant if
+absent and issues two fixed development credentials if their key prefixes are absent — one
+`producer` (`append` only) and one `reader` (`read` only), never a `superuser`, which also
+grants `issue` and would otherwise put a non-expiring, credential-minting key in `.env`.
+`bootstrap` is idempotent, so running `task up` twice does not error. Export the two dev keys
+to follow along below (they are also `docker-compose.yml`'s and `hack/seed.sh`'s own
+defaults, so `task seed` needs neither set):
+
+    export HOROPTER_DEV_PRODUCER_KEY=horo_dead00000001_00000000000000000000000000000000000000000000000000000000000000
+    export HOROPTER_DEV_READER_KEY=horo_dead00000002_11111111111111111111111111111111111111111111111111111111111111
+
 Then post an event and read it back:
 
     curl -X POST localhost:8080/v1/events \
-      -H 'Authorization: Bearer local-dev-token' -H 'Content-Type: application/json' \
+      -H "Authorization: Bearer $HOROPTER_DEV_PRODUCER_KEY" -H 'Content-Type: application/json' \
       -d '{"source":"ci","type":"deployment.started","subject":"acme/prod",
            "occurred_at":"2026-09-14T10:00:00Z","correlation_ref":"dep-1"}'
-    curl "localhost:8081/adapters/grafana/annotations?from=1789376400000&to=1789383600000"
+    curl -H "Authorization: Bearer $HOROPTER_DEV_READER_KEY" \
+      "localhost:8081/adapters/grafana/annotations?from=1789376400000&to=1789383600000"
 
-The compose file pulls `ghcr.io/horopter-dev/horopter-{ingress,egress,migrate}` at the tag it
-names, then runs `horopter-migrate` — the only binary permitted to apply schema DDL — to
-completion before starting `horopter-ingress` on port 8080 and `horopter-egress` on port 8081.
-`task down` stops the stack and removes its containers, keeping the database volume;
-`task down:wipe` destroys that volume too.
+The compose file pulls `ghcr.io/horopter-dev/{horopter-ingress,horopter-egress,horoctl-migrate,horoctl}`
+at the tag it names, runs `horoctl-migrate` — the only standalone binary permitted to apply
+schema DDL — to completion, then `bootstrap` (above), before starting `horopter-ingress` on
+port 8080 and `horopter-egress` on port 8081.
 
 Each service is configured with environment variables:
 
 - `HOROPTER_IMAGE_TAG` — the published tag the repository's `docker-compose.yml` runs;
   defaults to the version committed in that file. `task up:local` ignores it, since it builds
   images from the working tree instead of pulling one.
-- `DATABASE_URL` — PostgreSQL connection string, required by all three binaries.
-- `HOROPTER_INGRESS_TOKEN` — bearer token `horopter-ingress` requires on writes; it
-  refuses to start without one.
+- `DATABASE_URL` — PostgreSQL connection string, required by all four binaries.
+- `HOROPTER_DEV_PRODUCER_KEY`, `HOROPTER_DEV_READER_KEY` — the two credentials `bootstrap`
+  issues; see [Issuing credentials](#issuing-credentials) below for keys beyond the two fixed
+  dev ones.
 - `HOROPTER_ADDR` — listen address for `horopter-ingress` and `horopter-egress`
   (defaults to `0.0.0.0:8080` and `0.0.0.0:8081` respectively).
 - `HOROPTER_INGRESS_MAX_EVENT_ATTRIBUTE_BYTES` — the largest attribute map
@@ -85,14 +99,65 @@ Each service is configured with environment variables:
 A value that does not parse, or is out of range, stops the daemon at startup with an error
 naming the variable and the value.
 
+### Issuing credentials
+
+`horoctl` issues, lists and revokes credentials directly against `DATABASE_URL` — no daemon
+needs to be running, and no credential of `horoctl`'s own is required, since authority here
+comes from database access, not from a presented key:
+
+    horoctl admin tenant create --dsn "$DATABASE_URL" --display-name acme
+    horoctl admin keys issue --dsn "$DATABASE_URL" --role reader --tenant <tenant-id> \
+      --source github --locus github
+
+`--dsn` defaults to `DATABASE_URL` from the environment, so it can be omitted when that is
+already set — for the repository's own `docker-compose.yml`,
+`postgres://horopter:horopter@localhost:5432/horopter?sslmode=disable`, since `docker-compose.yml`
+publishes Postgres on that port.
+`admin tenant create` prints the new tenant's opaque id to stdout; `admin keys issue` prints
+the full key to stdout **once** — it cannot be recovered afterwards — and everything else
+(the prefix, role, tenant and locus it issued) to stderr.
+
+Four roles exist, each a fixed set of capabilities: `producer` (`append`), `reader`
+(`read`), `tenant_admin` (`read`, `admin`) and `superuser` (`append`, `read`, `admin`,
+`issue`) — see [Security](#security) for what each capability gates. `--tenant` scopes a
+credential to one tenant; omit it for a global credential valid for any tenant named with
+`?tenant=`. `admin keys list [--tenant <id>]` and `admin keys revoke --prefix <prefix>`
+manage what already exists.
+
+`--key <value>` on `keys issue`, or `--producer-key`/`--reader-key` on `admin bootstrap`,
+sets an explicit key instead of generating one — development only, and refused below 32
+bytes or outside the `horo_<12-hex-char-prefix>_<secret>` shape a presented credential is
+actually parsed as, since anything else would store a credential that can never
+authenticate.
+
 ## Security
 
-**`horopter-egress` has no authentication in v0.1, and `docker-compose.yml` publishes its
-port (8081) on the host.** Every route it serves — `GET /v1/changes`, `GET /v1/events`,
-`GET /adapters/grafana/annotations` and `GET /adapters/otlp/spans` — answers anyone who can
-reach that port, with no credential check of any kind. A caller can list a tenant's full
-change history and raw event log: subjects, actors, titles, correlation refs, and every
-attribute a producer attached, including whatever was put in `horopter.description`.
+**Every non-probe route on both daemons now requires an issued credential.** `horopter-ingress`
+gates `POST /v1/events` and `POST /v1/events/cloudevents` on the `append` capability;
+`horopter-egress` gates its four routes — `GET /v1/changes`, `GET /v1/events`,
+`GET /adapters/grafana/annotations` and `GET /adapters/otlp/spans` — on `read`. `/healthz`
+and `/readyz` stay open on both, so an orchestrator's probes need no credential. A request
+with no credential, or one that is malformed, unknown, revoked or expired, is answered `401`
+with an identical body regardless of which — telling those apart would let a caller probe
+for a valid prefix. A credential presented and accepted, but lacking the route's capability
+(a `reader` key on `POST /v1/events`, say), is answered `403`.
+
+A credential is scoped to one tenant, or to none. `POST /v1/events` takes no tenant field at
+all — a producer's writes land in its own credential's tenant, and a request body naming one
+is answered `400` — while every `horopter-egress` route reads `?tenant=` as a selector: a
+tenant-scoped credential may name only its own tenant there (`403` for any other), and a
+global credential must name one that exists (`400` naming none, `404` naming one that does
+not exist). Four roles, each a fixed set of capabilities, are what a credential is issued as:
+`producer` (`append`), `reader` (`read`), `tenant_admin` (`read`, `admin`) and `superuser`
+(`append`, `read`, `admin`, `issue` — the only role that can mint further credentials). See
+[Issuing credentials](#issuing-credentials).
+
+**No compose file in this repository ever issues a `superuser` credential.** `bootstrap`
+issues a `producer` and a `reader` only — the two dev keys have no `read`+`append` overlap,
+which is what makes `POST /v1/events` with the reader key `403` rather than succeeding, and
+neither can issue a further credential. A credential's revocation (`horoctl admin keys
+revoke --prefix <prefix>`) is visible to new requests within its cache TTL (30s by default),
+not instantly.
 
 A read that fails is answered `500` with a generic body, and the underlying error — which
 can name tables, constraints and the database host — is written to the daemon's log
@@ -104,17 +169,13 @@ memory limit. That admission control limits what egress spends on reads — data
 and memory. It is not protection against a flood of requests, which belongs in front of the
 port, in a WAF or equivalent.
 
-The missing authentication is a deliberate decision for v0.1, not an oversight.
-`horopter-ingress` does require a bearer token (`HOROPTER_INGRESS_TOKEN`) on writes, so
-this exposure is specific to the read side. If you deploy this anywhere it is reachable by
-anyone you would not trust with the full change log, put a network boundary or a reverse
-proxy with its own authentication in front of port 8081 — Horopter provides neither.
-
-**`docker-compose.yml` also publishes Postgres itself (5432) on the host, with the
-username and password both `horopter`.** That is direct read and write access to the
-event log, past every check either daemon makes, for anyone who can reach the port. The
-compose file is a local development stack and nothing else: do not run it anywhere its
-ports are reachable from outside the machine, and do not reuse its credentials.
+**`docker-compose.yml` publishes both API ports (8080, 8081) and Postgres itself (5432) on
+the host, with the username and password both `horopter`.** The API ports being reachable is
+no longer an exposure by itself — every route still needs a credential — but direct Postgres
+access is direct read and write access to the event log and the credential table, past every
+check either daemon or `horoctl` makes, for anyone who can reach the port. The compose file
+is a local development stack and nothing else: do not run it anywhere its ports are reachable
+from outside the machine, and do not reuse its credentials.
 
 **The `/metrics` listener is unauthenticated on both daemons.** It binds `localhost` by
 default, which is reachable only from inside the same container or pod. Bound to another
@@ -150,7 +211,8 @@ metric is reported against:
 
 - `OTEL_SERVICE_NAME` — overrides the `service.name` resource attribute reported with every
   span and metric. Defaults to the binary's own name: `horopter-ingress`, `horopter-egress`
-  or `horopter-migrate`.
+  or `horoctl-migrate` — the same default whether an operator ran `horoctl-migrate` or
+  `horoctl migrate`, since both apply the identical migration.
 - `OTEL_RESOURCE_ATTRIBUTES` — comma-separated `key=value` pairs merged onto the resource
   every span and metric carries, e.g. `deployment.environment.name=prod,team=platform`.
   **This one is different from the others**: Horopter's own configuration code never reads
@@ -198,7 +260,7 @@ Tracing is **off by default** in all three binaries.
   - `http` — the server span `otelhttp` wraps every request in.
   - `store` — the spans the store package creates around each store-level operation: append an
     event, list events, list changes, estimate a read's size, and rebuild a tenant's
-    projection. Disabling it on `horopter-migrate` silences the rebuild span, which is the one
+    projection. Disabling it on `horoctl-migrate` silences the rebuild span, which is the one
     an operator running `--rebuild-tenant` most wants.
   - `sql` — the per-statement spans `otelpgx` creates around every SQL statement the store
     issues.
@@ -243,8 +305,9 @@ configured.
   exporter themselves. Defaults: a push every 60 seconds, a 30-second timeout, cumulative
   temporality.
 
-`horopter-migrate` runs once and exits, so nothing could scrape it and it serves no
-`/metrics`. With a collector configured, its metrics go out over OTLP as it finishes.
+`horoctl-migrate` (and `horoctl migrate`) runs once and exits, so nothing could scrape it and
+it serves no `/metrics`. With a collector configured, its metrics go out over OTLP as it
+finishes.
 
 The host and port defaults are the OpenTelemetry specification's, which has two consequences:
 
@@ -325,14 +388,15 @@ as the rest of the binary.** Two cases are worth knowing because neither stops t
 
 ## Upgrading
 
-`horopter-migrate` is the only binary permitted to apply schema DDL. Run it to completion
-against the database before starting any daemon at the new version; each daemon asserts the
-recorded schema version at startup and refuses to run against one it does not understand,
-so a skewed rollout fails loudly rather than corrupting data quietly.
+`horoctl-migrate` and `horoctl`'s compiled-in `migrate` verb — the same `internal/migrate.Run`
+behind both, so neither can drift from the other — are the only ways schema DDL is applied.
+Run one to completion against the database before starting any daemon at the new version;
+each daemon asserts the recorded schema version at startup and refuses to run against one it
+does not understand, so a skewed rollout fails loudly rather than corrupting data quietly.
 
 ### Rebuilding a tenant's projection
 
-    horopter-migrate --rebuild-tenant=<tenant-id>
+    horoctl-migrate --rebuild-tenant=<tenant-id>
 
 The `change` table is a derived view of the immutable `event` log, so it can always be
 discarded and replayed. This runs only after the schema-version assertion passes.
@@ -513,22 +577,25 @@ interesting paths reachable:
 ## CloudEvents: reserved data keys
 
 `POST /v1/events/cloudevents` takes a CloudEvents envelope. CloudEvents carries an
-instant but no duration, lifecycle, or tenancy, so four fields that `POST /v1/events`
-sends as first-class request fields travel in the `data` payload instead:
+instant but no duration or lifecycle, so three fields that `POST /v1/events` sends as
+first-class request fields travel in the `data` payload instead:
 
 | data key | becomes | if absent |
 |---|---|---|
-| `tenant` | the event's tenant | `default` |
 | `correlation_ref` | the ref two events share to describe one interval | the event stands alone as a point |
 | `title` | the change title | falls back to the event type |
 | `actor` | who performed the change | empty |
 
-These four keys are **reserved**: each is lifted into its field and removed from the
+These three keys are **reserved**: each is lifted into its field and removed from the
 attribute map, so it is not also stored as a generic attribute. Every other key in `data`
 is kept as an attribute untouched.
 
 A reserved key holding a non-string value is left alone rather than coerced — `{"title":
 7}` stays an attribute and the title falls back as though it were absent.
+
+CloudEvents carries no tenancy either, but `tenant` is not a fourth reserved key: it is
+derived from the credential, the same as on `POST /v1/events`, and a `data.tenant` of any
+kind — including `null` — is rejected with `400` rather than read.
 
 The envelope's own `time` supplies `occurred_at`. It is optional in CloudEvents; when it
 is missing, receipt time is used, since that is the earliest moment the system can attest

@@ -21,12 +21,25 @@ builds:
     goos: [linux]
     goarch: [amd64, arm64]
     flags: [-trimpath]
-  - id: migrate
-    main: ./cmd/horopter-migrate
-    binary: horopter-migrate
+  - id: horoctl-migrate
+    main: ./cmd/horoctl-migrate
+    binary: horoctl-migrate
     env: [CGO_ENABLED=0]
     goos: [linux]
     goarch: [amd64, arm64]
+    flags: [-trimpath]
+  # horoctl is the first binary here needing a non-Linux target: ingress, egress and
+  # horoctl-migrate exist to become container images, but operators run horoctl from a
+  # laptop. darwin/amd64 is excluded rather than built and left unpublished.
+  - id: horoctl
+    main: ./cmd/horoctl
+    binary: horoctl
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: darwin
+        goarch: amd64
     flags: [-trimpath]
 
 # ko compiles each platform and pushes an OCI index straight to the registry: no Dockerfile,
@@ -61,11 +74,26 @@ kos:
     labels:
       org.opencontainers.image.source: "{{ .GitURL }}"
       org.opencontainers.image.revision: "{{ .FullCommit }}"
-  - id: migrate
-    build: migrate
+  - id: horoctl-migrate
+    build: horoctl-migrate
     base_image: gcr.io/distroless/static-debian12:nonroot
     user: "65532:65532"
-    repositories: [ghcr.io/horopter-dev/horopter-migrate]
+    repositories: [ghcr.io/horopter-dev/horoctl-migrate]
+    platforms: [linux/amd64, linux/arm64]
+    tags: ["{{ .Tag }}"]
+    bare: true
+    preserve_import_paths: false
+    sbom: spdx
+    labels:
+      org.opencontainers.image.source: "{{ .GitURL }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+  # horoctl's compose-stack use (the bootstrap service) is the container image; the
+  # darwin/arm64 build above never reaches here — kos only ever produces Linux images.
+  - id: horoctl
+    build: horoctl
+    base_image: gcr.io/distroless/static-debian12:nonroot
+    user: "65532:65532"
+    repositories: [ghcr.io/horopter-dev/horoctl]
     platforms: [linux/amd64, linux/arm64]
     tags: ["{{ .Tag }}"]
     bare: true
@@ -76,9 +104,18 @@ kos:
       org.opencontainers.image.revision: "{{ .FullCommit }}"
 
 archives:
+  # Two archives, not one: horoctl builds for darwin/arm64 too, and goreleaser refuses one
+  # archive definition covering platforms with different binary counts. Both need an
+  # explicit name_template — their default names collide on every linux platform, since
+  # both otherwise render "horopter_<version>_<os>_<arch>".
   - id: binaries
-    ids: [ingress, egress, migrate]
+    ids: [ingress, egress, horoctl-migrate]
     formats: [tar.gz]
+    name_template: "horopter_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  - id: horoctl
+    ids: [horoctl]
+    formats: [tar.gz]
+    name_template: "horoctl_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
   name_template: checksums.txt

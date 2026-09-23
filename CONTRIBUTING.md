@@ -142,7 +142,7 @@ Commits follow [Conventional Commits][cc]. A `commit-msg` hook rejects a
 non-conforming message once you have run `prek install` above. CI does not check
 commit messages, so that hook is the only thing that will tell you:
 
-    fix: log which migrations horopter-migrate applied
+    fix: log which migrations horoctl-migrate applied
     feat(egress): return Retry-After when a read is shed
     chore: pin the dev compose stack to v0.1.0-dev.3
 
