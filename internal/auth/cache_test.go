@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -36,6 +37,24 @@ func TestNegativeCacheStopsRepeatedLookups(t *testing.T) {
 	}
 	assert.Equal(t, 1, lookup.callCount(),
 		"an unknown prefix must not reach the store once per request")
+}
+
+// TestAnOversizedPrefixNeverReachesTheStoreOrTheCache is the other half of the key-shape
+// fix: a prefix the service could not have issued is refused before it can be retained,
+// so a loop of them costs neither a query nor a cache entry.
+func TestAnOversizedPrefixNeverReachesTheStoreOrTheCache(t *testing.T) {
+	lookup := &fakeLookup{cred: validCredential()}
+	a := auth.New(lookup, time.Now, auth.DefaultOptions())
+	huge := "horo_" + strings.Repeat("a", 1<<20) + "_x"
+
+	for range 10 {
+		assert.Equal(t, http.StatusUnauthorized, serve(t, a, auth.CapRead, huge).Code)
+	}
+	assert.Equal(t, 0, lookup.callCount(), "a malformed key is refused before the store")
+
+	// The cache is untouched, so the credential's own lookup is still the first one.
+	require.Equal(t, http.StatusOK, serve(t, a, auth.CapRead, validKey).Code)
+	assert.Equal(t, 1, lookup.callCount())
 }
 
 func TestDefaultOptionsCacheBothOutcomes(t *testing.T) {
@@ -107,12 +126,46 @@ func TestTheCacheIsBoundedByItsGenerations(t *testing.T) {
 		"the first prefix of the flood must have been dropped, not retained for its TTL")
 }
 
-func TestConcurrentResolvesShareOneCache(t *testing.T) {
+// TestAColdBurstOnOnePrefixCostsOneStoreCall is the pool-protection property: auth runs
+// outside admission and admission is sized from the same pool, so concurrent resolutions
+// of one cold prefix must collapse into a single query rather than take a connection each.
+func TestAColdBurstOnOnePrefixCostsOneStoreCall(t *testing.T) {
+	gate := make(chan struct{})
+	lookup := &fakeLookup{cred: validCredential(), gate: gate}
+	a := auth.New(lookup, time.Now, auth.DefaultOptions())
+	handler := a.Require(auth.CapRead)(okHandler())
+
+	codes := make([]int, 64)
+	var wg sync.WaitGroup
+	for i := range codes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("Authorization", "Bearer "+validKey)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			codes[i] = rec.Code
+		}()
+	}
+
+	// Hold the store until the burst has piled up behind the one call that reached it.
+	require.Eventually(t, func() bool { return lookup.callCount() >= 1 },
+		5*time.Second, time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+	close(gate)
+	wg.Wait()
+
+	assert.Equal(t, 1, lookup.callCount(),
+		"64 concurrent requests for one prefix must take one connection, not 64")
+	for i, code := range codes {
+		require.Equal(t, http.StatusOK, code, "request %d", i)
+	}
+}
+
+func TestConcurrentResolvesOfManyPrefixesAreSafe(t *testing.T) {
 	lookup := &fakeLookup{cred: validCredential()}
-	a := auth.New(lookup, time.Now, auth.Options{
-		PositiveTTL: auth.DefaultPositiveTTL,
-		NegativeTTL: auth.DefaultNegativeTTL,
-	})
+	a := auth.New(lookup, time.Now, auth.DefaultOptions())
 	handler := a.Require(auth.CapRead)(okHandler())
 
 	codes := make([]int, 64)

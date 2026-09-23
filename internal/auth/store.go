@@ -4,15 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"horopter.dev/horopter/internal/core"
 )
 
-// ErrNoCredential reports that no credential carries the presented key prefix. It is the
-// one lookup failure the Authenticator caches, and the one it does not log.
-var ErrNoCredential = errors.New("no credential for that key prefix")
+// ErrNoCredential reports that no credential the service can use carries the presented
+// key prefix — no row at all, or a row it cannot read as an authorization decision. It
+// is the one lookup failure the Authenticator caches, and the one that answers 401.
+var ErrNoCredential = errors.New("no usable credential for that key prefix")
 
 // Lookup fetches a credential by its key prefix, returning ErrNoCredential when none
 // carries it. Implementations are called once per cache miss, not once per request.
@@ -57,7 +59,12 @@ func (s *Store) CredentialByPrefix(ctx context.Context, prefix string) (Credenti
 	}
 	tenant, err := tenantFrom(tenantID)
 	if err != nil {
-		return Credential{}, fmt.Errorf("credential %s: %w", cred.ID, err)
+		// A row this service cannot read is an issuing defect, and the operator needs to
+		// see it — but the caller must not, or "the prefix exists" leaks through the
+		// difference between a 503 here and a 401 for an unknown prefix.
+		slog.ErrorContext(ctx, "credential row is unusable", "credential", cred.ID,
+			"error", err)
+		return Credential{}, fmt.Errorf("%w: credential %s: %w", ErrNoCredential, cred.ID, err)
 	}
 	cred.Tenant = tenant
 	cred.Capabilities = capabilitiesFrom(capabilities)

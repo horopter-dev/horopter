@@ -48,11 +48,14 @@ func (c *fakeClock) advance(d time.Duration) {
 }
 
 // fakeLookup answers for knownPrefix only, and counts what reached it so a test can tell
-// a cache hit from a lookup. A non-nil fails stands in for an unreachable store.
+// a cache hit from a lookup. A non-nil fails stands in for an unreachable store; a
+// non-nil gate holds each call until the test closes it, which is how a burst is made to
+// overlap rather than run one after another.
 type fakeLookup struct {
 	mu    sync.Mutex
 	cred  auth.Credential
 	fails error
+	gate  chan struct{}
 	calls int
 }
 
@@ -60,15 +63,20 @@ func (f *fakeLookup) CredentialByPrefix(
 	_ context.Context, prefix string,
 ) (auth.Credential, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.calls++
-	if f.fails != nil {
-		return auth.Credential{}, f.fails
+	cred, fails, gate := f.cred, f.fails, f.gate
+	f.mu.Unlock()
+
+	if gate != nil {
+		<-gate
 	}
-	if f.cred.ID == "" || prefix != knownPrefix {
+	if fails != nil {
+		return auth.Credential{}, fails
+	}
+	if cred.ID == "" || prefix != knownPrefix {
 		return auth.Credential{}, auth.ErrNoCredential
 	}
-	return f.cred, nil
+	return cred, nil
 }
 
 func (f *fakeLookup) recover() {
@@ -173,6 +181,55 @@ func TestUnknownPrefixAndWrongSecretAreIndistinguishable(t *testing.T) {
 	assert.Equal(t, unknown.Body.String(), wrong.Body.String(),
 		"a differing body is a prefix-enumeration oracle")
 	assert.Equal(t, unknown.Code, wrong.Code)
+	assert.Equal(t, unknown.Header(), wrong.Header(),
+		"a differing header is the same oracle by another route")
+}
+
+func TestEveryAnswerVariesOnTheHeadersTheCredentialArrivesIn(t *testing.T) {
+	a := testAuthenticator(t, producerCredential(), auth.WithHeader("X-Horopter-Key"))
+	for name, tc := range map[string]struct {
+		capability auth.Capability
+		header     string
+	}{
+		"authorized":      {auth.CapAppend, validKey},
+		"unauthenticated": {auth.CapAppend, ""},
+		"forbidden":       {auth.CapAdmin, validKey},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := serve(t, a, tc.capability, tc.header)
+			assert.Equal(t, "Authorization, X-Horopter-Key", rec.Header().Get("Vary"),
+				"a shared cache must not serve one credential's answer to another")
+		})
+	}
+}
+
+func TestVaryNamesOnlyAuthorizationWhenNoOtherHeaderIsConfigured(t *testing.T) {
+	a := testAuthenticator(t, validCredential())
+	assert.Equal(t, "Authorization", serve(t, a, auth.CapRead, validKey).Header().Get("Vary"))
+}
+
+func TestA401CarriesTheSameChallengeWhateverWentWrong(t *testing.T) {
+	a := testAuthenticator(t, validCredential())
+	for name, header := range map[string]string{
+		"absent":         "",
+		"unknown prefix": "horo_ffffffffffff_anything",
+		"wrong secret":   "horo_" + knownPrefix + "_wrong",
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := serve(t, a, auth.CapRead, header)
+			assert.Equal(t, `Bearer realm="horopter"`,
+				rec.Header().Get("WWW-Authenticate"),
+				"the challenge names the scheme and never why the credential failed")
+		})
+	}
+}
+
+func TestA403CarriesNoChallenge(t *testing.T) {
+	a := testAuthenticator(t, producerCredential())
+	rec := serve(t, a, auth.CapAdmin, validKey)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Empty(t, rec.Header().Get("WWW-Authenticate"),
+		"the credential is fine; re-presenting one would not help")
 }
 
 func TestBearerWinsOverTheConfigurableHeader(t *testing.T) {

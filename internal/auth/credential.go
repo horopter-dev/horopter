@@ -38,13 +38,25 @@ func NewKey(entropy io.Reader) (key, prefix, hash string, err error) {
 }
 
 // SplitKey separates a presented key into its lookup prefix and secret, reporting
-// ok=false for anything that does not match the horo_<prefix>_<secret> shape.
+// ok=false for anything that does not match the horo_<prefix>_<secret> shape, including
+// a prefix NewKey could not have produced.
 func SplitKey(key string) (prefix, secret string, ok bool) {
 	parts := strings.Split(key, "_")
-	if len(parts) != 3 || parts[0] != keyBrand || parts[1] == "" || parts[2] == "" {
+	if len(parts) != 3 || parts[0] != keyBrand || !isLookupPrefix(parts[1]) || parts[2] == "" {
 		return "", "", false
 	}
 	return parts[1], parts[2], true
+}
+
+// isLookupPrefix reports whether s is exactly the prefix NewKey emits. The length is
+// checked rather than assumed because the prefix becomes a cache key: accepting a longer
+// one would let an unauthenticated caller choose how many bytes each cached entry costs.
+func isLookupPrefix(s string) bool {
+	if len(s) != prefixBytes*2 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
 }
 
 // VerifySecret reports whether secret hashes to hash, comparing in constant time.

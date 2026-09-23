@@ -29,6 +29,36 @@ func TestSplitKeyRejectsMalformed(t *testing.T) {
 	}
 }
 
+// TestSplitKeyRejectsAPrefixNewKeyCouldNotHaveIssued closes an unauthenticated
+// memory-exhaustion vector: the prefix becomes a cache key, so a caller who can choose
+// its length chooses how many bytes each cached entry costs.
+func TestSplitKeyRejectsAPrefixNewKeyCouldNotHaveIssued(t *testing.T) {
+	for name, in := range map[string]string{
+		"too short":       "horo_abc_secret",
+		"one over":        "horo_0123456789abc_secret",
+		"one under":       "horo_0123456789a_secret",
+		"not hex":         "horo_zzzzzzzzzzzz_secret",
+		"a megabyte":      "horo_" + strings.Repeat("a", 1<<20) + "_secret",
+		"uppercase brand": "HORO_0123456789ab_secret",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, ok := auth.SplitKey(in)
+			assert.False(t, ok)
+		})
+	}
+}
+
+func TestSplitKeyAcceptsWhatNewKeyIssues(t *testing.T) {
+	key, prefix, _, err := auth.NewKey(rand.Reader)
+	require.NoError(t, err)
+	require.Len(t, prefix, 12, "the lookup prefix is six bytes of hex")
+
+	got, secret, ok := auth.SplitKey(key)
+	require.True(t, ok)
+	assert.Equal(t, prefix, got)
+	assert.Len(t, secret, 64)
+}
+
 func TestNewKeyIsDistinctEachTime(t *testing.T) {
 	seen := map[string]bool{}
 	for range 100 {

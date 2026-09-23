@@ -189,6 +189,30 @@ func TestStoreReadsARevokedCredentialAsRevoked(t *testing.T) {
 // TestTheDatabaseAlsoRefusesASubjectPatternOnAnAdminGrant pins the backstop the
 // middleware is the authority for: the CHECK in migration 0004 enumerates the roles it
 // knows, and a role added later would slip past it into the middleware's own refusal.
+// TestStoreRefusesARowItCannotReadAsAnUnknownCredential pins the fail-closed direction.
+// An empty non-NULL tenant_id would read as the global credential — every tenant — so
+// the row is refused; and it is refused as ErrNoCredential, because answering a store
+// error here would tell a caller their prefix exists while an unknown one gets 401.
+func TestStoreRefusesARowItCannotReadAsAnUnknownCredential(t *testing.T) {
+	store := credentialStore(t)
+
+	// tenant_id has a foreign key, so the empty tenant has to exist for a credential to
+	// hold the value this guard is about. Seeded before the credential so that the
+	// cleanups, which run last-registered first, drop the credential before the tenant.
+	execDB(t, `INSERT INTO tenant (id, display_name) VALUES ('', 'the empty tenant')
+		ON CONFLICT (id) DO NOTHING`)
+	t.Cleanup(func() { execDB(t, `DELETE FROM tenant WHERE id = ''`) })
+
+	row := seedCredential(t, credentialSpec{role: "reader"})
+	execDB(t, `UPDATE credential SET tenant_id = '' WHERE id = $1`, row.credentialID)
+
+	_, err := store.CredentialByPrefix(context.Background(), row.prefix)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, auth.ErrNoCredential,
+		"an unusable row is a credential failure, so it cannot answer 503 where an "+
+			"unknown prefix answers 401")
+}
+
 func TestTheDatabaseAlsoRefusesASubjectPatternOnAnAdminGrant(t *testing.T) {
 	credentialStore(t)
 	row := seedCredential(t, credentialSpec{role: "reader"})

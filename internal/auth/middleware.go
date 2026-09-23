@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // DefaultPositiveTTL is how long a resolved credential is cached, and therefore the
@@ -65,13 +67,20 @@ func WithHeader(name string) Option {
 	return func(o *Options) { o.Header = name }
 }
 
+// wwwAuthenticate is the same on every 401. It names the scheme and nothing else: RFC
+// 6750's error codes would say which way the credential failed, which is the distinction
+// the uniform body exists to withhold.
+const wwwAuthenticate = `Bearer realm="horopter"`
+
 // Authenticator resolves a presented machine key into a Principal and gates routes on
 // what that principal's role can do.
 type Authenticator struct {
 	lookup Lookup
 	clock  func() time.Time
 	cache  *cache
+	group  singleflight.Group
 	header string
+	vary   string
 }
 
 // New returns an Authenticator reading credentials through lookup. clock is injected so
@@ -82,6 +91,7 @@ func New(lookup Lookup, clock func() time.Time, opts Options) *Authenticator {
 		clock:  clock,
 		cache:  newCache(opts.PositiveTTL, opts.NegativeTTL),
 		header: opts.Header,
+		vary:   varyValue(opts.Header),
 	}
 }
 
@@ -90,6 +100,9 @@ func New(lookup Lookup, clock func() time.Time, opts Options) *Authenticator {
 func (a *Authenticator) Require(c Capability) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// On the rejections too: without it a shared cache in front of egress may
+			// serve one tenant's changes to another.
+			w.Header().Set("Vary", a.vary)
 			p, err := a.resolve(r)
 			if err != nil {
 				reject(w, r, err)
@@ -105,6 +118,15 @@ func (a *Authenticator) Require(c Capability) func(http.Handler) http.Handler {
 	}
 }
 
+// varyValue lists the headers a credential may arrive in, joined once at construction so
+// every answer sets one canonical header.
+func varyValue(header string) string {
+	if header == "" {
+		return "Authorization"
+	}
+	return "Authorization, " + header
+}
+
 // reject answers a failed resolve. An unreachable store is infrastructure and says so;
 // every credential that was read and refused gets the one uniform 401.
 func reject(w http.ResponseWriter, r *http.Request, err error) {
@@ -113,6 +135,7 @@ func reject(w http.ResponseWriter, r *http.Request, err error) {
 		return
 	}
 	slog.DebugContext(r.Context(), "credential rejected", "error", err, "route", r.Pattern)
+	w.Header().Set("WWW-Authenticate", wwwAuthenticate)
 	writeError(w, http.StatusUnauthorized, unauthorizedMessage)
 }
 
@@ -148,22 +171,41 @@ func (a *Authenticator) resolve(r *http.Request) (Principal, error) {
 	return p, err
 }
 
-// credential reads the cache, falling back to the store and caching either outcome. A
-// store failure is left uncached: caching it would extend an outage by the TTL.
+// credential reads the cache, and on a miss collapses every concurrent resolution of the
+// same prefix into one store call. Auth sits outside admission and admission is sized
+// from the same pool, so a burst on one cold prefix would otherwise take a connection per
+// request with nothing able to shed it.
 func (a *Authenticator) credential(
 	ctx context.Context, prefix string, now time.Time,
 ) (Credential, bool, error) {
 	if e, ok := a.cache.get(prefix, now); ok {
 		return e.cred, e.found, nil
 	}
+	// The shared call outlives its leader's request: a client that disconnects mid-flight
+	// must not cancel the lookup every other waiter is blocked on.
+	shared := context.WithoutCancel(ctx)
+	got, err, _ := a.group.Do(prefix, func() (any, error) { return a.fetch(shared, prefix, now) })
+	if err != nil {
+		return Credential{}, false, err
+	}
+	e := got.(*entry)
+	return e.cred, e.found, nil
+}
+
+// fetch reads the store and caches the outcome. A store failure is left uncached:
+// caching it would extend an outage by the TTL. The result is returned by pointer
+// because singleflight hands it back as an any, and boxing the struct copies it.
+func (a *Authenticator) fetch(
+	ctx context.Context, prefix string, now time.Time,
+) (*entry, error) {
 	cred, err := a.lookup.CredentialByPrefix(ctx, prefix)
 	if err != nil && !errors.Is(err, ErrNoCredential) {
 		slog.ErrorContext(ctx, "credential lookup failed", "error", err)
-		return Credential{}, false, fmt.Errorf("%w: %w", errStoreUnavailable, err)
+		return nil, fmt.Errorf("%w: %w", errStoreUnavailable, err)
 	}
-	found := err == nil
-	a.cache.put(prefix, entry{cred: cred, found: found}, now)
-	return cred, found, nil
+	e := entry{cred: cred, found: err == nil}
+	a.cache.put(prefix, e, now)
+	return &e, nil
 }
 
 // presentedKey reads the key from Authorization, and from the configured header only
