@@ -156,14 +156,25 @@ func changeSelection(q ChangeQuery) selection {
 }
 
 // eventSelection selects the event rows q reads. See ListEvents for the ref predicate.
+//
+// The ref is split in Go rather than in SQL so e.id stays a primary-key comparison; a
+// predicate on e.locus || '/' || e.id would compute a value per row and scan the table.
+// A locus cannot contain '/', so cutting at the FIRST '/' recovers both halves exactly.
+//
+// There is deliberately no branch for a ref carrying no '/': strings.Cut then returns an
+// empty id, which no event id equals, so the id arm matches nothing — and nothing is the
+// right answer, since no ref is bare after 0006. Adding a branch to "handle" that case
+// can only make it match something.
 func eventSelection(q EventQuery) selection {
 	query := `SELECT e.* FROM event e WHERE e.tenant = $1`
 	args := []any{q.tenant}
 	if q.Ref != "" {
-		args = append(args, q.Ref)
+		locus, id, _ := strings.Cut(q.Ref, "/")
+		args = append(args, q.Ref, locus, id)
 		query += fmt.Sprintf(
-			" AND (e.correlation_ref = $%d OR (e.correlation_ref = '' AND e.id = $%d))",
-			len(args), len(args))
+			" AND (e.correlation_ref = $%d OR"+
+				" (e.correlation_ref = '' AND e.locus = $%d AND e.id = $%d))",
+			len(args)-2, len(args)-1, len(args))
 	}
 	query += " ORDER BY e.id ASC"
 	if limit, bounded := overFetch(q.Limit); bounded {
@@ -210,8 +221,8 @@ func (s *Store) anyRows(ctx context.Context, sel selection) (bool, error) {
 // whether more rows matched than q.Limit allowed through; the over-fetch that detects that
 // is invisible to the caller, so q.Limit still means what it says.
 //
-// q.Ref is a projection ref, matched the way core.RefFor forms one: a correlated
-// event's correlation_ref, or an uncorrelated event's own id. Filtering on
+// q.Ref is a projection ref, matched the way core.RefFor forms one: a correlated event's
+// correlation_ref, or an uncorrelated event's locus and own id. Filtering on
 // correlation_ref alone made listing a point change's events always return nothing,
 // even though that change is in every query result the egress read side serves. The id
 // arm is restricted to rows with no correlation_ref so it can only ever match the point

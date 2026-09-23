@@ -241,22 +241,32 @@ func TestEndEffectiveIsGeneratedFromEndAt(t *testing.T) {
 }
 
 // TestListEventsFindsAPointChangesEvents covers the ref of a change with no correlation
-// ref. core.RefFor makes such a change's ref its own event id, so filtering the event log
-// on correlation_ref alone returned nothing for every point change the read side serves.
+// ref. core.RefFor makes such a change's ref its locus and its own event id, so filtering
+// the event log on correlation_ref alone returned nothing for every point change the read
+// side serves.
+//
+// It queries core.RefFor(stored) rather than the bare event id deliberately. Asserting on
+// the id is what let this test keep passing when 0006 moved the ref: the value a caller
+// actually holds comes from a change row or from the append response, both of which are
+// RefFor's output, and that is the only value worth pinning.
 func TestListEventsFindsAPointChangesEvents(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 
 	pointID := eventID(t, "point")
-	_, _, err := s.AppendEvent(ctx, mkEvent(tn, pointID, "k1", "", "config.changed", at))
+	stored, _, err := s.AppendEvent(ctx, mkEvent(tn, pointID, "k1", "", "config.changed", at))
 	require.NoError(t, err)
+	pointRef := core.RefFor(stored)
+	require.Equal(t, "ci/"+pointID, pointRef, "precondition: a point ref carries its locus")
+
 	_, _, err = s.AppendEvent(ctx,
 		mkEvent(tn, eventID(t, "correlated"), "k2", "dep-9", "deployment.started", at))
 	require.NoError(t, err)
 
-	point, _, err := s.ListEvents(ctx, refQuery(t, tn, pointID))
+	point, _, err := s.ListEvents(ctx, refQuery(t, tn, pointRef))
 	require.NoError(t, err)
-	require.Len(t, point, 1, "a point change's ref is its own event id, and must list that event")
+	require.Len(t, point, 1, "a point change's ref is its locus and its own event id, and "+
+		"must list that event")
 	assert.Equal(t, pointID, point[0].ID)
 
 	correlated, _, err := s.ListEvents(ctx, refQuery(t, tn, "ci/dep-9"))
@@ -266,11 +276,10 @@ func TestListEventsFindsAPointChangesEvents(t *testing.T) {
 }
 
 // TestListEventsIdArmIgnoresCorrelatedEvents pins that listing a ref returns only the
-// events belonging to it, and not a second change's event whose own id equals the ref.
+// events belonging to it, and not a second change's event whose own id equals the ref's
+// id half.
 //
-// INERT AS OF 0006, AND DELIBERATELY LEFT SO — see the paragraph below before trusting it.
-//
-// What it was written to pin is this qualifier in ListEvents' id arm:
+// What it pins is this qualifier in ListEvents' id arm:
 //
 //	correlation_ref = ''
 //
@@ -278,23 +287,18 @@ func TestListEventsFindsAPointChangesEvents(t *testing.T) {
 // smart quote in running doc-comment text, which is how this comment came to spell a SQL
 // empty-string literal as a character SQL has no use for.
 //
-// Without the qualifier the predicate is "correlation_ref = ref OR id = ref",
-// which also matches any event whose own id happens to equal the ref — and since a
-// correlated event's id is an arbitrary ULID while a ref is producer-supplied, a producer
-// using event ids as correlation refs makes exactly that collision. The two events below
-// belong to different changes and the audit log for one must not show the other's.
+// Without the qualifier the id arm is "locus = <locus> AND id = <id>", which also matches
+// an event whose own id happens to equal the ref's id half — and since a correlated
+// event's id is an arbitrary ULID while a ref is producer-supplied, a producer using event
+// ids as correlation refs makes exactly that collision. The two events below belong to
+// different changes and the audit log for one must not show the other's.
 //
-// 0006 put that qualifier out of this test's reach. A ref is now <locus>/<something>, the
-// id arm still compares the WHOLE ref against e.id, and no event id contains a '/' — so
-// the decoy event below is excluded by "id <> ref" alone and deleting the qualifier from
-// eventSelection leaves this test green. Nothing else covers it either: the point-ref test
-// queries a bare event id, where the decoy fails on id as well. So the leak guard is
-// UNCOVERED by the whole suite at this commit.
-//
-// Task 3 restores reachability by splitting the ref with strings.Cut and comparing e.id to
-// the id half, at which point the decoy reaches arm 2 on id and only the qualifier excludes
-// it. The guard must be re-verified by mutation then — not accepted for staying green,
-// which is exactly what it does today while proving nothing.
+// This guard is only as reachable as the id arm makes it, and it has been unreachable
+// before: between 0006 and the strings.Cut split, the id arm compared the WHOLE ref
+// against e.id, no event id contains a '/', and the decoy below was excluded by "id <>
+// ref" alone — so the qualifier could have been deleted with this test staying green.
+// Check it by mutation rather than by its colour: deleting the qualifier from
+// eventSelection must make this test FAIL.
 func TestListEventsIdArmIgnoresCorrelatedEvents(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -320,6 +324,95 @@ func TestListEventsIdArmIgnoresCorrelatedEvents(t *testing.T) {
 		"the id arm must only ever match the uncorrelated point that owns the ref; "+
 			"matching a correlated event whose id equals the ref leaks another change's log")
 	assert.Equal(t, memberID, got[0].ID)
+}
+
+// TestListEventsIgnoresARefWithNoLocus pins the no-branch design in eventSelection. After
+// 0006 no ref is bare, so a bare one names nothing and must match nothing — including the
+// point event whose id it happens to equal. strings.Cut gives that answer for free by
+// returning an empty id; a branch added to "handle" the case could only make it match.
+func TestListEventsIgnoresARefWithNoLocus(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	pointID := eventID(t, "point")
+	_, _, err := s.AppendEvent(ctx, mkEvent(tn, pointID, "k1", "", "config.changed", at))
+	require.NoError(t, err)
+
+	evs, _, err := s.ListEvents(ctx, refQuery(t, tn, pointID))
+	require.NoError(t, err)
+	assert.Empty(t, evs, "a bare event id is not a ref after 0006 and must match nothing")
+}
+
+// TestListEventsIgnoresARefWithAnEmptyLocus pins the read half of the rule
+// change_ref_has_locus enforces on the write half: '/x' carries a slash but no locus, and
+// an empty locus is not a locus. event_locus_shape means no row can hold one, so the
+// predicate matches nothing — but only as long as the locus arm is compared, not assumed.
+func TestListEventsIgnoresARefWithAnEmptyLocus(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	pointID := eventID(t, "point")
+	_, _, err := s.AppendEvent(ctx, mkEvent(tn, pointID, "k1", "", "config.changed", at))
+	require.NoError(t, err)
+
+	evs, _, err := s.ListEvents(ctx, refQuery(t, tn, "/"+pointID))
+	require.NoError(t, err)
+	assert.Empty(t, evs, "an empty locus is not a locus, so /<id> names nothing")
+}
+
+// TestACorrelatedRefMayCollideWithAPointRef pins the limit the design accepts rather than
+// guards, recorded under "Named limits" in the spec. Before 0006 the two shapes could not
+// collide: a correlated ref was <locus>/<ref> and a point ref was a bare ULID. Both are now
+// <locus>/<something>, so a producer that posts a correlation_ref equal to a point event's
+// own id, in the same tenant and locus, writes into that point's change row.
+//
+// It is consistent rather than corrupting — events are immutable and stored separately, so
+// a rebuild reproduces the same merge — and reaching it takes a deliberate choice by a
+// credential that can already append to the tenant. Guarding it would mean refusing every
+// ULID-shaped correlation ref, which refuses producers whose build or trace ids are ULIDs.
+func TestACorrelatedRefMayCollideWithAPointRef(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	pointID := eventID(t, "point")
+	point, _, err := s.AppendEvent(ctx, mkEvent(tn, pointID, "k1", "", "config.changed", at))
+	require.NoError(t, err)
+
+	// The producer posts the point's own id as its correlation ref. mkEvent composes the
+	// locus onto it exactly as ingress's resolveRef would, so this is stored as
+	// "ci/<pointID>" — the same string RefFor gives the point.
+	_, _, err = s.AppendEvent(ctx,
+		mkEvent(tn, eventID(t, "corr"), "k2", pointID, "deployment.started", at))
+	require.NoError(t, err)
+
+	assert.Equal(t, "ci/"+pointID, core.RefFor(point),
+		"precondition: the point's ref is what the correlated event claimed")
+
+	var rows int
+	require.NoError(t, s.Pool().QueryRow(ctx,
+		`SELECT count(*) FROM change WHERE tenant = $1 AND ref = $2`,
+		tn, "ci/"+pointID).Scan(&rows))
+	assert.Equal(t, 1, rows,
+		"both events fold into one change row; this is the accepted limit, not a bug")
+}
+
+// TestQueryChangesFindsAPointChangeByItsPrefixedRef covers the OTHER read route. Nothing in
+// this change touches changeSelection, which matches c.ref directly, so a point change's
+// migrated ref must reach it unchanged — and no test would say otherwise if it stopped.
+func TestQueryChangesFindsAPointChangeByItsPrefixedRef(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	pointID := eventID(t, "point")
+	stored, _, err := s.AppendEvent(ctx, mkEvent(tn, pointID, "k1", "", "config.changed", at))
+	require.NoError(t, err)
+
+	q := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 10)
+	q.Ref = core.RefFor(stored)
+	changes, _, err := s.QueryChanges(ctx, q)
+	require.NoError(t, err)
+	require.Len(t, changes, 1, "a point change must be reachable by its prefixed ref")
+	assert.Equal(t, "ci/"+pointID, changes[0].Ref)
 }
 
 // TestStartAtIsGeneratedFromTheTwoStartFacts is TestEndEffectiveIsGeneratedFromEndAt's
