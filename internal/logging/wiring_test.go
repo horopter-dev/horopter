@@ -14,33 +14,37 @@ import (
 // passes slog.Default().Handler() to OpenTelemetry's internal logger, so a binary that calls
 // it first gives OTel the text handler and keeps it for the life of the process — with
 // nothing failing and no line out of place except OTel's own.
+//
+// cmd/horoctl-migrate and horoctl's compiled-in migrate verb both call
+// internal/migrate.Run rather than defining their own run(), so Run is where this
+// ordering is enforced for both of them — one entry, not one per caller.
 func TestEveryBinaryInstallsTheHandlerBeforeTelemetry(t *testing.T) {
-	for _, path := range []string{
-		"../../cmd/horopter-ingress/main.go",
-		"../../cmd/horopter-egress/main.go",
-		"../../cmd/horopter-migrate/main.go",
+	for _, c := range []struct{ path, fn string }{
+		{"../../cmd/horopter-ingress/main.go", "run"},
+		{"../../cmd/horopter-egress/main.go", "run"},
+		{"../../internal/migrate/migrate.go", "Run"},
 	} {
-		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+		file, err := parser.ParseFile(token.NewFileSet(), c.path, nil, parser.SkipObjectResolution)
 		require.NoError(t, err)
 
-		calls := callsInRun(file)
+		calls := callsInFunc(file, c.fn)
 		logging := indexOf(calls, "logging.Setup")
 		telemetry := indexOf(calls, "telemetry.Setup")
 
-		require.NotEqual(t, -1, logging, "%s: run() never calls logging.Setup", path)
-		require.NotEqual(t, -1, telemetry, "%s: run() never calls telemetry.Setup", path)
-		assert.Equal(t, 0, logging, "%s: logging.Setup must be run()'s first call", path)
+		require.NotEqual(t, -1, logging, "%s: %s() never calls logging.Setup", c.path, c.fn)
+		require.NotEqual(t, -1, telemetry, "%s: %s() never calls telemetry.Setup", c.path, c.fn)
+		assert.Equal(t, 0, logging, "%s: logging.Setup must be %s()'s first call", c.path, c.fn)
 		assert.Less(t, logging, telemetry,
-			"%s: logging.Setup must come before telemetry.Setup", path)
+			"%s: logging.Setup must come before telemetry.Setup", c.path)
 	}
 }
 
-// callsInRun returns the qualified names of the calls in run's body, in source order.
-func callsInRun(file *ast.File) []string {
+// callsInFunc returns the qualified names of the calls in name's body, in source order.
+func callsInFunc(file *ast.File, name string) []string {
 	var calls []string
 	ast.Inspect(file, func(n ast.Node) bool {
 		fn, ok := n.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "run" {
+		if !ok || fn.Name.Name != name {
 			return true
 		}
 		ast.Inspect(fn.Body, func(inner ast.Node) bool {

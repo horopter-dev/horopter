@@ -59,6 +59,27 @@ func TestSplitKeyAcceptsWhatNewKeyIssues(t *testing.T) {
 	assert.Len(t, secret, 64)
 }
 
+// TestHashSecretMatchesWhatNewKeyStores pins HashSecret to NewKey's own hash, which is
+// what lets horoctl's --key path (an operator-supplied secret NewKey never generated)
+// store a hash VerifySecret will later accept, without reimplementing the algorithm.
+func TestHashSecretMatchesWhatNewKeyStores(t *testing.T) {
+	key, _, hash, err := auth.NewKey(rand.Reader)
+	require.NoError(t, err)
+
+	_, secret, ok := auth.SplitKey(key)
+	require.True(t, ok)
+	assert.Equal(t, hash, auth.HashSecret(secret), "same secret must hash identically")
+}
+
+// TestHashSecretVerifies is the round trip HashSecret exists for: a secret this package
+// never generated must still verify against the hash HashSecret produces for it.
+func TestHashSecretVerifies(t *testing.T) {
+	secret := "an-operator-chosen-development-secret"
+	hash := auth.HashSecret(secret)
+	assert.True(t, auth.VerifySecret(secret, hash))
+	assert.False(t, auth.VerifySecret(secret+"x", hash))
+}
+
 func TestNewKeyIsDistinctEachTime(t *testing.T) {
 	seen := map[string]bool{}
 	for range 100 {

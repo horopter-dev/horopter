@@ -63,3 +63,9 @@ func isLookupPrefix(s string) bool {
 func VerifySecret(secret, hash string) bool {
 	return subtle.ConstantTimeCompare([]byte(hashSecret(secret)), []byte(hash)) == 1
 }
+
+// HashSecret hashes secret the way NewKey's returned hash was produced. It exists for a
+// caller storing a credential whose key it did not generate — horoctl's --key accepts an
+// operator-supplied value for development — so that secret is hashed identically to one
+// NewKey issued, rather than the algorithm being reimplemented at the call site.
+func HashSecret(secret string) string { return hashSecret(secret) }

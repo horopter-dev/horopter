@@ -27,7 +27,7 @@ tasks:
     cmds:
       - go build -o dist/horopter-ingress ./cmd/horopter-ingress
       - go build -o dist/horopter-egress ./cmd/horopter-egress
-      - go build -o dist/horopter-migrate ./cmd/horopter-migrate
+      - go build -o dist/horoctl-migrate ./cmd/horoctl-migrate
   up:
     desc: Pull the pinned images and start the stack
     cmds:
