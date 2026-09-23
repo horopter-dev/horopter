@@ -447,16 +447,17 @@ that has already closed. `start`,
 them. Rebuilding twice gives the same answer both times — it is the live projection the
 replay may disagree with, not itself. If a change's outcome matters to you, read `GET
 /v1/events?ref=<stored-ref>` (the log is immutable and is never reordered) before and after.
-`<stored-ref>` is the ref as stored, which is what `GET /v1/changes` returns — `<locus>/<ref>`
-for anything appended since `0004`, and `legacy/<ref>` for anything that predates it.
+`<stored-ref>` is the ref as stored, which is what `GET /v1/changes` returns — `<locus>/<ref>`,
+where the locus is `legacy` for anything the locus migrations could not recover (see "Refs
+written before the locus migrations", below) and the appending credential's locus otherwise.
 
 ### Refs written before the locus migrations carry a `legacy/` prefix
 
 Every ref is stored as `<locus>/<ref>` within a tenant, where the locus comes from the
 appending credential. Neither change shape carried one from the start: a correlated ref
 predating `0004` and a point ref predating `0006` were both appended without one, so each
-migration gives what it cannot recover the locus `legacy`. A `deploy-42` posted under the
-old model reads back as `legacy/deploy-42`, in `GET /v1/changes` and in
+migration assigns the locus `legacy` to whatever it cannot recover. A `deploy-42` posted
+under the old model reads back as `legacy/deploy-42`, in `GET /v1/changes` and in
 `GET /v1/events?ref=`. A point change is no different — `0006` backfills `event.locus` from
 a correlated ref's own prefix where one exists, and falls back to `legacy` for a point
 event, which never carried one to recover, before prefixing the point changes `0004` left

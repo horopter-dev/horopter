@@ -23,10 +23,11 @@ ALTER TABLE event ALTER COLUMN locus SET NOT NULL;
 
 -- Prefix the point changes 0004 deliberately left bare, identified positively: a point
 -- change's ref IS the id of one of its tenant's point events. Written this way rather than
--- as the NOT EXISTS complement of 0004:90-92, which needed that test only because both ref
--- shapes were bare at the time. event.id is the primary key, so this matches at most one
--- row: no fan-out and no double-prefixing. A correlated c.ref carries a '/' and an
--- event.id never does, so the join cannot reach one.
+-- as the NOT EXISTS complement of 0004's UPDATE change ... WHERE EXISTS clause over
+-- change.ref, which needed that test only because both ref shapes were bare at the time.
+-- event.id is the primary key, so this matches at most one row: no fan-out and no
+-- double-prefixing. A correlated c.ref carries a '/' and an event.id never does, so the
+-- join cannot reach one.
 UPDATE change c SET ref = e.locus || '/' || c.ref
   FROM event e
  WHERE e.tenant = c.tenant
