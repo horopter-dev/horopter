@@ -159,7 +159,7 @@ func deriveKey(explicit string) (key, prefix, hash string, err error) {
 // principal is created per credential rather than reused: horoctl has no way to name an
 // existing one, and decision 4's several-credentials-per-principal model is served just as
 // well by principals that start with one credential each as it would be by a shared one.
-func issueCredential(ctx context.Context, pool *pgxpool.Pool, p issueParams) error {
+func issueCredential(ctx context.Context, db dbExecer, p issueParams) error {
 	principalID := "prn_" + p.prefix
 	credentialID := "cred_" + p.prefix
 	var tenantID, pattern *string
@@ -170,11 +170,11 @@ func issueCredential(ctx context.Context, pool *pgxpool.Pool, p issueParams) err
 		pattern = &p.subjectPattern
 	}
 
-	if _, err := pool.Exec(ctx,
+	if _, err := db.Exec(ctx,
 		`INSERT INTO principal (id, display_name) VALUES ($1, $1)`, principalID); err != nil {
 		return fmt.Errorf("create principal for credential: %w", err)
 	}
-	_, err := pool.Exec(ctx, `
+	_, err := db.Exec(ctx, `
 		INSERT INTO credential
 			(id, principal_id, type, key_prefix, key_hash, role, tenant_id, source, locus,
 			 subject_pattern)

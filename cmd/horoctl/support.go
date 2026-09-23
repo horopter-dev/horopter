@@ -10,9 +10,19 @@ import (
 	"os"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"horopter.dev/horopter/internal/auth"
 )
+
+// dbExecer is the Exec/QueryRow subset both *pgxpool.Pool and pgx.Tx provide, mirroring
+// internal/store/postgres's own querier interface. It lets issueCredential and bootstrap's
+// credential helpers run unchanged whether called directly against the pool, as
+// runKeysIssue does, or inside bootstrap's single locked transaction — see resolveTenant.
+type dbExecer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
 
 // dsnFlag registers the --dsn flag every DB-touching admin subcommand exposes, defaulting
 // to DATABASE_URL so scripts need not repeat it on every invocation.

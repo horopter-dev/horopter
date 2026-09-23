@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -318,6 +320,73 @@ func TestBootstrapIsIdempotent(t *testing.T) {
 	assert.Equal(t, 1, tenantCount(t, "default"))
 	assert.Equal(t, 1, credentialCount(t, devProducerPrefix))
 	assert.Equal(t, 1, credentialCount(t, devReaderPrefix))
+}
+
+// tenantCountByName counts tenant rows named displayName outright, unscoped by any
+// credential. That is safe only for a name this test minted itself and never reuses —
+// unlike tenantCount's "default", which tenantCount's own doc explains is shared across
+// runs of this suite by design and therefore needs scoping through a credential.
+func tenantCountByName(t *testing.T, displayName string) int {
+	t.Helper()
+	pool, err := testdb.Pool()
+	require.NoError(t, err)
+	var n int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM tenant WHERE display_name = $1`, displayName).Scan(&n))
+	return n
+}
+
+// newExplicitKey mints a fresh, valid horo_<prefix>_<secret> key via auth.NewKey, for a
+// test that needs bootstrap's --producer-key/--reader-key shape without colliding with
+// devProducerKey/devReaderKey or any other test's fixed prefix.
+func newExplicitKey(t *testing.T) (key, prefix string) {
+	t.Helper()
+	key, prefix, _, err := auth.NewKey(rand.Reader)
+	require.NoError(t, err)
+	return key, prefix
+}
+
+// TestBootstrapUnderConcurrencySharesOneTenant runs two bootstrap invocations
+// concurrently against the same, freshly minted display name and the same fixed
+// producer/reader keys — the shape a retried CI job, an operator re-running while a
+// prior run is in flight, or a Kubernetes Job with parallelism > 1 takes.
+// TestBootstrapIsIdempotent above already covers two SEQUENTIAL runs, which is exactly
+// why it never caught this: resolveTenant's check-then-act (SELECT, then INSERT if
+// absent) races when both runs start with no tenant row yet. Without its advisory lock,
+// both can see no match and both INSERT, leaving two tenants under one display name,
+// and whichever run then binds its fixed key prefix to the "wrong" tenant_id collides
+// with credential.key_prefix's UNIQUE constraint.
+func TestBootstrapUnderConcurrencySharesOneTenant(t *testing.T) {
+	if os.Getenv(testdb.DSNVar) == "" {
+		t.Skip("set " + testdb.DSNVar + " to run horoctl tests (docker compose up -d db)")
+	}
+	name := "horoctl-concurrent-bootstrap-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	producerKey, producerPrefix := newExplicitKey(t)
+	readerKey, readerPrefix := newExplicitKey(t)
+	t.Cleanup(func() {
+		deleteCredential(producerPrefix)
+		deleteCredential(readerPrefix)
+	})
+	args := []string{"admin", "bootstrap", "--display-name", name, "--source", "dev",
+		"--locus", "dev", "--producer-key", producerKey, "--reader-key", readerKey}
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	stderrs := make([]string, 2)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, stderrs[i], errs[i] = execHoroctl(t, args...)
+		}(i)
+	}
+	wg.Wait()
+
+	require.NoError(t, errs[0], "first concurrent bootstrap run: %s", stderrs[0])
+	require.NoError(t, errs[1], "second concurrent bootstrap run: %s", stderrs[1])
+	assert.Equal(t, 1, tenantCountByName(t, name))
+	assert.Equal(t, 1, credentialCount(t, producerPrefix))
+	assert.Equal(t, 1, credentialCount(t, readerPrefix))
 }
 
 // testCredential is one row allCredentials reads back, carrying just enough to look up

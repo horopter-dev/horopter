@@ -137,6 +137,47 @@ func seedCredential(
 	return core.TenantIDFromRow(tenantID), key
 }
 
+// seedGlobalCredential inserts a principal and a credential of role with tenant_id left
+// NULL — the shape `horoctl admin keys issue --role producer` produces with --tenant
+// omitted, and the shape --role superuser always produces, since credential.tenant_id is
+// nullable. Mirrors seedCredential above, differing only in the tenant column and the
+// caller-chosen role in place of a fixed "producer".
+func seedGlobalCredential(t *testing.T, s *postgres.Store, role string) string {
+	t.Helper()
+	key, prefix, hash, err := auth.NewKey(rand.Reader)
+	require.NoError(t, err)
+
+	principalID := "prn_test_" + prefix
+	credentialID := "cred_test_" + prefix
+	ctx := context.Background()
+	pool := s.Pool()
+
+	_, err = pool.Exec(ctx, `INSERT INTO principal (id, display_name) VALUES ($1, $1)`,
+		principalID)
+	require.NoError(t, err)
+	t.Cleanup(func() { deleteRow(t, "principal", principalID) })
+
+	_, err = pool.Exec(ctx, `
+		INSERT INTO credential (id, principal_id, type, key_prefix, key_hash, role,
+		                        tenant_id, source, locus)
+		VALUES ($1, $2, 'machine_key', $3, $4, $5, NULL, 'test', 'test')`,
+		credentialID, principalID, prefix, hash, role)
+	require.NoError(t, err)
+	t.Cleanup(func() { deleteRow(t, "credential", credentialID) })
+
+	return key
+}
+
+// eventCountBySubject counts event rows carrying subject, for a test that must prove a
+// rejected append wrote nothing rather than trusting the response code alone.
+func eventCountBySubject(t *testing.T, store *postgres.Store, subject string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, store.Pool().QueryRow(context.Background(),
+		`SELECT count(*) FROM event WHERE subject = $1`, subject).Scan(&n))
+	return n
+}
+
 // deleteRow removes id from table through testdb's shared, never-closed pool. Failures are
 // logged, not fatal, matching testdb's own cleanup helper: residue is exactly the condition
 // being removed, so failing an otherwise passing test over it would trade a tidy database
@@ -271,6 +312,46 @@ func TestPostStoresTheTenantFromTheCredential(t *testing.T) {
 	rec := post(t, f.srv, f.producerKey, validBody)
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	assert.Equal(t, f.producerTenant.String(), storedEvent(t, f.store, rec).Tenant)
+}
+
+// TestPostRejectsAGlobalAppendCredential and TestCloudEventPostRejectsAGlobalAppendCredential
+// pin that a tenant-less append credential — horoctl admin keys issue --role producer
+// with --tenant omitted, or any --role superuser credential, since credential.tenant_id
+// is nullable — is refused by core.Event.Validate's tenant check, not stamped some other
+// way. Tenant is set to p.Tenant.String(), which is "" for such a credential, and
+// Validate rejects an empty tenant with a 400.
+//
+// Egress pins the read-side equivalent, TestASuperuserNamingNoTenantIsRejected in
+// internal/egress; ingress had no counterpart on either route. The two routes are
+// separate handlers that each stamp Tenant from the credential independently, and this
+// package has already been bitten once by a guard exercised on the native route and
+// merely assumed on CloudEvents — subjectAllowed had no CloudEvents-route test until
+// TestSubjectPatternIsEnforcedOnCloudEvents was added — so each route gets its own pin
+// here rather than one standing in for both.
+func TestPostRejectsAGlobalAppendCredential(t *testing.T) {
+	f := newIngressFixture(t)
+	key := seedGlobalCredential(t, f.store, "superuser")
+	subject := idemKey(t, "global-native")
+
+	rec := post(t, f.srv, key, bodySubject(subject))
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "tenant is required")
+	assert.Equal(t, 0, eventCountBySubject(t, f.store, subject),
+		"a rejected append must write no event row")
+}
+
+func TestCloudEventPostRejectsAGlobalAppendCredential(t *testing.T) {
+	f := newIngressFixture(t)
+	key := seedGlobalCredential(t, f.store, "superuser")
+	subject := idemKey(t, "global-ce")
+
+	rec := postCE(t, f.srv, key, bodyCE(t, subject))
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "tenant is required")
+	assert.Equal(t, 0, eventCountBySubject(t, f.store, subject),
+		"a rejected append must write no event row")
 }
 
 func TestPostPrefixesTheRefWithTheCredentialLocus(t *testing.T) {

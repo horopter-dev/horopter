@@ -78,11 +78,28 @@ func validateBootstrapFlags(displayName, producerKey, readerKey string) error {
 	return nil
 }
 
-// bootstrapTenantAndKeys resolves the tenant and ensures both credentials exist, reporting
-// completion once both are in place. Grouped into its own function, past flag parsing, so
-// runAdminBootstrap stays a single readable sequence of validate-then-connect-then-act.
+// bootstrapTenantAndKeys resolves the tenant and ensures both credentials exist, all
+// inside one transaction, reporting completion only once it commits. Grouped into its
+// own function, past flag parsing, so runAdminBootstrap stays a single readable sequence
+// of validate-then-connect-then-act.
+//
+// The transaction is what gives resolveTenant's advisory lock (see below) something to
+// serialize: taking the lock as the FIRST statement of the transaction that also issues
+// both credentials, rather than in a transaction of its own that commits and releases
+// the lock before credential work starts, is what closes the second half of the race —
+// two concurrent runs racing loadCredential-then-INSERT in ensureCredential for the same
+// key prefix once they had both (wrongly) resolved different tenants. Mirrors how
+// internal/store/postgres/migrate.go's Migrate takes its lock as the first statement of
+// the one transaction that does every migration's work, not in a transaction scoped to
+// the lock alone.
 func bootstrapTenantAndKeys(ctx context.Context, pool *pgxpool.Pool, req bootstrapRequest) error {
-	tenantID, err := resolveTenant(ctx, pool, req.displayName)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin bootstrap transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tenantID, err := resolveTenant(ctx, tx, req.displayName)
 	if err != nil {
 		return err
 	}
@@ -92,21 +109,57 @@ func bootstrapTenantAndKeys(ctx context.Context, pool *pgxpool.Pool, req bootstr
 		{"producer", req.producerKey},
 		{"reader", req.readerKey},
 	} {
-		if err := ensureCredential(ctx, pool, bctx, c.role, c.key); err != nil {
+		if err := ensureCredential(ctx, tx, bctx, c.role, c.key); err != nil {
 			return fmt.Errorf("bootstrap %s credential: %w", c.role, err)
 		}
+	}
+
+	// Reported only past this point, matching Migrate's own rule: everything above ran
+	// inside the transaction, so a commit that fails applied nothing, and a caller told
+	// otherwise would log a tenant and two credentials the database rolled back.
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit bootstrap transaction: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "bootstrap complete: tenant %s (%q)\n", tenantID, req.displayName)
 	return nil
 }
 
-// resolveTenant finds the tenant already bootstrapped under displayName, or creates one.
-// Matching by display name is bootstrap's own convenience for a fixed, well-known dev
-// tenant; it is not the general resolution mechanism keys issue's --tenant deliberately
-// refuses to offer, because display names are mutable and not unique by design.
-func resolveTenant(ctx context.Context, pool *pgxpool.Pool, displayName string) (string, error) {
+// resolveTenant takes the advisory lock that serializes this bootstrap run against any
+// other targeting the same displayName, then finds the tenant already bootstrapped under
+// it or creates one. Matching by display name is bootstrap's own convenience for a
+// fixed, well-known dev tenant; it is not the general resolution mechanism keys issue's
+// --tenant deliberately refuses to offer, because display names are mutable and not
+// unique by design.
+//
+// display_name carries no UNIQUE constraint, so without this lock two concurrent
+// bootstrap runs sharing one — a retried CI job, an operator re-running while a prior
+// run is in flight, a Kubernetes Job with parallelism > 1 — can both see no matching row
+// and both INSERT, leaving two tenants under one display name; whichever then binds its
+// fixed producer/reader key prefix to the "wrong" tenant_id collides with
+// credential.key_prefix's UNIQUE constraint. pg_advisory_xact_lock, scoped to this
+// displayName the way internal/store/postgres/rebuild.go's lockRebuildWrite scopes its
+// lock to a tenant, serializes them: the second run blocks until the first commits, then
+// its own SELECT finds the row the first created.
+//
+// The lock is taken here, first, but held by the caller's transaction —
+// bootstrapTenantAndKeys — for the whole bootstrap, not just this function's own
+// SELECT-or-INSERT: pg_advisory_xact_lock is transaction-scoped, not call-scoped, so it
+// stays held, and the second run stays blocked, through both ensureCredential calls that
+// follow — exactly as internal/store/postgres/migrate.go's Migrate holds its own lock
+// for every migration file, not only the ledger check.
+func resolveTenant(ctx context.Context, tx pgx.Tx, displayName string) (string, error) {
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext($1))`, displayName); err != nil {
+		return "", fmt.Errorf("take bootstrap advisory lock: %w", err)
+	}
+	return findOrCreateTenant(ctx, tx, displayName)
+}
+
+// findOrCreateTenant is resolveTenant's find-or-create step, run inside the caller's
+// locked transaction.
+func findOrCreateTenant(ctx context.Context, tx pgx.Tx, displayName string) (string, error) {
 	var id string
-	err := pool.QueryRow(ctx,
+	err := tx.QueryRow(ctx,
 		`SELECT id FROM tenant WHERE display_name = $1 ORDER BY created_at LIMIT 1`,
 		displayName).Scan(&id)
 	if err == nil {
@@ -120,7 +173,7 @@ func resolveTenant(ctx context.Context, pool *pgxpool.Pool, displayName string) 
 	if err != nil {
 		return "", err
 	}
-	if _, err := pool.Exec(ctx,
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO tenant (id, display_name) VALUES ($1, $2)`, id, displayName); err != nil {
 		return "", fmt.Errorf("create tenant %q: %w", displayName, err)
 	}
@@ -154,7 +207,7 @@ type storedCredential struct {
 // deliberate act and bootstrap does not own it; clearing it on the next container start would
 // undo that decision with nothing said. That fails loudly instead, naming the prefix.
 func ensureCredential(
-	ctx context.Context, pool *pgxpool.Pool, bctx bootstrapContext, role, explicitKey string,
+	ctx context.Context, db dbExecer, bctx bootstrapContext, role, explicitKey string,
 ) error {
 	prefix, secret, err := parseExplicitKey(explicitKey)
 	if err != nil {
@@ -165,7 +218,7 @@ func ensureCredential(
 		hash: auth.HashSecret(secret),
 	}
 
-	got, found, err := loadCredential(ctx, pool, prefix)
+	got, found, err := loadCredential(ctx, db, prefix)
 	if err != nil {
 		return err
 	}
@@ -173,7 +226,7 @@ func ensureCredential(
 		fmt.Fprintf(os.Stderr,
 			"warning: %s credential uses an explicit key; development only — never use it "+
 				"in production\n", role)
-		return issueCredential(ctx, pool, issueParams{
+		return issueCredential(ctx, db, issueParams{
 			tenant: want.tenantID, role: want.role, source: want.source, locus: want.locus,
 			prefix: prefix, hash: want.hash,
 		})
@@ -183,15 +236,15 @@ func ensureCredential(
 			"credential %s is revoked; bootstrap will not un-revoke one — issue a fresh key, "+
 				"or clear revoked_at deliberately if the revocation was a mistake", prefix)
 	}
-	return reconcileCredential(ctx, pool, prefix, got.binding, want)
+	return reconcileCredential(ctx, db, prefix, got.binding, want)
 }
 
 // loadCredential reads the credential stored under prefix, reporting false when there is none.
 func loadCredential(
-	ctx context.Context, pool *pgxpool.Pool, prefix string,
+	ctx context.Context, db dbExecer, prefix string,
 ) (storedCredential, bool, error) {
 	var c storedCredential
-	err := pool.QueryRow(ctx, `
+	err := db.QueryRow(ctx, `
 		SELECT COALESCE(tenant_id, ''), role, source, locus, key_hash, revoked_at IS NOT NULL
 		FROM credential WHERE key_prefix = $1`, prefix).Scan(
 		&c.binding.tenantID, &c.binding.role, &c.binding.source, &c.binding.locus,
@@ -208,12 +261,12 @@ func loadCredential(
 // reconcileCredential rewrites the stored row to want when it differs, naming on stderr which
 // fields moved so the correction is visible rather than silent.
 func reconcileCredential(
-	ctx context.Context, pool *pgxpool.Pool, prefix string, got, want bootstrapBinding,
+	ctx context.Context, db dbExecer, prefix string, got, want bootstrapBinding,
 ) error {
 	if got == want {
 		return nil
 	}
-	_, err := pool.Exec(ctx, `
+	_, err := db.Exec(ctx, `
 		UPDATE credential SET tenant_id = $1, role = $2, source = $3, locus = $4, key_hash = $5
 		WHERE key_prefix = $6`,
 		want.tenantID, want.role, want.source, want.locus, want.hash, prefix)
