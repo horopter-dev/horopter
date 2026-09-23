@@ -1,18 +1,30 @@
 package ingress
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2/event"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"horopter.dev/horopter/internal/auth"
+	"horopter.dev/horopter/internal/core"
 )
 
 var (
 	ceOccurred = time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
 	ceNow      = time.Date(2026, 9, 14, 11, 0, 0, 0, time.UTC)
 )
+
+// testPrincipal is the credential eventFromCloudEvent derives tenant, locus and origin
+// from — package ingress's tests build one directly rather than going through auth's
+// resolution, which internal/auth already covers.
+var testPrincipal = auth.Principal{
+	Tenant: core.TenantIDFromRow("tnt-test"),
+	Locus:  "github",
+	Origin: core.OriginProcess,
+}
 
 // ceWithData builds a structured CloudEvent carrying data as its JSON payload.
 func ceWithData(t *testing.T, data map[string]any) cloudevents.Event {
@@ -76,26 +88,25 @@ func TestIdempotencyKeyIsInjective(t *testing.T) {
 }
 
 // TestEventFromCloudEventLiftsEveryRecognisedDataKey pins the whole lifted set at once:
-// tenant, correlation_ref, title and actor each become a first-class event field, and
-// each is REMOVED from attributes so one value is not stored twice under two names. An
+// correlation_ref, title and actor each become a first-class event field, and each is
+// REMOVED from attributes so one value is not stored twice under two names. An
 // unrecognised key stays in attributes untouched.
 //
-// The mapping previously had no assertions at all. Mutating any of the four pulls to a
+// The mapping previously had no assertions at all. Mutating any of the three pulls to a
 // constant "", or deleting the delete(attrs, key) line, passed the entire suite.
 func TestEventFromCloudEventLiftsEveryRecognisedDataKey(t *testing.T) {
 	ce := ceWithData(t, map[string]any{
-		"tenant":          "acme",
 		"correlation_ref": "dep-7",
 		"title":           "Deploy api",
 		"actor":           "alice",
 		"region":          "eu-west-1",
 	})
 
-	ev, err := eventFromCloudEvent(ce, ceNow, "01A")
+	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
 	require.NoError(t, err)
 
-	assert.Equal(t, "acme", ev.Tenant, "tenant must be lifted out of data")
-	assert.Equal(t, "dep-7", ev.CorrelationRef, "correlation_ref must be lifted out of data")
+	assert.Equal(t, "github/dep-7", ev.CorrelationRef,
+		"correlation_ref must be lifted out of data and prefixed with the locus")
 	assert.Equal(t, "Deploy api", ev.Title, "title must be lifted out of data")
 	assert.Equal(t, "alice", ev.Actor, "actor must be lifted out of data")
 
@@ -110,7 +121,7 @@ func TestEventFromCloudEventLiftsEveryRecognisedDataKey(t *testing.T) {
 func TestEventFromCloudEventWithoutActorIsValid(t *testing.T) {
 	ce := ceWithData(t, map[string]any{"correlation_ref": "dep-7"})
 
-	ev, err := eventFromCloudEvent(ce, ceNow, "01A")
+	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
 	require.NoError(t, err)
 	assert.Empty(t, ev.Actor, "an event carrying no actor is accepted with an empty one")
 }
@@ -121,7 +132,7 @@ func TestEventFromCloudEventWithoutActorIsValid(t *testing.T) {
 func TestEventFromCloudEventLeavesNonStringRecognisedKeysAsAttributes(t *testing.T) {
 	ce := ceWithData(t, map[string]any{"title": 7, "actor": true})
 
-	ev, err := eventFromCloudEvent(ce, ceNow, "01A")
+	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
 	require.NoError(t, err)
 
 	assert.Empty(t, ev.Title, "a non-string title must not be coerced into the field")
@@ -130,14 +141,64 @@ func TestEventFromCloudEventLeavesNonStringRecognisedKeysAsAttributes(t *testing
 		"a value the field cannot hold must survive as the attribute it was sent as")
 }
 
-// An absent tenant resolves to DefaultTenant rather than to the empty string, so a
-// producer that omits it writes somewhere queryable instead of into a nameless bucket.
-func TestEventFromCloudEventDefaultsTenantWhenDataOmitsIt(t *testing.T) {
+// TestEventFromCloudEventTakesTenantFromThePrincipal pins that tenant is never read from
+// the envelope or its data, whether the CloudEvent carries one or not: it always comes
+// from the resolved credential.
+func TestEventFromCloudEventTakesTenantFromThePrincipal(t *testing.T) {
 	ce := ceWithData(t, map[string]any{"correlation_ref": "dep-7"})
 
-	ev, err := eventFromCloudEvent(ce, ceNow, "01A")
+	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
 	require.NoError(t, err)
-	assert.Equal(t, DefaultTenant, ev.Tenant)
+	assert.Equal(t, testPrincipal.Tenant.String(), ev.Tenant)
+}
+
+// TestEventFromCloudEventRejectsDataCarryingTenant mirrors POST /v1/events's rule for
+// the CloudEvents path: silently dropping a field that used to be authoritative is how a
+// broken migration ships unnoticed, so a CloudEvent still asserting a tenant is refused
+// rather than ignored, whatever type the value is.
+func TestEventFromCloudEventRejectsDataCarryingTenant(t *testing.T) {
+	for name, tenant := range map[string]any{"string": "other", "number": 7, "null": nil} {
+		t.Run(name, func(t *testing.T) {
+			ce := ceWithData(t, map[string]any{"tenant": tenant, "correlation_ref": "dep-7"})
+			_, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, core.ErrInvalidEvent)
+			assert.Contains(t, err.Error(), "tenant is derived from the credential")
+		})
+	}
+}
+
+// TestEventFromCloudEventSetsOriginFromThePrincipal pins that origin, like tenant, comes
+// from the resolved credential rather than from anything in the envelope: a caller-
+// asserted origin would be worthless, since CloudEvents data is otherwise caller-chosen.
+func TestEventFromCloudEventSetsOriginFromThePrincipal(t *testing.T) {
+	ce := ceWithData(t, map[string]any{"correlation_ref": "dep-7"})
+
+	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
+	require.NoError(t, err)
+	assert.Equal(t, core.OriginProcess, ev.Origin)
+}
+
+// TestEventFromCloudEventRejectsARefOverTheCap pins that the CloudEvents path validates
+// the stored, locus-prefixed ref through the same rule POST /v1/events does, rather than
+// validating the caller's shorter, unprefixed one.
+func TestEventFromCloudEventRejectsARefOverTheCap(t *testing.T) {
+	ce := ceWithData(t, map[string]any{
+		"correlation_ref": strings.Repeat("x", auth.MaxRefBytes-len("github/")+1),
+	})
+
+	_, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ref")
+}
+
+// An absent tenant in data is not an error: only a PRESENT one is, per
+// TestEventFromCloudEventRejectsDataCarryingTenant. This is the other half of that rule.
+func TestEventFromCloudEventDataOmittingTenantIsAccepted(t *testing.T) {
+	ce := ceWithData(t, map[string]any{"correlation_ref": "dep-7"})
+
+	_, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
+	assert.NoError(t, err)
 }
 
 // The CloudEvents time attribute is OPTIONAL, so an envelope without one must still
@@ -149,7 +210,7 @@ func TestEventFromCloudEventFallsBackToReceiptTimeWithoutAnEnvelopeTime(t *testi
 	ce := ceWithData(t, map[string]any{"correlation_ref": "dep-7"})
 	ce.SetTime(time.Time{})
 
-	ev, err := eventFromCloudEvent(ce, ceNow, "01A")
+	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
 	require.NoError(t, err)
 
 	assert.Equal(t, ceNow, ev.OccurredAt,
@@ -162,7 +223,7 @@ func TestEventFromCloudEventFallsBackToReceiptTimeWithoutAnEnvelopeTime(t *testi
 func TestEventFromCloudEventKeepsAnEnvelopeTime(t *testing.T) {
 	ce := ceWithData(t, map[string]any{"correlation_ref": "dep-7"})
 
-	ev, err := eventFromCloudEvent(ce, ceNow, "01A")
+	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
 	require.NoError(t, err)
 	assert.Equal(t, ceOccurred, ev.OccurredAt, "a stated occurrence time must be preserved")
 }

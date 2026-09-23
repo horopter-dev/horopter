@@ -14,11 +14,20 @@ import (
 	"syscall"
 	"time"
 
+	"horopter.dev/horopter/internal/auth"
 	"horopter.dev/horopter/internal/ingress"
 	"horopter.dev/horopter/internal/logging"
 	"horopter.dev/horopter/internal/store/postgres"
 	"horopter.dev/horopter/internal/telemetry"
 )
+
+// MaxHeaderBytes bounds the request line plus headers, Authorization included. Go's 1 MiB
+// default is what made an oversized Authorization header worth sending: SplitKey bounds
+// the key prefix, but the secret half is only length-checked by a constant-time compare,
+// so a large header still costs one SHA-256 before rejection. 16 KiB comfortably fits a
+// real request's headers — the Authorization header itself is under 100 bytes — with
+// headroom for whatever a proxy in front of this daemon adds.
+const MaxHeaderBytes = 16 << 10
 
 func main() {
 	if err := run(); err != nil {
@@ -89,9 +98,13 @@ func run() error {
 		return err
 	}
 
-	// ingress.New rejects an empty token, so HOROPTER_INGRESS_TOKEN is checked exactly
-	// once, in the constructor, rather than here as well: two guards on one fact drift.
-	api, err := ingress.New(store, time.Now, rand.Reader, os.Getenv("HOROPTER_INGRESS_TOKEN"))
+	// DefaultOptions, never a zero Options: an uncached authenticator queries the
+	// database on every request, ahead of anything that could shed it.
+	authn := auth.New(auth.NewStore(store.Pool()), time.Now, auth.DefaultOptions())
+
+	// ingress.New rejects a nil authenticator, so this is checked exactly once, in the
+	// constructor, rather than here as well: two guards on one fact drift.
+	api, err := ingress.New(store, time.Now, rand.Reader, authn)
 	if err != nil {
 		return err
 	}
@@ -99,6 +112,9 @@ func run() error {
 	return serve(ctx, &http.Server{
 		Addr:    cfg.addr,
 		Handler: api.Routes(),
+		// MaxHeaderBytes bounds the request line plus headers, Authorization included —
+		// see its own doc comment for why Go's 1 MiB default is worth tightening.
+		MaxHeaderBytes: MaxHeaderBytes,
 		// ReadHeaderTimeout bounds a slowloris header dribble. ReadTimeout bounds the
 		// whole request including the body, so a client sending one byte a minute cannot
 		// hold a connection open indefinitely; 15s is far longer than a few-kilobyte

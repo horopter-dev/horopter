@@ -210,11 +210,11 @@ func insertEvent(ctx context.Context, tx pgx.Tx, ev core.Event) error {
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO event (id, tenant, idempotency_key, schema_version, source, type,
 		                   subject, actor, title, occurred_at, received_at,
-		                   correlation_ref, attributes)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		                   correlation_ref, attributes, origin, edited)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
 		ev.ID, ev.Tenant, idem, ev.SchemaVersion, ev.Source, ev.Type,
 		ev.Subject, ev.Actor, ev.Title, ev.OccurredAt.UTC(), ev.ReceivedAt.UTC(),
-		ev.CorrelationRef, ev.Attributes,
+		ev.CorrelationRef, ev.Attributes, string(ev.Origin), ev.Edited,
 	); err != nil {
 		return fmt.Errorf("insert event %q: %w", ev.ID, err)
 	}

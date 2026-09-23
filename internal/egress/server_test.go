@@ -84,8 +84,7 @@ func openTestStore(t *testing.T, poolMaxConns int) (*postgres.Store, string) {
 	require.NoError(t, err)
 	t.Cleanup(s.Close)
 	tn := "eg-" + t.Name() + "-" + procToken + "-" + strconv.FormatUint(tenantSeq.Add(1), 36)
-	testdb.DropTenantAfter(t, tn)
-	return s, tn
+	return s, testdb.NewTenant(t, tn)
 }
 
 func fixedClock() time.Time { return fixed }
@@ -100,10 +99,10 @@ func seed(t *testing.T, s *postgres.Store, tn, ref, typ string, at time.Time) {
 	t.Helper()
 	id := core.NewULID(time.Now(), rand.Reader)
 	_, _, err := s.AppendEvent(context.Background(), core.Event{
-		ID: id, Tenant: tn, IdempotencyKey: id, SchemaVersion: 1,
+		ID: id, Tenant: tn, IdempotencyKey: id, SchemaVersion: core.CurrentSchemaVersion,
 		Source: "ci", Type: typ, Subject: "acme/prod", Actor: "ci-bot",
 		OccurredAt: at, ReceivedAt: at, CorrelationRef: ref,
-		Attributes: map[string]any{"service.version": "2.5.0"},
+		Attributes: map[string]any{"service.version": "2.5.0"}, Origin: core.OriginProcess,
 	})
 	require.NoError(t, err)
 }
@@ -391,8 +390,7 @@ func annotationTitles(t *testing.T, rec *httptest.ResponseRecorder) []string {
 // this test simply does not name, which is why every assertion is by unique title.
 func TestGrafanaAnnotationsPOSTPathTenantIsScoped(t *testing.T) {
 	h, s, tnA := newServer(t)
-	tnB := tnA + "-b"
-	testdb.DropTenantAfter(t, tnB)
+	tnB := testdb.NewTenant(t, tnA+"-b")
 	at := time.Now().UTC()
 	typeA, typeB := closedTypeFor(t, "a"), closedTypeFor(t, "b")
 	typeDefault := closedTypeFor(t, "default")
@@ -406,6 +404,7 @@ func TestGrafanaAnnotationsPOSTPathTenantIsScoped(t *testing.T) {
 	// counter for the same reason.
 	defaultRef := fmt.Sprintf("dep-default-%s-%s",
 		procToken, strconv.FormatUint(seedSeq.Add(1), 36))
+	testdb.EnsureTenant(t, egress.DefaultTenant)
 	testdb.DropRefAfter(t, egress.DefaultTenant, defaultRef)
 	seed(t, s, egress.DefaultTenant, defaultRef, typeDefault, at)
 
@@ -1065,10 +1064,10 @@ func seedWith(t *testing.T, s *postgres.Store, tn, ref, typ, subject string, at 
 	t.Helper()
 	id := core.NewULID(time.Now(), rand.Reader)
 	_, _, err := s.AppendEvent(context.Background(), core.Event{
-		ID: id, Tenant: tn, IdempotencyKey: id, SchemaVersion: 1,
+		ID: id, Tenant: tn, IdempotencyKey: id, SchemaVersion: core.CurrentSchemaVersion,
 		Source: "ci", Type: typ, Subject: subject, Actor: "ci-bot",
 		OccurredAt: at, ReceivedAt: at, CorrelationRef: ref,
-		Attributes: map[string]any{},
+		Attributes: map[string]any{}, Origin: core.OriginProcess,
 	})
 	require.NoError(t, err)
 }

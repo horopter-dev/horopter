@@ -47,14 +47,14 @@ func TestRunRebuildsATenantsProjection(t *testing.T) {
 	// Validate requires it to be a syntactically valid ULID, so it comes from
 	// core.NewULID rather than the token embedded in the tenant id below.
 	token := strconv.FormatInt(time.Now().UnixNano(), 36)
-	tn := "migrate-rebuild-" + token
-	testdb.DropTenantAfter(t, tn)
+	tn := testdb.NewTenant(t, "migrate-rebuild-"+token)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	_, _, err = store.AppendEvent(ctx, core.Event{
-		ID: core.NewULID(time.Now(), rand.Reader), Tenant: tn, SchemaVersion: 1,
-		Source: "ci", Type: "deployment.started", Subject: "acme/prod", Actor: "ci-bot",
+		ID: core.NewULID(time.Now(), rand.Reader), Tenant: tn,
+		SchemaVersion: core.CurrentSchemaVersion,
+		Source:        "ci", Type: "deployment.started", Subject: "acme/prod", Actor: "ci-bot",
 		Title: "from the event log", OccurredAt: at, ReceivedAt: at,
-		CorrelationRef: "dep-1", Attributes: map[string]any{},
+		CorrelationRef: "dep-1", Attributes: map[string]any{}, Origin: core.OriginProcess,
 	})
 	require.NoError(t, err)
 
@@ -93,14 +93,14 @@ func TestRunWithoutRebuildTenantLeavesTheProjectionAlone(t *testing.T) {
 	t.Cleanup(store.Close)
 
 	token := strconv.FormatInt(time.Now().UnixNano(), 36)
-	tn := "migrate-norebuild-" + token
-	testdb.DropTenantAfter(t, tn)
+	tn := testdb.NewTenant(t, "migrate-norebuild-"+token)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	_, _, err = store.AppendEvent(ctx, core.Event{
-		ID: core.NewULID(time.Now(), rand.Reader), Tenant: tn, SchemaVersion: 1,
-		Source: "ci", Type: "deployment.started", Subject: "acme/prod", Actor: "ci-bot",
+		ID: core.NewULID(time.Now(), rand.Reader), Tenant: tn,
+		SchemaVersion: core.CurrentSchemaVersion,
+		Source:        "ci", Type: "deployment.started", Subject: "acme/prod", Actor: "ci-bot",
 		OccurredAt: at, ReceivedAt: at, CorrelationRef: "dep-1",
-		Attributes: map[string]any{},
+		Attributes: map[string]any{}, Origin: core.OriginProcess,
 	})
 	require.NoError(t, err)
 

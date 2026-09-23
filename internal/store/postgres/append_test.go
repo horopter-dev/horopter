@@ -57,12 +57,13 @@ func uniqueToken() string {
 	return procToken + "-" + strconv.FormatUint(idSeq.Add(1), 36)
 }
 
-// tenant returns a tenant id unique to this call, naming the test for traceability.
+// tenant returns a tenant id unique to this call, naming the test for traceability, and
+// creates the tenant row migration 0005's foreign keys now require before anything can
+// write under it.
 func tenant(t *testing.T) string {
 	t.Helper()
 	tn := "test-" + t.Name() + "-" + uniqueToken()
-	testdb.DropTenantAfter(t, tn)
-	return tn
+	return testdb.NewTenant(t, tn)
 }
 
 // monotonicEntropy makes successive eventID calls sort in call order even when two land
@@ -99,10 +100,10 @@ func eventID(t *testing.T, suffix string) string {
 
 func mkEvent(tn, id, idem, corr, typ string, at time.Time) core.Event {
 	return core.Event{
-		ID: id, Tenant: tn, IdempotencyKey: idem, SchemaVersion: 1,
+		ID: id, Tenant: tn, IdempotencyKey: idem, SchemaVersion: core.CurrentSchemaVersion,
 		Source: "ci", Type: typ, Subject: "acme/prod", Actor: "ci-bot",
 		OccurredAt: at, ReceivedAt: at, CorrelationRef: corr,
-		Attributes: map[string]any{"service.version": "2.5.0"},
+		Attributes: map[string]any{"service.version": "2.5.0"}, Origin: core.OriginProcess,
 	}
 }
 

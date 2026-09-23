@@ -14,7 +14,7 @@ import (
 )
 
 // CurrentSchemaVersion is the only event schema version this build understands.
-const CurrentSchemaVersion = 1
+const CurrentSchemaVersion = 2
 
 // ErrInvalidEvent marks an event the log will never accept however often it is offered:
 // a missing required field, an unsupported schema version, a body that is not an object.
@@ -45,6 +45,13 @@ type Event struct {
 	ReceivedAt     time.Time
 	CorrelationRef string
 	Attributes     map[string]any
+	// Origin is derived from the appending credential's type, never from the request
+	// body: a caller-asserted origin would be worthless, since a producer can post any
+	// attribute it likes.
+	Origin Origin
+	// Edited is false on every append. v0.2's edit path is what sets it true; nothing
+	// in this build does.
+	Edited bool
 }
 
 // Validate reports whether the event may be appended to the log. Every failure wraps
@@ -67,8 +74,8 @@ func (e Event) Validate() error {
 	}
 	if e.Tenant == "" {
 		return fmt.Errorf(
-			"%w %q: tenant is required; set it to \"default\" for "+
-				"single-tenant deployments", ErrInvalidEvent, e.ID)
+			"%w %q: tenant is required; it comes from the appending credential, so this "+
+				"credential is not bound to one", ErrInvalidEvent, e.ID)
 	}
 	if e.Source == "" {
 		return fmt.Errorf("%w %q: source is required, e.g. \"buildkite/pipelines/api\"",

@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"horopter.dev/horopter/internal/egress"
 	"horopter.dev/horopter/internal/store/postgres"
+	"horopter.dev/horopter/internal/testdb"
 )
 
 type expansionShape struct {
@@ -158,7 +159,7 @@ func TestReadAllocationsStayWithinExpansionFactor(t *testing.T) {
 	srv, s, base := newServerWith(t, 0, limits)
 	h := srv.Routes()
 	for _, shape := range expansionShapes() {
-		tn := base + "-" + shape.name
+		tn := testdb.NewTenant(t, base+"-"+shape.name)
 		seedShape(t, s, tn, shape.rows, shape.attrs)
 		for _, read := range expansionReads(t, s, tn) {
 			t.Run(shape.name+"-"+read.route, func(t *testing.T) {
