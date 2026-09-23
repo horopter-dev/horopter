@@ -39,7 +39,7 @@ tasks:
     cmds:
       - goreleaser release --snapshot --clean
       - ./hack/snapshot-override.sh
-      - docker compose -f docker-compose.yml -f docker-compose.snapshot.yml up -d
+      - docker compose -f docker-compose.yaml -f docker-compose.snapshot.yaml up -d
   stop:
     desc: Halt the stack, keeping containers and data
     cmds:

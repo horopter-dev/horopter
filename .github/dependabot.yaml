@@ -6,7 +6,7 @@
 # either compose file names is `postgres:18`, which is already a floating tag that picks up
 # 18.x at pull time, so there is nothing for Dependabot to bump. Enabling the ecosystem would
 # instead put it in reach of `ghcr.io/horopter-dev/horopter-*`, whose tags in
-# `docker-compose.yml` are release-prep state that has to be bumped in the commit a tag is cut
+# `docker-compose.yaml` are release-prep state that has to be bumped in the commit a tag is cut
 # from. A bot competing for those pins is the opposite of what that process needs.
 
 version: 2

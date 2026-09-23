@@ -6,5 +6,6 @@
 *.db-wal
 *.db-shm
 coverage.out
+/docker-compose.snapshot.yaml
 /docker-compose.snapshot.yml
 /.render/

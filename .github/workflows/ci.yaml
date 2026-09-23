@@ -205,4 +205,4 @@ jobs:
       - name: Check the deploy compose file
         run: |
           set -euo pipefail
-          HOROPTER_IMAGE_TAG=v0.0.0-ci docker compose -f deploy/docker-compose.yml config -q
+          HOROPTER_IMAGE_TAG=v0.0.0-ci docker compose -f deploy/docker-compose.yaml config -q

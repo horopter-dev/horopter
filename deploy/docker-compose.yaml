@@ -1,7 +1,7 @@
 # Horopter, a trial stack. Everything runs on one machine and nothing here is a deployment:
 # every route but the two probes, on both daemons, requires a credential. The bootstrap
 # service below issues the two fixed dev credentials this stack runs on — a producer and a
-# reader, never a superuser — the same way docker-compose.yml does; see the README's
+# reader, never a superuser — the same way docker-compose.yaml does; see the README's
 # "Issuing credentials" section to issue your own. Postgres is not published on the host
 # here, and neither daemon's metrics port (9464) is published either. See
 # https://github.com/horopter-dev/horopter#security
