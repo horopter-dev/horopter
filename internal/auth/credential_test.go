@@ -2,6 +2,7 @@ package auth_test
 
 import (
 	"crypto/rand"
+	"os"
 	"strings"
 	"testing"
 
@@ -78,6 +79,13 @@ func TestHashSecretVerifies(t *testing.T) {
 	hash := auth.HashSecret(secret)
 	assert.True(t, auth.VerifySecret(secret, hash))
 	assert.False(t, auth.VerifySecret(secret+"x", hash))
+}
+
+func TestVerifySecretUsesAConstantTimeCompare(t *testing.T) {
+	src, err := os.ReadFile("credential.go")
+	require.NoError(t, err)
+	assert.Contains(t, string(src), "subtle.ConstantTimeCompare",
+		"a == comparison here is a timing oracle and passes every functional test")
 }
 
 func TestNewKeyIsDistinctEachTime(t *testing.T) {

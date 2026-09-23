@@ -176,22 +176,37 @@ func TestAReadOverTheConcurrencyLimitIsShed(t *testing.T) {
 // read fills the one-connection limiter; the second request, on a global credential naming a
 // tenant that genuinely exists, must be shed without ever running TenantExists — if resolution
 // ran either before the gate or from the shed path, this is the query that would appear.
+//
+// recordSpans runs before newServerWith, not after: otelpgx binds its tracer to whatever
+// provider is global at pool construction (postgres/pool.go), not dynamically per query, so
+// starting the recorder any later would leave rec seeing no database spans at all — the
+// negative assertion below would then pass whether or not TenantExists ran. The held read is
+// finished, not merely released, before that assertion: its own query is the positive control
+// proving spans are actually being captured.
 func TestConcurrencyShedFromAGlobalCredentialDoesNotQueryTenantExists(t *testing.T) {
+	rec, restore := recordSpans(t)
+	defer restore()
+
 	srv, s, tn := newServerWith(t, 1, testLimits())
 	h := srv.Routes()
 	key := readerKey(t, s, tn)
 	superuserKey := seedCredential(t, s, "superuser", "")
 
-	release := holdRead(t, h, key, changesURL(tn))
-	defer release()
-
-	rec, restore := recordSpans(t)
-	defer restore()
+	finish := holdRead(t, h, key, changesURL(tn))
 
 	shed := get(t, h, superuserKey, changesURL(tn))
 	require.Equal(t, http.StatusServiceUnavailable, shed.Code, shed.Body.String())
 
-	for _, text := range spanAttrValues(rec, "", "db.query.text") {
+	held := finish()
+	require.Equal(t, http.StatusOK, held.Code, held.Body.String())
+
+	queries := spanAttrValues(rec, "", "db.query.text")
+	require.True(t, slices.ContainsFunc(queries, func(text string) bool {
+		return strings.Contains(text, "FROM change")
+	}), "positive control: the held read's own query must appear in the recorded spans, or "+
+		"an absent TenantExists span proves nothing — tracing itself could be the thing "+
+		"that silently stopped working; got %v", queries)
+	for _, text := range queries {
 		assert.NotContains(t, text, "FROM tenant WHERE id",
 			"a request shed at the concurrency gate must never reach tenantFor's own "+
 				"database round trip: it holds no permit, and TenantExists is exactly the "+

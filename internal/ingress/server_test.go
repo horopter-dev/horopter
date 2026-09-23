@@ -99,6 +99,11 @@ func newIngressFixture(t *testing.T, opts ...postgres.Option) ingressFixture {
 // and subjectPattern (empty for none), registering cleanup for all three in the order
 // their foreign keys require. It returns the tenant, as the row-backed core.TenantID a
 // stored event's tenant is compared against, and the plaintext key SplitKey resolves.
+//
+// The insert goes through s's own pool, live for the call; the cleanup goes through
+// testdb's shared pool instead, since several tests in this package close s's pool before
+// the test ends, and a cleanup racing that closed pool would silently leave the row behind
+// for testdb's own tenant cleanup to trip over as a foreign-key violation.
 func seedCredential(
 	t *testing.T, s *postgres.Store, locus, subjectPattern string,
 ) (core.TenantID, string) {
@@ -115,9 +120,7 @@ func seedCredential(
 	_, err = pool.Exec(ctx, `INSERT INTO principal (id, display_name) VALUES ($1, $1)`,
 		principalID)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM principal WHERE id = $1`, principalID)
-	})
+	t.Cleanup(func() { deleteRow(t, "principal", principalID) })
 
 	var pattern *string
 	if subjectPattern != "" {
@@ -129,11 +132,26 @@ func seedCredential(
 		VALUES ($1, $2, 'machine_key', $3, $4, 'producer', $5, 'test', $6, $7)`,
 		credentialID, principalID, prefix, hash, tenantID, locus, pattern)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM credential WHERE id = $1`, credentialID)
-	})
+	t.Cleanup(func() { deleteRow(t, "credential", credentialID) })
 
 	return core.TenantIDFromRow(tenantID), key
+}
+
+// deleteRow removes id from table through testdb's shared, never-closed pool. Failures are
+// logged, not fatal, matching testdb's own cleanup helper: residue is exactly the condition
+// being removed, so failing an otherwise passing test over it would trade a tidy database
+// for a flaky suite.
+func deleteRow(t *testing.T, table, id string) {
+	t.Helper()
+	pool, err := testdb.Pool()
+	if err != nil {
+		t.Logf("%s cleanup for %q: open pool: %v", table, id, err)
+		return
+	}
+	if _, err := pool.Exec(context.Background(),
+		"DELETE FROM "+table+" WHERE id = $1", id); err != nil {
+		t.Logf("%s cleanup for %q: %v", table, id, err)
+	}
 }
 
 func doPost(
