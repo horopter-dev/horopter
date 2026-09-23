@@ -1,5 +1,6 @@
-// Package auth holds the machine-key format and the validation rules for the ref and
-// locus identifiers.
+// Package auth holds the machine-key format, the validation rules for the ref and locus
+// identifiers, and the middleware that resolves a presented key into a Principal and
+// gates a route on what that principal's role can do.
 package auth
 
 import (
