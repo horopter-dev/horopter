@@ -107,13 +107,7 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 }
 
 type eventRequest struct {
-	Tenant string `json:"tenant"`
-	// SchemaVersion is optional. A producer that states it asks for a specific wire
-	// schema and is refused if this build does not speak it, rather than having an old-
-	// shaped body silently reinterpreted; omitting it (the zero value) asks for whatever
-	// this build currently speaks. The check happens in core.Event.Validate, which
-	// AppendEvent already calls, so it is enforced once rather than twice.
-	SchemaVersion  int            `json:"schema_version"`
+	Tenant         string         `json:"tenant"`
 	Source         string         `json:"source"`
 	Type           string         `json:"type"`
 	Subject        string         `json:"subject"`
@@ -202,18 +196,13 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	schemaVersion := req.SchemaVersion
-	if schemaVersion == 0 {
-		schemaVersion = core.CurrentSchemaVersion
-	}
-
 	now := s.clock()
 	recordTenant(r.Context(), p.Tenant.String())
 	ev := core.Event{
 		ID:             core.NewULID(now, s.entropy),
 		Tenant:         p.Tenant.String(),
 		IdempotencyKey: req.IdempotencyKey,
-		SchemaVersion:  schemaVersion,
+		SchemaVersion:  core.CurrentSchemaVersion,
 		Source:         req.Source,
 		Type:           req.Type,
 		Subject:        req.Subject,

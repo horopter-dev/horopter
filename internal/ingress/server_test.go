@@ -166,6 +166,7 @@ type storedRow struct {
 	Tenant         string
 	CorrelationRef string
 	Origin         core.Origin
+	SchemaVersion  int
 }
 
 // storedEvent reads back the row rec's body names by id. Callers that care about the
@@ -180,8 +181,9 @@ func storedEvent(t *testing.T, store *postgres.Store, rec *httptest.ResponseReco
 	var row storedRow
 	var origin string
 	err := store.Pool().QueryRow(context.Background(),
-		`SELECT tenant, correlation_ref, origin FROM event WHERE id = $1`, resp.ID,
-	).Scan(&row.Tenant, &row.CorrelationRef, &origin)
+		`SELECT tenant, correlation_ref, origin, schema_version FROM event WHERE id = $1`,
+		resp.ID,
+	).Scan(&row.Tenant, &row.CorrelationRef, &origin, &row.SchemaVersion)
 	require.NoError(t, err)
 	row.Origin = core.Origin(origin)
 	return row
@@ -204,11 +206,6 @@ func bodyWithRef(ref string) string {
 func bodySubject(subject string) string {
 	return fmt.Sprintf(`{"source":"s","type":"t.started","subject":%q,
 		"occurred_at":"2026-09-22T00:00:00Z"}`, subject)
-}
-
-func bodyWithSchemaVersion(v int) string {
-	return fmt.Sprintf(`{"source":"s","type":"t.started","subject":"acme/prod",
-		"occurred_at":"2026-09-22T00:00:00Z","schema_version":%d}`, v)
 }
 
 func TestPostRejectsABodyCarryingTenant(t *testing.T) {
@@ -272,11 +269,12 @@ func TestRefAtTheCapIsAcceptedAndOneOverIsRejected(t *testing.T) {
 		post(t, f.srv, f.producerKey, bodyWithRef(atCap+"x")).Code)
 }
 
-func TestSchemaVersionIsTwo(t *testing.T) {
+func TestStoredEventsCarrySchemaVersionTwo(t *testing.T) {
 	f := newIngressFixture(t)
 	assert.Equal(t, 2, core.CurrentSchemaVersion)
-	assert.Equal(t, http.StatusBadRequest,
-		post(t, f.srv, f.producerKey, bodyWithSchemaVersion(1)).Code)
+	rec := post(t, f.srv, f.producerKey, validBody)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	assert.Equal(t, 2, storedEvent(t, f.store, rec).SchemaVersion)
 }
 
 func TestPostEventCreatesChange(t *testing.T) {

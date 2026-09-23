@@ -142,6 +142,8 @@ func TestAppendEventIsIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, created, "a duplicate idempotency key must not create a second event")
 	assert.Equal(t, first.ID, second.ID, "the originally stored event must be returned")
+	assert.Equal(t, core.OriginProcess, second.Origin,
+		"the duplicate lookup must return the stored origin, not the zero value")
 
 	evs, _, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn})
 	require.NoError(t, err)
