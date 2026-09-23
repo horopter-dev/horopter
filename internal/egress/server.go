@@ -525,9 +525,9 @@ func (s *Server) render(
 // retry instead of dropping an event; a failed read drops nothing, and its caller — a
 // dashboard panel or an export — simply asks again.
 func (s *Server) readFailed(w http.ResponseWriter, r *http.Request, adapter string, err error) {
-	tenantID := tenantFromContext(r.Context())
+	tenant := requestedTenantFromContext(r.Context())
 	slog.ErrorContext(r.Context(), "read failed", "error", err,
-		"tenant", tenantID.String(), "adapter", adapter, "route", r.Pattern)
+		"tenant", tenant, "adapter", adapter, "route", r.Pattern)
 	writeError(w, http.StatusInternalServerError,
 		"could not complete the read; the cause has been logged on the server")
 }

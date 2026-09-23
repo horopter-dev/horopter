@@ -161,6 +161,44 @@ func TestAReadOverTheConcurrencyLimitIsShed(t *testing.T) {
 			"connection-wait attribute; the shed read never acquired one and must not")
 }
 
+// TestConcurrencyShedFromAGlobalCredentialDoesNotQueryTenantExists pins the property that
+// took two revisions to land: resolving a global credential's named tenant is a database
+// round trip (TenantExists), and it must be neither ungated by the concurrency limiter (an
+// earlier revision resolved before Acquire, so the lookup ran once per request rather than
+// once per admitted one — an unbounded burst of global-credential requests reached Postgres
+// before admission ever applied) nor reachable from the shed path itself (a still earlier
+// revision re-resolved the tenant after Acquire had already failed, so a request the limiter
+// had just refused queried the database anyway, exactly because it was congested).
+//
+// Neither failure is visible in the HTTP response — both are about what the database saw, not
+// what the caller got back — so this checks the otelpgx statement spans every real query
+// carries, via the "db.query.text" attribute pool.go documents them as carrying. Holding one
+// read fills the one-connection limiter; the second request, on a global credential naming a
+// tenant that genuinely exists, must be shed without ever running TenantExists — if resolution
+// ran either before the gate or from the shed path, this is the query that would appear.
+func TestConcurrencyShedFromAGlobalCredentialDoesNotQueryTenantExists(t *testing.T) {
+	srv, s, tn := newServerWith(t, 1, testLimits())
+	h := srv.Routes()
+	key := readerKey(t, s, tn)
+	superuserKey := seedCredential(t, s, "superuser", "")
+
+	release := holdRead(t, h, key, changesURL(tn))
+	defer release()
+
+	rec, restore := recordSpans(t)
+	defer restore()
+
+	shed := get(t, h, superuserKey, changesURL(tn))
+	require.Equal(t, http.StatusServiceUnavailable, shed.Code, shed.Body.String())
+
+	for _, text := range spanAttrValues(rec, "", "db.query.text") {
+		assert.NotContains(t, text, "FROM tenant WHERE id",
+			"a request shed at the concurrency gate must never reach tenantFor's own "+
+				"database round trip: it holds no permit, and TenantExists is exactly the "+
+				"load admission exists to bound")
+	}
+}
+
 func TestProbesPassNoGate(t *testing.T) {
 	srv, s, tn := newServerWith(t, 1, testLimits())
 	h := srv.Routes()
