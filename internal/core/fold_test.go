@@ -15,7 +15,7 @@ func ev(id, corr, typ string, at time.Time) core.Event {
 		ID: id, Tenant: "default", SchemaVersion: 1,
 		Source: "ci", Type: typ, Subject: "acme/prod", Actor: "ci-bot",
 		OccurredAt: at, CorrelationRef: corr,
-		Attributes: map[string]any{},
+		Attributes: map[string]any{}, Locus: "ci",
 	}
 }
 

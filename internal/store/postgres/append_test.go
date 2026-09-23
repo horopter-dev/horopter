@@ -104,6 +104,7 @@ func mkEvent(tn, id, idem, corr, typ string, at time.Time) core.Event {
 		Source: "ci", Type: typ, Subject: "acme/prod", Actor: "ci-bot",
 		OccurredAt: at, ReceivedAt: at, CorrelationRef: corr,
 		Attributes: map[string]any{"service.version": "2.5.0"}, Origin: core.OriginProcess,
+		Locus: "ci",
 	}
 }
 

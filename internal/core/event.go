@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -49,6 +50,11 @@ type Event struct {
 	// body: a caller-asserted origin would be worthless, since a producer can post any
 	// attribute it likes.
 	Origin Origin
+	// Locus is derived from the appending credential, never from the request body: a
+	// caller-asserted locus would defeat the namespacing it exists to provide, which is
+	// the argument Origin makes for itself. RefFor composes a point change's ref from it,
+	// so it is part of what the event is, not a denormalised copy of a credential field.
+	Locus string
 	// Edited is false on every append. v0.2's edit path is what sets it true; nothing
 	// in this build does.
 	Edited bool
@@ -96,6 +102,27 @@ func (e Event) Validate() error {
 	if err := e.Origin.Validate(); err != nil {
 		return fmt.Errorf("%w %q: %w; origin is derived from the appending credential",
 			ErrInvalidEvent, e.ID, err)
+	}
+	// Checked here for the same reason as Origin: event_locus_shape rejects an invalid
+	// locus, and a constraint violation reaches ingress as a store failure — a 503 telling
+	// the producer to retry a request that can never succeed.
+	if err := e.validateLocus(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateLocus reports whether the event's locus is well-formed: non-empty, and free of
+// "/", which RefFor uses as the separator when composing a point's ref from it. The full
+// rule (the reserved "legacy", the length cap, edge whitespace) lives in
+// auth.ValidateLocus, which core cannot call: internal/auth imports internal/core, not the
+// other way round. Split out of Validate to keep its branching within the complexity
+// limit, same as validateRequiredText below.
+func (e Event) validateLocus() error {
+	if e.Locus == "" || strings.Contains(e.Locus, "/") {
+		return fmt.Errorf(
+			"%w %q: locus %q must be non-empty and must not contain /; it is derived "+
+				"from the appending credential", ErrInvalidEvent, e.ID, e.Locus)
 	}
 	return nil
 }

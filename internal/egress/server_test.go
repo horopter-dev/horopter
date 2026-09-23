@@ -183,6 +183,7 @@ func seed(t *testing.T, s *postgres.Store, tn, ref, typ string, at time.Time) {
 		Source: "ci", Type: typ, Subject: "acme/prod", Actor: "ci-bot",
 		OccurredAt: at, ReceivedAt: at, CorrelationRef: ref,
 		Attributes: map[string]any{"service.version": "2.5.0"}, Origin: core.OriginProcess,
+		Locus: "ci",
 	})
 	require.NoError(t, err)
 }
@@ -1009,6 +1010,7 @@ func seedWith(t *testing.T, s *postgres.Store, tn, ref, typ, subject string, at 
 		Source: "ci", Type: typ, Subject: subject, Actor: "ci-bot",
 		OccurredAt: at, ReceivedAt: at, CorrelationRef: ref,
 		Attributes: map[string]any{}, Origin: core.OriginProcess,
+		Locus: "ci",
 	})
 	require.NoError(t, err)
 }

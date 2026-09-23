@@ -61,6 +61,7 @@ func TestRunRebuildsATenantsProjection(t *testing.T) {
 		Source:        "ci", Type: "deployment.started", Subject: "acme/prod", Actor: "ci-bot",
 		Title: "from the event log", OccurredAt: at, ReceivedAt: at,
 		CorrelationRef: "dep-1", Attributes: map[string]any{}, Origin: core.OriginProcess,
+		Locus: "ci",
 	})
 	require.NoError(t, err)
 
@@ -104,6 +105,7 @@ func TestRunWithoutRebuildTenantLeavesTheProjectionAlone(t *testing.T) {
 		Source:        "ci", Type: "deployment.started", Subject: "acme/prod", Actor: "ci-bot",
 		OccurredAt: at, ReceivedAt: at, CorrelationRef: "dep-1",
 		Attributes: map[string]any{}, Origin: core.OriginProcess,
+		Locus: "ci",
 	})
 	require.NoError(t, err)
 

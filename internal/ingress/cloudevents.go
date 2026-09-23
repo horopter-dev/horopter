@@ -171,5 +171,6 @@ func eventFromCloudEvent(
 		CorrelationRef: corr,
 		Attributes:     attrs,
 		Origin:         p.Origin,
+		Locus:          p.Locus,
 	}, nil
 }
