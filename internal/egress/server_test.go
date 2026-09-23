@@ -28,6 +28,7 @@ import (
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"horopter.dev/horopter/internal/auth"
 	"horopter.dev/horopter/internal/core"
 	"horopter.dev/horopter/internal/egress"
 	"horopter.dev/horopter/internal/store/postgres"
@@ -54,14 +55,18 @@ func newServer(t *testing.T) (http.Handler, *postgres.Store, string) {
 }
 
 // newServerWith serves a store whose pool holds poolMaxConns connections — zero leaves pgxpool's
-// default — under limits. The concurrency limit starts at the pool size, so a small pool is how a
-// test lets one held read fill it.
+// default — under limits, authenticating through a fresh Authenticator over that same store. The
+// concurrency limit starts at the pool size, so a small pool is how a test lets one held read
+// fill it.
 func newServerWith(
 	t *testing.T, poolMaxConns int, limits egress.Limits,
 ) (*egress.Server, *postgres.Store, string) {
 	t.Helper()
 	s, tn := openTestStore(t, poolMaxConns)
-	return egress.New(s, fixedClock, limits), s, tn
+	authn := auth.New(auth.NewStore(s.Pool()), fixedClock, auth.DefaultOptions())
+	srv, err := egress.New(s, fixedClock, limits, authn)
+	require.NoError(t, err)
+	return srv, s, tn
 }
 
 // openTestStore opens the test database with a pool of poolMaxConns connections, zero for
@@ -88,6 +93,81 @@ func openTestStore(t *testing.T, poolMaxConns int) (*postgres.Store, string) {
 }
 
 func fixedClock() time.Time { return fixed }
+
+// seedCredential inserts a principal and a credential of role, scoped to tenantID ("" for a
+// global credential), registering cleanup for both, and returns the plaintext key SplitKey
+// resolves. Every egress test now needs a credential: every non-probe route requires one.
+//
+// The insert goes through s's own pool, live for the call; the cleanup goes through
+// testdb's shared pool instead, since several tests in this package close s's pool before
+// the test ends, and a cleanup racing that closed pool would silently leave the row behind
+// for testdb's own tenant cleanup to trip over as a foreign-key violation.
+func seedCredential(t *testing.T, s *postgres.Store, role, tenantID string) string {
+	t.Helper()
+	key, prefix, hash, err := auth.NewKey(rand.Reader)
+	require.NoError(t, err)
+
+	principalID := "prn_test_" + prefix
+	credentialID := "cred_test_" + prefix
+	ctx := context.Background()
+
+	_, err = s.Pool().Exec(ctx, `INSERT INTO principal (id, display_name) VALUES ($1, $1)`,
+		principalID)
+	require.NoError(t, err)
+	t.Cleanup(func() { deleteRow(t, "principal", principalID) })
+
+	var tenant *string
+	if tenantID != "" {
+		tenant = &tenantID
+	}
+	_, err = s.Pool().Exec(ctx, `
+		INSERT INTO credential (id, principal_id, type, key_prefix, key_hash, role,
+		                        tenant_id, source, locus)
+		VALUES ($1, $2, 'machine_key', $3, $4, $5, $6, 'test', 'test')`,
+		credentialID, principalID, prefix, hash, role, tenant)
+	require.NoError(t, err)
+	t.Cleanup(func() { deleteRow(t, "credential", credentialID) })
+
+	return key
+}
+
+// deleteRow removes id from table through testdb's shared, never-closed pool. Failures are
+// logged, not fatal, matching testdb's own cleanup helper: residue is exactly the condition
+// being removed, so failing an otherwise passing test over it would trade a tidy database
+// for a flaky suite.
+func deleteRow(t *testing.T, table, id string) {
+	t.Helper()
+	pool, err := testdb.Pool()
+	if err != nil {
+		t.Logf("%s cleanup for %q: open pool: %v", table, id, err)
+		return
+	}
+	if _, err := pool.Exec(context.Background(),
+		"DELETE FROM "+table+" WHERE id = $1", id); err != nil {
+		t.Logf("%s cleanup for %q: %v", table, id, err)
+	}
+}
+
+// readerKey mints a reader credential scoped to tn on s. It is the credential most tests in
+// this file drive requests with, since most of what egress serves is scoped to one tenant.
+func readerKey(t *testing.T, s *postgres.Store, tn string) string {
+	t.Helper()
+	return seedCredential(t, s, "reader", tn)
+}
+
+// warmCredentialCache issues one authenticated request so key's credential is cached before
+// the caller does whatever it means to measure or constrain next: an uncached lookup's own
+// database round trip — or, against a pool this call is about to exhaust or close, its
+// failure — would otherwise land on that measurement instead of on this throwaway read.
+//
+// This file is compiled under -race, unlike expansion_test.go: keep this here, not there, or
+// a race build fails on every caller outside that file.
+func warmCredentialCache(t *testing.T, h http.Handler, key, tn string) {
+	t.Helper()
+	rec := get(t, h, key, "/v1/changes?tenant="+tn+
+		"&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
 
 // seed writes directly through the store: egress has no write path of its own.
 // core.Event.Validate requires event.id to be a syntactically valid ULID, so id comes
@@ -164,19 +244,83 @@ func seedManyChanges(t *testing.T, s *postgres.Store, tn string, n int) {
 	}
 }
 
-func get(t *testing.T, h http.Handler, url string) *httptest.ResponseRecorder {
+// get drives an authenticated GET against h, sending key as a bearer credential.
+func get(t *testing.T, h http.Handler, key, url string) *httptest.ResponseRecorder {
 	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	req.Header.Set("Authorization", "Bearer "+key)
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, url, nil))
+	h.ServeHTTP(rec, req)
 	return rec
+}
+
+// getUnauthenticated drives a request against h with no Authorization header. route is a
+// registered pattern, "METHOD /path" as routesOf and collectRoutePatterns report it — not a
+// full URL — so the method is split off before the request is built.
+func getUnauthenticated(t *testing.T, h http.Handler, route string) *httptest.ResponseRecorder {
+	t.Helper()
+	method, path, ok := strings.Cut(route, " ")
+	require.True(t, ok, "route pattern %q must be \"METHOD /path\"", route)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(method, path, nil))
+	return rec
+}
+
+// postTo drives an authenticated POST against h, with no body: every use of this in the
+// package drives a route that either no longer exists or never reads one.
+func postTo(t *testing.T, h http.Handler, key, url string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, url, nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// routesOf enumerates every route Routes registers, read from server.go's own AST via
+// collectRoutePatterns: net/http's ServeMux has no method that lists its own registrations,
+// so this reads the source instead of hand-maintaining a duplicate list. h is unused; it is
+// a parameter so a call at the point of use reads like it is asking the running server.
+func routesOf(t *testing.T, _ http.Handler) []string {
+	t.Helper()
+	return collectRoutePatterns(t)
+}
+
+// isProbe reports whether route is one of the two unauthenticated liveness/readiness
+// probes.
+func isProbe(route string) bool {
+	return route == "GET /healthz" || route == "GET /readyz"
+}
+
+// admittedCount reports how many reads srv's concurrency limiter currently holds a permit
+// for.
+func admittedCount(t *testing.T, srv *egress.Server) int {
+	t.Helper()
+	return egress.InFlight(srv)
+}
+
+// jsonChange is the subset of a rendered /v1/changes entry the tests in this file read
+// back.
+type jsonChange struct {
+	Ref string `json:"ref"`
+}
+
+// changesOf decodes a /v1/changes response body.
+func changesOf(t *testing.T, rec *httptest.ResponseRecorder) []jsonChange {
+	t.Helper()
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var changes []jsonChange
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &changes))
+	return changes
 }
 
 func TestQueryChangesReturnsNeutralJSON(t *testing.T) {
 	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
 	seed(t, s, tn, "dep-7", "deployment.started",
 		time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC))
 
-	rec := get(t, h, "/v1/changes?tenant="+tn+
+	rec := get(t, h, key, "/v1/changes?tenant="+tn+
 		"&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
@@ -191,10 +335,11 @@ func TestQueryChangesReturnsNeutralJSON(t *testing.T) {
 
 func TestGrafanaAdapterUsesEpochMillis(t *testing.T) {
 	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
 	seed(t, s, tn, "dep-8", "deployment.started",
 		time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC))
 
-	rec := get(t, h, "/adapters/grafana/annotations?tenant="+tn+
+	rec := get(t, h, key, "/adapters/grafana/annotations?tenant="+tn+
 		"&from=1789376400000&to=1789383600000")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
@@ -214,8 +359,9 @@ func TestGrafanaAdapterUsesEpochMillis(t *testing.T) {
 // the error's own prefix, so this pins wording long enough that only the intended
 // message can match it.
 func TestGrafanaRejectsMalformedEpochMillis(t *testing.T) {
-	h, _, tn := newServer(t)
-	rec := get(t, h, "/adapters/grafana/annotations?tenant="+tn+
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	rec := get(t, h, key, "/adapters/grafana/annotations?tenant="+tn+
 		"&from=not-a-number&to=1789383600000")
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "epoch milliseconds",
@@ -224,10 +370,11 @@ func TestGrafanaRejectsMalformedEpochMillis(t *testing.T) {
 
 func TestOTLPAdapterUsesNanoseconds(t *testing.T) {
 	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
 	start := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
 	seed(t, s, tn, "dep-9", "deployment.started", start)
 
-	rec := get(t, h, "/adapters/otlp/spans?tenant="+tn+
+	rec := get(t, h, key, "/adapters/otlp/spans?tenant="+tn+
 		"&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
@@ -257,203 +404,21 @@ func onlySpan(t *testing.T, envelope map[string]any) map[string]any {
 	return span
 }
 
-// postJSON POSTs a JSON body, the way grafana/simple-json-datasource — an archived
-// Grafana datasource plugin, but the only one that speaks this transport — queries
-// annotations.
-func postJSON(t *testing.T, h http.Handler, url, body string) *httptest.ResponseRecorder {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, url, strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	h.ServeHTTP(rec, req)
-	return rec
-}
-
-// annotationBody is a Grafana annotation-query POST body: the shape
-// documented at https://github.com/grafana/simple-json-datasource#annotation-api,
-// trimmed to the "range" field this adapter's contract reads.
-func annotationBody(from, to time.Time) string {
-	return fmt.Sprintf(`{"range":{"from":%q,"to":%q}}`,
-		from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano))
-}
-
-// TestGrafanaAnnotationsPOSTUsesRequestBodyRange drives the
-// new POST route with a Grafana-shaped JSON body and pins that the time range
-// comes from range.from/range.to in the body, not from query parameters —
-// the GET route's contract, which this route deliberately does not share.
-func TestGrafanaAnnotationsPOSTUsesRequestBodyRange(t *testing.T) {
-	h, s, tn := newServer(t)
-	seed(t, s, tn, "dep-13", "deployment.started",
-		time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC))
-
-	body := annotationBody(
-		time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC),
-		time.Date(2026, 9, 14, 11, 0, 0, 0, time.UTC))
-	rec := postJSON(t, h, "/adapters/grafana/annotations?tenant="+tn, body)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-
-	var anns []map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &anns))
-	require.Len(t, anns, 1)
-	assert.EqualValues(t, 1789380000000, anns[0]["time"])
-}
-
-// TestGrafanaAnnotationsPOSTRejectsMalformedBody pins the error path for both
-// invalid JSON and a non-RFC3339 range value, naming the field so a caller
-// can tell this apart from every other malformed-input error in this file.
-func TestGrafanaAnnotationsPOSTRejectsMalformedBody(t *testing.T) {
-	h, _, tn := newServer(t)
-
-	rec := postJSON(t, h, "/adapters/grafana/annotations?tenant="+tn, `not json`)
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "not valid JSON")
-
-	rec = postJSON(t, h, "/adapters/grafana/annotations?tenant="+tn,
-		`{"range":{"from":"not-a-time","to":"2026-09-14T11:00:00Z"}}`)
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "range.from",
-		"the response must name the field, not just say the request was bad")
-}
-
-// TestGrafanaAnnotationsPOSTSignalsTruncation pins that the POST route signals
-// truncation the same way every other read endpoint does. An endpoint that
-// truncates silently hands back a short answer indistinguishable from a complete
-// one, and adding a route to the read surface must not reintroduce that.
-func TestGrafanaAnnotationsPOSTSignalsTruncation(t *testing.T) {
-	h, s, tn := newServer(t)
-	const seeded = 3
-	seedManyChanges(t, s, tn, seeded)
-	body := annotationBody(
-		time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC),
-		time.Date(2026, 9, 14, 11, 0, 0, 0, time.UTC))
-
-	full := postJSON(t, h, fmt.Sprintf(
-		"/adapters/grafana/annotations?tenant=%s&limit=%d", tn, seeded), body)
-	require.Equal(t, http.StatusOK, full.Code, full.Body.String())
-	assert.Empty(t, full.Header().Get(egress.TruncatedHeader),
-		"a result of exactly the limit with nothing behind it is NOT truncated")
-
-	cut := postJSON(t, h, fmt.Sprintf(
-		"/adapters/grafana/annotations?tenant=%s&limit=%d", tn, seeded-1), body)
-	require.Equal(t, http.StatusOK, cut.Code, cut.Body.String())
-	assert.Equal(t, "true", cut.Header().Get(egress.TruncatedHeader),
-		"rows were discarded and the caller has no other way to find out")
-}
-
-// closedTypeFor returns an event type unique to this call whose last dot-separated
-// segment is "completed", so core.Fold gives the change a terminal status and an end.
-//
-// Both halves matter to TestGrafanaAnnotationsPOSTPathTenantIsScoped. Uniqueness is how
-// a row is recognised in a Grafana annotation, which carries neither tenant nor ref: its
-// title falls back to the event type. Terminal is what bounds the row in time — an open
-// change's end_effective is core.OpenSentinel, so it would match every later query
-// window however narrow, and rows seeded in tenant "default" outlive the test that wrote
-// them.
-func closedTypeFor(t *testing.T, suffix string) string {
-	t.Helper()
-	return fmt.Sprintf("horopter.scoped-%s-%s-%s.completed",
-		procToken, strconv.FormatUint(seedSeq.Add(1), 36), suffix)
-}
-
-// annotationTitles returns the title of every annotation in a rendered response.
-func annotationTitles(t *testing.T, rec *httptest.ResponseRecorder) []string {
-	t.Helper()
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var anns []map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &anns))
-	titles := make([]string, 0, len(anns))
-	for _, a := range anns {
-		title, ok := a["title"].(string)
-		require.True(t, ok, "every annotation must carry a string title")
-		titles = append(titles, title)
-	}
-	return titles
-}
-
-// TestGrafanaAnnotationsPOSTPathTenantIsScoped pins that a POST to the path-scoped
-// route queries that path's tenant, and that the pre-existing tenant-less route
-// still resolves to DefaultTenant. The path is the mechanism a real Grafana can
-// actually reach: both of its access modes discard a "?tenant=" query parameter
-// baked into the configured datasource URL.
-//
-// The tenant-less leg used to assert the response was EMPTY, having seeded nothing in
-// DefaultTenant. That is satisfied by every wrong answer as well as the right one: a
-// route resolving to "", to a typo, or to a tenant that happens not to exist returns an
-// empty list too. So DefaultTenant is now seeded with a row of its own and the assertion
-// is that the response CONTAINS it — which only the correct resolution produces.
-//
-// Contains, never a count: this database is never truncated, so tenant "default"
-// accumulates a row per execution, and no count of it is stable. The three rows share an
-// instant taken from the wall clock and the window is a second either side of it, which
-// keeps earlier runs' rows — terminal, so bounded by their own end — out of range and the
-// result well clear of MaxLimit. A concurrent run landing inside that window adds rows
-// this test simply does not name, which is why every assertion is by unique title.
-func TestGrafanaAnnotationsPOSTPathTenantIsScoped(t *testing.T) {
-	h, s, tnA := newServer(t)
-	tnB := testdb.NewTenant(t, tnA+"-b")
-	at := time.Now().UTC()
-	typeA, typeB := closedTypeFor(t, "a"), closedTypeFor(t, "b")
-	typeDefault := closedTypeFor(t, "default")
-	seed(t, s, tnA, "dep-a", typeA, at)
-	seed(t, s, tnB, "dep-b", typeB, at)
-	// The ref carries seedSeq, not procToken alone. tnA and tnB are fresh per call so a
-	// repeated ref cannot collide there, but DefaultTenant is fixed: under -count=2 a
-	// process-constant ref folds the second iteration's event into the first's change,
-	// which is already closed and cannot reopen, so the row this test then looks for is
-	// never written. Every other identifier in this file already pairs procToken with a
-	// counter for the same reason.
-	defaultRef := fmt.Sprintf("dep-default-%s-%s",
-		procToken, strconv.FormatUint(seedSeq.Add(1), 36))
-	testdb.EnsureTenant(t, egress.DefaultTenant)
-	testdb.DropRefAfter(t, egress.DefaultTenant, defaultRef)
-	seed(t, s, egress.DefaultTenant, defaultRef, typeDefault, at)
-
-	body := annotationBody(at.Add(-time.Second), at.Add(time.Second))
-
-	titlesA := annotationTitles(t, postJSON(t, h, "/adapters/grafana/"+tnA+"/annotations", body))
-	assert.Equal(t, []string{typeA}, titlesA,
-		"the path tenant must scope the query to tnA, not tnB or default")
-
-	titlesB := annotationTitles(t, postJSON(t, h, "/adapters/grafana/"+tnB+"/annotations", body))
-	assert.Equal(t, []string{typeB}, titlesB,
-		"the path tenant must scope the query to tnB, not tnA or default")
-
-	titlesDefault := annotationTitles(t, postJSON(t, h, "/adapters/grafana/annotations", body))
-	assert.Contains(t, titlesDefault, typeDefault,
-		"the tenant-less route must resolve to DefaultTenant; an empty result would also "+
-			"be returned by a route resolving to \"\" or to a typo, so absence proves nothing")
-	assert.NotContains(t, titlesDefault, typeA,
-		"the tenant-less route must not leak tnA's rows")
-	assert.NotContains(t, titlesDefault, typeB,
-		"the tenant-less route must not leak tnB's rows")
-}
-
-// TestGrafanaAnnotationsPOSTRejectsOversizedBody pins that an unauthenticated
-// caller must not be able to force an unbounded allocation through the first
-// request-body route on egress's open surface.
-func TestGrafanaAnnotationsPOSTRejectsOversizedBody(t *testing.T) {
-	h, _, tn := newServer(t)
-
-	oversized := `{"range":{"from":"` +
-		strings.Repeat("x", egress.MaxAnnotationBodyBytes) + `","to":"2026-09-14T11:00:00Z"}}`
-	rec := postJSON(t, h, "/adapters/grafana/annotations?tenant="+tn, oversized)
-	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "byte limit")
-}
-
 func TestEgressRejectsMalformedTimeParams(t *testing.T) {
-	h, _, tn := newServer(t)
-	rec := get(t, h, "/v1/changes?tenant="+tn+"&from=not-a-time&to=2026-09-14T11:00:00Z")
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	rec := get(t, h, key, "/v1/changes?tenant="+tn+"&from=not-a-time&to=2026-09-14T11:00:00Z")
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "from")
 }
 
 func TestListEventsReturnsRawLog(t *testing.T) {
 	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
 	seed(t, s, tn, "dep-10", "deployment.started",
 		time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC))
 
-	rec := get(t, h, "/v1/events?tenant="+tn+"&ref=dep-10")
+	rec := get(t, h, key, "/v1/events?tenant="+tn+"&ref=dep-10")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	var events []map[string]any
@@ -463,22 +428,21 @@ func TestListEventsReturnsRawLog(t *testing.T) {
 	assert.Equal(t, "deployment.started", events[0]["type"])
 }
 
-// TestLimitParamRejectsInvalidValues exists because egress has no auth in v0.1:
-// without a cap, GET /v1/events?tenant=X (no ref) or a wide GET /v1/changes window
-// returns a tenant's entire log or change history to any caller, unbounded — both a
-// resource-exhaustion and a full-log exfiltration path in a single request. A
-// non-numeric or negative "limit" must be rejected outright rather than silently
-// falling through to the store's own "0 means unlimited" convention.
+// TestLimitParamRejectsInvalidValues pins that a non-numeric or negative "limit" is
+// rejected outright rather than silently falling through to the store's own "0 means
+// unlimited" convention — a reader credential can already reach a tenant's whole change
+// history in one request if MaxLimit is not enforced.
 func TestLimitParamRejectsInvalidValues(t *testing.T) {
-	h, _, tn := newServer(t)
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
 	base := "/v1/changes?tenant=" + tn + "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
 
-	rec := get(t, h, base+"&limit=not-a-number")
+	rec := get(t, h, key, base+"&limit=not-a-number")
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "between 1 and",
 		"the response must name the accepted range")
 
-	rec = get(t, h, base+"&limit=-5")
+	rec = get(t, h, key, base+"&limit=-5")
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "between 1 and",
 		"the response must name the accepted range")
@@ -490,9 +454,10 @@ func TestLimitParamRejectsInvalidValues(t *testing.T) {
 // unbounded-query mutation would restore.
 func TestListEventsIsCappedAtMaxLimit(t *testing.T) {
 	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
 	seedManyEvents(t, s, tn, egress.MaxLimit+50)
 
-	rec := get(t, h, "/v1/events?tenant="+tn)
+	rec := get(t, h, key, "/v1/events?tenant="+tn)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var events []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &events))
@@ -501,7 +466,7 @@ func TestListEventsIsCappedAtMaxLimit(t *testing.T) {
 		"a result cut short at exactly the cap must say so; a caller cannot otherwise "+
 			"distinguish it from a complete answer of exactly MaxLimit rows")
 
-	recBig := get(t, h, "/v1/events?tenant="+tn+"&limit=5000")
+	recBig := get(t, h, key, "/v1/events?tenant="+tn+"&limit=5000")
 	require.Equal(t, http.StatusOK, recBig.Code, recBig.Body.String())
 	var eventsBig []map[string]any
 	require.NoError(t, json.Unmarshal(recBig.Body.Bytes(), &eventsBig))
@@ -516,9 +481,10 @@ func TestListEventsIsCappedAtMaxLimit(t *testing.T) {
 // caps are not proven by one test alone.
 func TestQueryChangesIsCappedAtMaxLimit(t *testing.T) {
 	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
 	seedManyChanges(t, s, tn, egress.MaxLimit+50)
 
-	rec := get(t, h, "/v1/changes?tenant="+tn+
+	rec := get(t, h, key, "/v1/changes?tenant="+tn+
 		"&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var changes []map[string]any
@@ -528,9 +494,12 @@ func TestQueryChangesIsCappedAtMaxLimit(t *testing.T) {
 		"a result cut short at exactly the cap must say so")
 }
 
+// TestReadyzReportsReadyWithLiveDatabase and its 503 counterparts below drive the probe
+// with no Authorization header, since an orchestrator holds no credential to send — probes
+// stay reachable without one.
 func TestReadyzReportsReadyWithLiveDatabase(t *testing.T) {
 	h, _, _ := newServer(t)
-	rec := get(t, h, "/readyz")
+	rec := getUnauthenticated(t, h, "GET /readyz")
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
@@ -544,25 +513,29 @@ func TestReadyzReportsReadyWithLiveDatabase(t *testing.T) {
 // skips without a live Postgres, so without this one the liveness/readiness split
 // would have zero coverage in that environment. If a future change reintroduces a
 // Pool().Ping call into healthz, this test panics on the nil store and fails.
+//
+// The authenticator's own lookup is nil too: healthz is registered unwrapped, so nothing
+// ever calls it.
 func TestHealthzWorksWithNilStore(t *testing.T) {
-	srv := egress.New(nil, fixedClock, egress.DefaultLimits())
+	authn := auth.New(nil, fixedClock, auth.DefaultOptions())
+	srv, err := egress.New(nil, fixedClock, egress.DefaultLimits(), authn)
+	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code, "healthz must not require a database")
 }
 
-// readOnlyPOSTRoutes is TestNoWriteRouteIsRegisteredAnywhere's documented exception
-// list to "every route is a GET": grafana/simple-json-datasource — an archived
-// Grafana datasource plugin, but the only one that speaks this transport — POSTs
-// the annotation query because the time range travels in a JSON request body, not
-// because the route writes anything (see grafanaAnnotationsPOST's doc comment in
-// server.go). Both the tenant-less and the path-scoped "/{tenant}/annotations"
-// route reach that same read-only handler. Any other POST/PUT/DELETE pattern this
-// test discovers is exactly the write-route regression it exists to catch.
-var readOnlyPOSTRoutes = []string{
-	"POST /adapters/grafana/annotations",
-	"POST /adapters/grafana/{tenant}/annotations",
+// TestNewRejectsANilAuthenticator pins the guard where it is structural rather than
+// remembered: every non-probe route is gated on the authenticator, so a Server built
+// without one would either panic on the first request or need every caller to remember
+// the check itself. It runs unconditionally: a constructor that refuses its argument
+// needs no database.
+func TestNewRejectsANilAuthenticator(t *testing.T) {
+	srv, err := egress.New(nil, fixedClock, egress.DefaultLimits(), nil)
+	require.Error(t, err, "a nil authenticator would panic on the first request rather "+
+		"than reject it")
+	assert.Nil(t, srv, "a rejected configuration must not yield a usable server")
 }
 
 // routeHandleCall reports the mux.Handle/mux.HandleFunc pattern a call expression
@@ -590,7 +563,8 @@ func routeHandleCall(t *testing.T, call *ast.CallExpr) (string, bool) {
 
 // collectRoutePatterns parses server.go and returns the pattern string registered by
 // every mux.Handle/mux.HandleFunc call inside the Routes method — the route table
-// TestNoWriteRouteIsRegisteredAnywhere checks.
+// TestEveryNonProbeEgressRouteRequiresACredential and TestNoWriteRouteIsRegisteredAnywhere
+// check.
 func collectRoutePatterns(t *testing.T) []string {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -619,28 +593,20 @@ func collectRoutePatterns(t *testing.T) []string {
 }
 
 // TestNoWriteRouteIsRegisteredAnywhere asserts, with a general structural check, that
-// egress exposes no write route anywhere: it reads collectRoutePatterns's route table
-// and asserts each pattern string starts with "GET " — except readOnlyPOSTRoutes,
-// egress's deliberate read-only POSTs. A single HTTP probe against one path can only
-// ever prove that one path has no write twin; a write route registered at any other
-// path — POST /v1/ingest, PUT /v1/changes — would pass every HTTP-level test in this
-// file while never being exercised. Reading the source is what generalizes the
-// property to "no write route anywhere", not just "no write route at this one URL".
+// egress exposes no write route anywhere: every pattern collectRoutePatterns finds must
+// start with "GET ". A single HTTP probe against one path can only ever prove that one
+// path has no write twin; a write route registered at any other path — POST
+// /v1/ingest, PUT /v1/changes — would pass every HTTP-level test in this file while
+// never being exercised. Reading the source is what generalizes the property to "no
+// write route anywhere", not just "no write route at this one URL".
 // It needs no database and runs unconditionally, like TestHealthzWorksWithNilStore.
 func TestNoWriteRouteIsRegisteredAnywhere(t *testing.T) {
 	patterns := collectRoutePatterns(t)
 
 	require.NotEmpty(t, patterns, "Routes() must register at least one handler")
 	for _, p := range patterns {
-		if slices.Contains(readOnlyPOSTRoutes, p) {
-			continue
-		}
 		assert.True(t, strings.HasPrefix(p, "GET "),
 			"route pattern %q is not a GET route; egress must expose no write route", p)
-	}
-	for _, want := range readOnlyPOSTRoutes {
-		assert.Contains(t, patterns, want,
-			"the Grafana annotations POST routes must be registered exactly as documented")
 	}
 }
 
@@ -655,6 +621,7 @@ func TestNoWriteRouteIsRegisteredAnywhere(t *testing.T) {
 // at-the-limit result as truncated would fail here.
 func TestTruncationIsSignalledOnEveryReadEndpoint(t *testing.T) {
 	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
 	const seeded = 3
 	seedManyChanges(t, s, tn, seeded)
 	seedManyEvents(t, s, tn, seeded)
@@ -668,13 +635,13 @@ func TestTruncationIsSignalledOnEveryReadEndpoint(t *testing.T) {
 			"&from=1789376400000&to=1789383600000",
 	} {
 		t.Run(name, func(t *testing.T) {
-			full := get(t, h, fmt.Sprintf("%s&limit=%d", base, seeded))
+			full := get(t, h, key, fmt.Sprintf("%s&limit=%d", base, seeded))
 			require.Equal(t, http.StatusOK, full.Code, full.Body.String())
 			assert.Empty(t, full.Header().Get(egress.TruncatedHeader),
 				"a result of exactly Limit rows with nothing behind it is NOT truncated; "+
 					"marking it so would make the header meaningless")
 
-			cut := get(t, h, fmt.Sprintf("%s&limit=%d", base, seeded-1))
+			cut := get(t, h, key, fmt.Sprintf("%s&limit=%d", base, seeded-1))
 			require.Equal(t, http.StatusOK, cut.Code, cut.Body.String())
 			assert.Equal(t, "true", cut.Header().Get(egress.TruncatedHeader),
 				"rows were discarded and the caller has no other way to find out")
@@ -694,12 +661,13 @@ func TestTruncationIsSignalledOnEveryReadEndpoint(t *testing.T) {
 // assertion's slot — the exact conflation 0003 exists to undo.
 func TestQueryChangesEmitsBothStartFacts(t *testing.T) {
 	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
 	seen := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
 	asserted := time.Date(2026, 9, 14, 10, 20, 0, 0, time.UTC)
 	url := "/v1/changes?tenant=" + tn + "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
 
 	only := func() map[string]any {
-		rec := get(t, h, url)
+		rec := get(t, h, key, url)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		var changes []map[string]any
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &changes))
@@ -744,7 +712,7 @@ func TestReadyzReports503WhenTheDatabaseIsUnreachable(t *testing.T) {
 	h, s, _ := newServer(t)
 	s.Close()
 
-	rec := get(t, h, "/readyz")
+	rec := getUnauthenticated(t, h, "GET /readyz")
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "database unreachable",
 		"an operator reading the probe's body must be told what is wrong")
@@ -758,7 +726,7 @@ func TestReadyzDoesNotRelayTheDatabaseError(t *testing.T) {
 	h, s, _ := newServer(t)
 	s.Close()
 
-	rec := get(t, h, "/readyz")
+	rec := getUnauthenticated(t, h, "GET /readyz")
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "closed pool",
 		"the database error must not reach an unauthenticated caller")
@@ -772,7 +740,7 @@ func TestFailedReadinessProbeLogsItsCause(t *testing.T) {
 	s.Close()
 	records := captureLogs(t)
 
-	rec := get(t, h, "/readyz")
+	rec := getUnauthenticated(t, h, "GET /readyz")
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 
 	logged := slices.ContainsFunc(records(), func(r map[string]any) bool {
@@ -788,11 +756,12 @@ func TestFailedReadinessProbeLogsItsCause(t *testing.T) {
 // nothing, it returns the changes SPANNING the interval the caller inverted — a
 // plausible-looking answer to a question nobody asked.
 //
-// All four transports are driven because the rule lives in newWindow and each parser has
-// to route through it; a parser that builds a window literal instead would pass every
-// other test in this file.
+// Both transports are driven because the rule lives in newWindow and each parser has to
+// route through it; a parser that built a window literal instead would pass every other
+// test in this file.
 func TestEgressRejectsAnInvertedWindow(t *testing.T) {
-	h, _, tn := newServer(t)
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
 	early := time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC)
 	late := time.Date(2026, 9, 14, 11, 0, 0, 0, time.UTC)
 	inverted := "&from=" + late.Format(time.RFC3339) + "&to=" + early.Format(time.RFC3339)
@@ -805,19 +774,12 @@ func TestEgressRejectsAnInvertedWindow(t *testing.T) {
 			tn, late.UnixMilli(), early.UnixMilli()),
 	} {
 		t.Run(name, func(t *testing.T) {
-			rec := get(t, h, url)
+			rec := get(t, h, key, url)
 			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 			assert.Contains(t, rec.Body.String(), "earliest first",
 				"the message must say what the caller should change about its own request")
 		})
 	}
-
-	t.Run("POST /adapters/grafana/annotations", func(t *testing.T) {
-		rec := postJSON(t, h, "/adapters/grafana/annotations?tenant="+tn,
-			annotationBody(late, early))
-		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-		assert.Contains(t, rec.Body.String(), "earliest first")
-	})
 }
 
 // TestGrafanaRejectsAnOutOfRangeEpochWindow pins the epoch bound. epochMillisParam
@@ -830,7 +792,8 @@ func TestEgressRejectsAnInvertedWindow(t *testing.T) {
 // status is the caller's own 400, and the body names the caller's parameter rather than
 // our store.
 func TestGrafanaRejectsAnOutOfRangeEpochWindow(t *testing.T) {
-	h, _, tn := newServer(t)
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
 	for name, url := range map[string]string{
 		"to overflows int64": "/adapters/grafana/annotations?tenant=" + tn +
 			"&from=0&to=9223372036854775807",
@@ -838,7 +801,7 @@ func TestGrafanaRejectsAnOutOfRangeEpochWindow(t *testing.T) {
 			"&from=-1&to=1789383600000",
 	} {
 		t.Run(name, func(t *testing.T) {
-			rec := get(t, h, url)
+			rec := get(t, h, key, url)
 			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 			assert.Contains(t, rec.Body.String(), "out of range",
 				"the caller must be told its own value was rejected")
@@ -882,28 +845,6 @@ func spanAttrValues(rec *tracetest.SpanRecorder, spanName, key string) []string 
 	return out
 }
 
-// TestGrafanaPathTenantIsRecordedAsPathSourced pins the source tenantOf reports, driven
-// through the one route that can actually produce "path": the path-scoped Grafana
-// annotations route.
-func TestGrafanaPathTenantIsRecordedAsPathSourced(t *testing.T) {
-	rec, restore := recordSpans(t)
-	defer restore()
-
-	// No seeding. grafana.Renderer.Render builds an empty slice and returns it, so an
-	// empty result still renders 200 with []. The assertion is about which mechanism
-	// supplied the tenant, not about any row coming back — and seeding under newServer's
-	// tenant would write to the wrong one anyway, since the path segment "acme" is the
-	// whole point. Discard all three results: a bound-but-unused tn is a compile error.
-	h, _, _ := newServer(t)
-	body := `{"range":{"from":"2026-09-15T09:00:00.000Z","to":"2026-09-15T11:00:00.000Z"}}`
-	resp := postJSON(t, h, "/adapters/grafana/acme/annotations", body)
-	require.Equal(t, http.StatusOK, resp.Code)
-
-	sources := spanAttrValues(rec, "", "horopter.tenant.source")
-	assert.Contains(t, sources, "path",
-		"a path-scoped route must record that the path supplied the tenant")
-}
-
 // TestFailedRenderStillRecordsTheAdapter is the failure half of horopter.adapter. Which
 // vendor shape a request was for is known before the query runs, and a failing query is
 // exactly when it matters — "Grafana's annotation calls are erroring" and "the OTLP span
@@ -913,14 +854,20 @@ func TestGrafanaPathTenantIsRecordedAsPathSourced(t *testing.T) {
 // Closing the store is what makes the query fail without reaching into the handler:
 // pgxpool.Close is idempotent, so newServer's own t.Cleanup(s.Close) still runs safely.
 func TestFailedRenderStillRecordsTheAdapter(t *testing.T) {
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	// Warmed before spans are recorded and the pool closes: the authenticator shares the
+	// store's own pool, so an unwarmed cache would answer 503 from the credential lookup
+	// instead of from the render this test means to exercise, and its own span would
+	// pollute what this test asserts about the render's.
+	warmCredentialCache(t, h, key, tn)
+
 	rec, restore := recordSpans(t)
 	defer restore()
-
-	h, s, _ := newServer(t)
 	s.Close()
 
-	body := `{"range":{"from":"2026-09-15T09:00:00.000Z","to":"2026-09-15T11:00:00.000Z"}}`
-	resp := postJSON(t, h, "/adapters/grafana/annotations", body)
+	resp := get(t, h, key, "/adapters/grafana/annotations?tenant="+tn+
+		"&from=1789376400000&to=1789383600000")
 	require.Equal(t, http.StatusInternalServerError, resp.Code,
 		"a closed pool must fail the query; a 200 here means the test proved nothing")
 
@@ -931,37 +878,25 @@ func TestFailedRenderStillRecordsTheAdapter(t *testing.T) {
 // readRoute is one request against one egress read route, naming the pattern Routes
 // registers it under so TestEveryReadRouteHasAFailureCase can match the two up.
 type readRoute struct {
-	pattern, method, url, body string
+	pattern, url string
 }
 
-// readRoutes returns one well-formed request per egress read route, each naming tenant
-// tn: through the path on the path-scoped Grafana route, through the query string on the
-// rest. Every request is valid, so a failure can only come from the store.
+// readRoutes returns one well-formed request per egress read route, naming tenant tn.
+// Every request is valid, so a failure can only come from the store.
 func readRoutes(tn string) []readRoute {
 	const rfc3339Window = "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
-	const annotationWindow = `{"range":{"from":"2026-09-15T09:00:00.000Z",` +
-		`"to":"2026-09-15T11:00:00.000Z"}}`
 	return []readRoute{
-		{"GET /v1/changes", http.MethodGet, "/v1/changes?tenant=" + tn + rfc3339Window, ""},
-		{"GET /v1/events", http.MethodGet, "/v1/events?tenant=" + tn, ""},
-		{"GET /adapters/grafana/annotations", http.MethodGet,
-			"/adapters/grafana/annotations?tenant=" + tn + "&from=1789376400000&to=1789383600000",
-			""},
-		{"POST /adapters/grafana/annotations", http.MethodPost,
-			"/adapters/grafana/annotations?tenant=" + tn, annotationWindow},
-		{"POST /adapters/grafana/{tenant}/annotations", http.MethodPost,
-			"/adapters/grafana/" + tn + "/annotations", annotationWindow},
-		{"GET /adapters/otlp/spans", http.MethodGet,
-			"/adapters/otlp/spans?tenant=" + tn + rfc3339Window, ""},
+		{"GET /v1/changes", "/v1/changes?tenant=" + tn + rfc3339Window},
+		{"GET /v1/events", "/v1/events?tenant=" + tn},
+		{"GET /adapters/grafana/annotations",
+			"/adapters/grafana/annotations?tenant=" + tn + "&from=1789376400000&to=1789383600000"},
+		{"GET /adapters/otlp/spans", "/adapters/otlp/spans?tenant=" + tn + rfc3339Window},
 	}
 }
 
-func (rr readRoute) serve(t *testing.T, h http.Handler) *httptest.ResponseRecorder {
+func (rr readRoute) serve(t *testing.T, h http.Handler, key string) *httptest.ResponseRecorder {
 	t.Helper()
-	if rr.method == http.MethodPost {
-		return postJSON(t, h, rr.url, rr.body)
-	}
-	return get(t, h, rr.url)
+	return get(t, h, key, rr.url)
 }
 
 // captureLogs sends slog's default logger to a buffer until the test ends, and returns a
@@ -1015,12 +950,15 @@ func TestEveryReadRouteHasAFailureCase(t *testing.T) {
 // first thing an operator needs from the line.
 func TestEveryFailedReadIsLoggedWithItsCause(t *testing.T) {
 	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	// Warmed before the pool closes: see TestFailedRenderStillRecordsTheAdapter.
+	warmCredentialCache(t, h, key, tn)
 	s.Close()
 
 	for _, route := range readRoutes(tn) {
 		t.Run(route.pattern, func(t *testing.T) {
 			records := captureLogs(t)
-			rec := route.serve(t, h)
+			rec := route.serve(t, h, key)
 			require.Equal(t, http.StatusInternalServerError, rec.Code,
 				"a closed pool must fail the read; anything else means the test proved nothing")
 
@@ -1037,17 +975,20 @@ func TestEveryFailedReadIsLoggedWithItsCause(t *testing.T) {
 
 // TestFailedReadDoesNotRelayStoreErrorText pins the caller-facing half. The store's error
 // names tables, columns and constraints — and for a failed connection the database host,
-// user and name — and egress is unauthenticated, so relaying it published that detail to
-// anyone who could reach the port. The wrapped error also carried the caller's own tenant
-// string, making every failing route a reflector for caller-chosen text. Ingress's
-// appendFailed withholds the same text for the same reason.
+// user and name — so relaying it published that detail to anyone holding a valid
+// credential. The wrapped error also carried the caller's own tenant string, making every
+// failing route a reflector for caller-chosen text. Ingress's appendFailed withholds the
+// same text for the same reason.
 func TestFailedReadDoesNotRelayStoreErrorText(t *testing.T) {
 	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	// Warmed before the pool closes: see TestFailedRenderStillRecordsTheAdapter.
+	warmCredentialCache(t, h, key, tn)
 	s.Close()
 
 	for _, route := range readRoutes(tn) {
 		t.Run(route.pattern, func(t *testing.T) {
-			rec := route.serve(t, h)
+			rec := route.serve(t, h, key)
 			require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
 			assert.NotContains(t, rec.Body.String(), "closed pool",
 				"the store's error text must not reach the caller")
@@ -1097,20 +1038,21 @@ func refsIn(t *testing.T, rec *httptest.ResponseRecorder) []string {
 // the two columns apart at all.
 func TestQueryChangesFiltersBySubjectAndType(t *testing.T) {
 	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
 	seedWith(t, s, tn, "dep-90", "deployment.started", "acme/prod", at)
 	seedWith(t, s, tn, "inc-90", "incident.declared", "acme/staging", at)
 
 	window := "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
 	assert.Equal(t, []string{"dep-90", "inc-90"},
-		refsIn(t, get(t, h, "/v1/changes?tenant="+tn+window)),
+		refsIn(t, get(t, h, key, "/v1/changes?tenant="+tn+window)),
 		"precondition: both changes are in the window")
 
 	assert.Equal(t, []string{"dep-90"},
-		refsIn(t, get(t, h, "/v1/changes?tenant="+tn+window+"&subject=acme/prod")),
+		refsIn(t, get(t, h, key, "/v1/changes?tenant="+tn+window+"&subject=acme/prod")),
 		"subject= must filter on subject, not on type")
 	assert.Equal(t, []string{"inc-90"},
-		refsIn(t, get(t, h, "/v1/changes?tenant="+tn+window+"&type=incident.declared")),
+		refsIn(t, get(t, h, key, "/v1/changes?tenant="+tn+window+"&type=incident.declared")),
 		"type= must filter on type, not on subject")
 }
 
@@ -1119,6 +1061,7 @@ func TestQueryChangesFiltersBySubjectAndType(t *testing.T) {
 // is handed everything and shows no error.
 func TestQueryChangesFiltersByStatus(t *testing.T) {
 	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
 	seedWith(t, s, tn, "dep-91", "deployment.started", "acme/prod", at)
 	seedWith(t, s, tn, "dep-92", "deployment.started", "acme/prod", at)
@@ -1126,13 +1069,139 @@ func TestQueryChangesFiltersByStatus(t *testing.T) {
 
 	window := "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
 	assert.Equal(t, []string{"dep-91", "dep-92"},
-		refsIn(t, get(t, h, "/v1/changes?tenant="+tn+window)),
+		refsIn(t, get(t, h, key, "/v1/changes?tenant="+tn+window)),
 		"precondition: both changes are in the window")
 
 	assert.Equal(t, []string{"dep-92"},
-		refsIn(t, get(t, h, "/v1/changes?tenant="+tn+window+"&status=completed")),
+		refsIn(t, get(t, h, key, "/v1/changes?tenant="+tn+window+"&status=completed")),
 		"status= must narrow the result set")
 	assert.Equal(t, []string{"dep-91"},
-		refsIn(t, get(t, h, "/v1/changes?tenant="+tn+window+"&status=in_progress")),
+		refsIn(t, get(t, h, key, "/v1/changes?tenant="+tn+window+"&status=in_progress")),
 		"the complementary status must select the other change")
+}
+
+// TestEveryNonProbeEgressRouteRequiresACredential asserts, by enumerating the mux rather
+// than driving a hand-written list of URLs, that a credential guards every route but the
+// two probes. A hand-written list can go stale the moment a route is added; this cannot,
+// because it is the same enumeration TestNoWriteRouteIsRegisteredAnywhere reads.
+func TestEveryNonProbeEgressRouteRequiresACredential(t *testing.T) {
+	srv, _, _ := newServerWith(t, 0, egress.DefaultLimits())
+	h := srv.Routes()
+	for _, route := range routesOf(t, h) { // enumerates the mux, never a hand-written list
+		if isProbe(route) {
+			continue
+		}
+		t.Run(route, func(t *testing.T) {
+			assert.Equal(t, http.StatusUnauthorized, getUnauthenticated(t, h, route).Code)
+		})
+	}
+}
+
+// TestAuthRejectsBeforeAdmissionSpendsAPermit is the ordering guarantee Routes' shape
+// exists for: s.authz(auth.CapRead, s.admit(...)), never the reverse. If admission ran
+// first, an unauthenticated request would consume a read permit before being rejected — a
+// free denial of service against the limiter — and the credential lookup itself takes a
+// pool connection admission is sized from, so an unauthenticated flood would also compete
+// for what admission exists to protect.
+func TestAuthRejectsBeforeAdmissionSpendsAPermit(t *testing.T) {
+	srv, s, tn := newServerWith(t, 1, testLimits())
+	h := srv.Routes()
+	key := readerKey(t, s, tn)
+	seed(t, s, tn, "dep-permit", "deployment.started", fixed)
+	url := "/v1/changes?tenant=" + tn + "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
+
+	release := holdRead(t, h, key, url)
+	defer release()
+
+	before := admittedCount(t, srv)
+	rec := getUnauthenticated(t, h, "GET /v1/changes")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, before, admittedCount(t, srv),
+		"auth outside admit: an unauthenticated request must not consume a permit")
+}
+
+func TestATenantScopedCredentialCannotSelectAnotherTenant(t *testing.T) {
+	srv, s, tn := newServerWith(t, 0, egress.DefaultLimits())
+	h := srv.Routes()
+	key := readerKey(t, s, tn)
+	window := "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
+	assert.Equal(t, http.StatusForbidden,
+		get(t, h, key, "/v1/changes?tenant=tnt_other"+window).Code)
+}
+
+func TestATenantScopedCredentialMaySelectItsOwnTenant(t *testing.T) {
+	srv, s, tn := newServerWith(t, 0, egress.DefaultLimits())
+	h := srv.Routes()
+	key := readerKey(t, s, tn)
+	window := "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
+	assert.Equal(t, http.StatusOK,
+		get(t, h, key, "/v1/changes?tenant="+tn+window).Code,
+		"naming your own tenant is redundant, not forbidden")
+}
+
+func TestASuperuserSelectsATenantByQueryParameter(t *testing.T) {
+	srv, s, tn := newServerWith(t, 0, egress.DefaultLimits())
+	h := srv.Routes()
+	key := seedCredential(t, s, "superuser", "")
+	window := "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
+	assert.Equal(t, http.StatusOK, get(t, h, key, "/v1/changes?tenant="+tn+window).Code)
+}
+
+func TestASuperuserNamingNoTenantIsRejected(t *testing.T) {
+	srv, s, _ := newServerWith(t, 0, egress.DefaultLimits())
+	h := srv.Routes()
+	key := seedCredential(t, s, "superuser", "")
+	rec := get(t, h, key, "/v1/changes?from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z")
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"a global credential has no tenant to default to; DefaultTenant is gone")
+}
+
+func TestASuperuserNamingAnUnknownTenantGets404(t *testing.T) {
+	srv, s, _ := newServerWith(t, 0, egress.DefaultLimits())
+	h := srv.Routes()
+	key := seedCredential(t, s, "superuser", "")
+	rec := get(t, h, key,
+		"/v1/changes?tenant=tnt_doesnotexist&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "tnt_", "a 404 must not confirm which ids exist")
+}
+
+func TestFetchByRefNeedsNoWindow(t *testing.T) {
+	srv, s, tn := newServerWith(t, 0, egress.DefaultLimits())
+	h := srv.Routes()
+	key := readerKey(t, s, tn)
+	seed(t, s, tn, "github/deploy-1", "deployment.started", fixed)
+
+	rec := get(t, h, key, "/v1/changes?ref="+url.QueryEscape("github/deploy-1"))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Len(t, changesOf(t, rec), 1)
+}
+
+// TestFetchByRefRoundTripsADotDotSegment pins that ref is a query parameter, not a path
+// segment: net/http's ServeMux path-cleans a URL path before it ever reaches a handler,
+// which would silently collapse "legacy/../etc" into "legacy" if ref were routed that way.
+func TestFetchByRefRoundTripsADotDotSegment(t *testing.T) {
+	srv, s, tn := newServerWith(t, 0, egress.DefaultLimits())
+	h := srv.Routes()
+	key := readerKey(t, s, tn)
+	seed(t, s, tn, "legacy/../etc", "deployment.started", fixed)
+
+	rec := get(t, h, key, "/v1/changes?ref="+url.QueryEscape("legacy/../etc"))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, "legacy/../etc", changesOf(t, rec)[0].Ref,
+		"a query parameter is not path-cleaned; this is why the lookup is not a path route")
+}
+
+// TestTheAnnotationPOSTRoutesAreGone drives both former POST routes. The two status codes
+// differ because one pattern survives (as a GET) and the other does not: ServeMux answers
+// 405 for a method mismatch on a registered path, 404 when nothing matches.
+func TestTheAnnotationPOSTRoutesAreGone(t *testing.T) {
+	srv, s, tn := newServerWith(t, 0, egress.DefaultLimits())
+	h := srv.Routes()
+	key := readerKey(t, s, tn)
+	assert.Equal(t, http.StatusMethodNotAllowed,
+		postTo(t, h, key, "/adapters/grafana/annotations").Code)
+	assert.Equal(t, http.StatusNotFound,
+		postTo(t, h, key, "/adapters/grafana/acme/annotations").Code,
+		"no {tenant} pattern survives, so this path matches nothing at all")
 }

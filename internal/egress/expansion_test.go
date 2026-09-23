@@ -161,18 +161,23 @@ func TestReadAllocationsStayWithinExpansionFactor(t *testing.T) {
 	for _, shape := range expansionShapes() {
 		tn := testdb.NewTenant(t, base+"-"+shape.name)
 		seedShape(t, s, tn, shape.rows, shape.attrs)
+		// A tenant-scoped reader, not a superuser: a global credential's tenant is checked
+		// against the store on every request, an extra allocation this test's ratio must
+		// not have to absorb. Minted and warmed outside every measured closure below.
+		key := readerKey(t, s, tn)
+		warmCredentialCache(t, h, key, tn)
 		for _, read := range expansionReads(t, s, tn) {
 			t.Run(shape.name+"-"+read.route, func(t *testing.T) {
-				assertWithinExpansionFactor(t, h, read)
+				assertWithinExpansionFactor(t, h, key, read)
 			})
 		}
 	}
 }
 
-func assertWithinExpansionFactor(t *testing.T, h http.Handler, read expansionRead) {
+func assertWithinExpansionFactor(t *testing.T, h http.Handler, key string, read expansionRead) {
 	t.Helper()
 	var rec *httptest.ResponseRecorder
-	allocated := allocatedDuring(func() { rec = get(t, h, read.url) })
+	allocated := allocatedDuring(func() { rec = get(t, h, key, read.url) })
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Empty(t, rec.Header().Get(egress.TruncatedHeader),

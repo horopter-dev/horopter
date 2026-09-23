@@ -147,9 +147,9 @@ func limitHalvedMessage(before, after int, state *readState) string {
 func (s *Server) shed(
 	w http.ResponseWriter, r *http.Request, state *readState, gate string, figures ...any,
 ) {
-	tenantID, _ := tenantOf(r)
+	tenantID, _ := s.tenantFor(r)
 	retryAfter := retryAfterSeconds(s.limits.AdmissionWait)
-	fields := []any{"route", r.Pattern, "tenant", tenantID, "gate", gate,
+	fields := []any{"route", r.Pattern, "tenant", tenantID.String(), "gate", gate,
 		"waited_ms", state.waited.Milliseconds(), "retry_after_s", retryAfter}
 	slog.WarnContext(r.Context(), "read shed", append(fields, figures...)...)
 	s.metrics.shed.Add(r.Context(), 1,
@@ -232,9 +232,9 @@ func (s *Server) admitMemory(
 // tooLarge answers a read whose first row alone needs more memory than the pool holds. The body
 // names the limit, which is configuration, and nothing from the store.
 func (s *Server) tooLarge(w http.ResponseWriter, r *http.Request, est postgres.ReadEstimate) {
-	tenantID, _ := tenantOf(r)
+	tenantID, _ := s.tenantFor(r)
 	capacity := s.memory.Capacity()
-	slog.WarnContext(r.Context(), "read too large", "route", r.Pattern, "tenant", tenantID,
+	slog.WarnContext(r.Context(), "read too large", "route", r.Pattern, "tenant", tenantID.String(),
 		"first_row_bytes", est.FirstRowBytes,
 		"needed_bytes", est.FirstRowBytes*readExpansionFactor, "capacity_bytes", capacity)
 	writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf(

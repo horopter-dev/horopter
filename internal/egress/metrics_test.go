@@ -124,6 +124,7 @@ func TestReadAdmissionMetrics(t *testing.T) {
 	limits := testLimits()
 	limits.ReadMemoryBytes = 64 << 20
 	srv, s, tn := newServerWith(t, 1, limits)
+	key := readerKey(t, s, tn)
 	seed(t, s, tn, "metrics-ref", "deployment.started",
 		time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC))
 	h := srv.Routes()
@@ -135,15 +136,15 @@ func TestReadAdmissionMetrics(t *testing.T) {
 		"horopter.read.memory.capacity|":     64 << 20,
 	}, readMetricPoints(t, reader), "nothing is shed yet, and no gauge carries an attribute")
 
-	finish := holdRead(t, h, changesURL(tn))
+	finish := holdRead(t, h, key, changesURL(tn))
 	assert.Equal(t, int64(1), readMetricPoints(t, reader)["horopter.read.admission.in_flight|"])
-	require.Equal(t, http.StatusServiceUnavailable, get(t, h, changesURL(tn)).Code)
+	require.Equal(t, http.StatusServiceUnavailable, get(t, h, key, changesURL(tn)).Code)
 	require.Equal(t, http.StatusOK, finish().Code)
 
 	release, err := egress.ReserveReadMemory(srv, limits.ReadMemoryBytes)
 	require.NoError(t, err)
 	assert.Equal(t, int64(64<<20), readMetricPoints(t, reader)["horopter.read.memory.reserved|"])
-	require.Equal(t, http.StatusServiceUnavailable, get(t, h, changesURL(tn)).Code,
+	require.Equal(t, http.StatusServiceUnavailable, get(t, h, key, changesURL(tn)).Code,
 		"the seeded row needs memory, so a full pool must shed the read")
 	release()
 

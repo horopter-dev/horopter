@@ -89,11 +89,10 @@ naming the variable and the value.
 
 **`horopter-egress` has no authentication in v0.1, and `docker-compose.yml` publishes its
 port (8081) on the host.** Every route it serves — `GET /v1/changes`, `GET /v1/events`,
-`GET`/`POST /adapters/grafana/annotations` and its `/{tenant}/annotations` path variant,
-and `GET /adapters/otlp/spans` — answers anyone who can reach that port, with no
-credential check of any kind. A caller can list a tenant's full change history and raw
-event log: subjects, actors, titles, correlation refs, and every attribute a producer
-attached, including whatever was put in `horopter.description`.
+`GET /adapters/grafana/annotations` and `GET /adapters/otlp/spans` — answers anyone who can
+reach that port, with no credential check of any kind. A caller can list a tenant's full
+change history and raw event log: subjects, actors, titles, correlation refs, and every
+attribute a producer attached, including whatever was put in `horopter.description`.
 
 A read that fails is answered `500` with a generic body, and the underlying error — which
 can name tables, constraints and the database host — is written to the daemon's log
@@ -408,12 +407,11 @@ untouched.
 
 Every read endpoint caps its result set at 1000 rows. When rows were discarded, the
 response carries **`X-Horopter-Truncated: true`**; when nothing was discarded the header
-is absent entirely. All four read endpoints set it, across six registered routes:
+is absent entirely. All four read routes set it:
 
 - `GET /v1/changes`
 - `GET /v1/events`
-- `GET /adapters/grafana/annotations` and `POST /adapters/grafana/annotations`
-  (including the `/adapters/grafana/{tenant}/annotations` variant)
+- `GET /adapters/grafana/annotations`
 - `GET /adapters/otlp/spans`
 
 The header is also set when a read was larger than egress's read memory pool and was cut to the
@@ -562,7 +560,7 @@ without HTML escaping:
 
 One key is a Horopter-specific extension, not an OTel convention, because nothing in
 that vocabulary covers it: **`horopter.description`**. The Grafana annotations adapter
-(`GET`/`POST /adapters/grafana/annotations`) reads it as the annotation body text. It is
+(`GET /adapters/grafana/annotations`) reads it as the annotation body text. It is
 namespaced under `horopter.` the same way the OTLP adapter's own `horopter.subject`,
 `horopter.ref` and `horopter.status` attributes are, to keep it distinct from a
 producer's own attributes — a bare, unnamespaced `description` attribute is not read for

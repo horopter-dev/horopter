@@ -13,7 +13,7 @@ import (
 	"horopter.dev/horopter/internal/core"
 )
 
-// ChangeQuery selects changes overlapping a time window.
+// ChangeQuery selects changes overlapping a time window, or by ref alone.
 type ChangeQuery struct {
 	Tenant  string
 	From    time.Time
@@ -21,12 +21,24 @@ type ChangeQuery struct {
 	Subject string
 	Type    string
 	Status  string
-	Limit   int
+	// Ref selects a single change by its (tenant, ref) primary key. When set, the window
+	// predicate is omitted entirely: From and To are ignored, since a ref lookup is already
+	// exact and a window could only narrow it redundantly.
+	Ref   string
+	Limit int
 	// MaxRowTextBytes cuts the result after the leading rows whose row text, summed in order,
 	// fits within it; zero means no cut. Row text is a row's size as Postgres renders the whole
 	// row as text, octet_length(row::text). A cut that discards rows reports the result
 	// truncated.
 	MaxRowTextBytes int64
+}
+
+// NewChangeQuery returns a ChangeQuery scoped to tenant over [from, to] — the constructor
+// through which a core.TenantID crosses into the store package, rather than a caller
+// setting ChangeQuery.Tenant from a bare string it read off a request itself. Subject,
+// Type, Status and Ref are optional filters, assigned on the result afterward.
+func NewChangeQuery(tenant core.TenantID, from, to time.Time, limit int) ChangeQuery {
+	return ChangeQuery{Tenant: tenant.String(), From: from, To: to, Limit: limit}
 }
 
 // EventQuery selects raw events for audit, export, and debugging.
@@ -89,13 +101,22 @@ const changeColumns = `tenant, ref, subject, type, title, actor, start_at, start
 const eventColumns = `id, tenant, idempotency_key, schema_version, source, type, subject,
 	actor, title, occurred_at, received_at, correlation_ref, attributes`
 
-// changeSelection selects the change rows q reads.
+// changeSelection selects the change rows q reads: by ref alone when q.Ref is set, or by
+// window otherwise. The two predicates are mutually exclusive, not layered — a window
+// alongside a ref would be redundant, since (tenant, ref) already selects at most one row.
 func changeSelection(q ChangeQuery) selection {
 	sb := strings.Builder{}
-	sb.WriteString(`
-		SELECT c.* FROM change c
-		WHERE c.tenant = $1 AND c.start_at <= $2 AND c.end_effective >= $3`)
-	args := appendChangeFilters(&sb, []any{q.Tenant, q.To.UTC(), q.From.UTC()}, q)
+	var args []any
+	if q.Ref != "" {
+		sb.WriteString(`SELECT c.* FROM change c WHERE c.tenant = $1 AND c.ref = $2`)
+		args = []any{q.Tenant, q.Ref}
+	} else {
+		sb.WriteString(`
+			SELECT c.* FROM change c
+			WHERE c.tenant = $1 AND c.start_at <= $2 AND c.end_effective >= $3`)
+		args = []any{q.Tenant, q.To.UTC(), q.From.UTC()}
+	}
+	args = appendChangeFilters(&sb, args, q)
 	sb.WriteString(" ORDER BY c.start_at ASC, c.ref ASC")
 	if limit, bounded := overFetch(q.Limit); bounded {
 		args = append(args, limit)
@@ -383,6 +404,19 @@ func scanChanges(rows pgx.Rows, extra ...any) ([]core.Change, error) {
 		return nil, fmt.Errorf("iterate change rows: %w", err)
 	}
 	return out, nil
+}
+
+// TenantExists reports whether a tenant row named id exists. It answers egress's global
+// credential path: a superuser may name any tenant, and telling a real one from a typo
+// needs a lookup, not an inference from an empty result set.
+func (s *Store) TenantExists(ctx context.Context, id string) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx,
+		"SELECT EXISTS (SELECT 1 FROM tenant WHERE id = $1)", id).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check whether tenant %q exists: %w", id, err)
+	}
+	return exists, nil
 }
 
 // EstimateChanges measures the rows QueryChanges would fetch for q without fetching them: the

@@ -13,11 +13,19 @@ import (
 	"syscall"
 	"time"
 
+	"horopter.dev/horopter/internal/auth"
 	"horopter.dev/horopter/internal/egress"
 	"horopter.dev/horopter/internal/logging"
 	"horopter.dev/horopter/internal/store/postgres"
 	"horopter.dev/horopter/internal/telemetry"
 )
+
+// MaxHeaderBytes bounds the request line plus headers, Authorization included. Go's 1 MiB
+// default is what made an oversized Authorization header worth sending: SplitKey bounds
+// the key prefix, but the secret half is only length-checked by a constant-time compare, so
+// a large header still costs one SHA-256 before rejection. 16 KiB matches ingress's own
+// bound — see its doc comment for why.
+const MaxHeaderBytes = 16 << 10
 
 func main() {
 	if err := run(); err != nil {
@@ -64,15 +72,28 @@ func run() error {
 	}
 	defer store.Close()
 
+	// DefaultOptions, never a zero Options: an uncached authenticator queries the database
+	// on every request, ahead of anything that could shed it.
+	authn := auth.New(auth.NewStore(store.Pool()), time.Now, auth.DefaultOptions())
+
+	// egress.New rejects a nil authenticator, so this is checked exactly once, in the
+	// constructor, rather than here as well: two guards on one fact drift.
+	api, err := egress.New(store, time.Now, limits, authn)
+	if err != nil {
+		return err
+	}
+
 	srv := &http.Server{
 		Addr:    *addr,
-		Handler: egress.New(store, time.Now, limits).Routes(),
-		// ReadHeaderTimeout bounds a slowloris header dribble. ReadTimeout bounds reading
-		// a request, the largest of which is a Grafana annotation POST body of at most
-		// egress.MaxAnnotationBodyBytes (64 KiB), so 15s is already generous. WriteTimeout
-		// bounds handler time plus the response write, which for a MaxLimit result set is
-		// up to two admission waits — LimitsFromEnv keeps both well inside it — a size
-		// estimate, one indexed query and a JSON encode. IdleTimeout
+		Handler: api.Routes(),
+		// MaxHeaderBytes bounds the request line plus headers, Authorization included —
+		// see its own doc comment for why Go's 1 MiB default is worth tightening.
+		MaxHeaderBytes: MaxHeaderBytes,
+		// ReadHeaderTimeout bounds a slowloris header dribble. ReadTimeout bounds reading a
+		// request; every egress route is now a GET, so the only body it ever reads is
+		// headers. WriteTimeout bounds handler time plus the response write, which for a
+		// MaxLimit result set is up to two admission waits — LimitsFromEnv keeps both well
+		// inside it — a size estimate, one indexed query and a JSON encode. IdleTimeout
 		// bounds a kept-alive connection between requests so idle clients cannot accumulate
 		// file descriptors. Without the last three a client could hold a connection forever.
 		ReadHeaderTimeout: 10 * time.Second,

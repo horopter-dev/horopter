@@ -18,6 +18,10 @@ var RetryAfterSeconds = retryAfterSeconds
 // ReadConcurrencyLimit returns s's current read concurrency limit.
 func ReadConcurrencyLimit(s *Server) int { return s.limiter.Limit() }
 
+// InFlight returns the number of reads s's concurrency limiter currently holds a permit
+// for.
+func InFlight(s *Server) int { return s.limiter.InFlight() }
+
 // ReadOverloaded reports whether a read whose connection acquisitions waited waits, all
 // succeeding, counts as overloaded against threshold.
 func ReadOverloaded(threshold time.Duration, waits ...time.Duration) bool {
