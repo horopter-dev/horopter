@@ -169,7 +169,7 @@ even though something else also caught this mutation in this environment.
 | A1 | delete the `revoked_at` check | `internal/auth/principal.go`, `validAt` | **caught** | `TestRevocationTakesEffectWithinTheTTL`, plus `TestARevokedCredentialIsRejected`, `TestAFutureRevocationIsNotYetInEffect` |
 | A2 | delete the `expires_at` check | `internal/auth/principal.go`, `validAt` | **caught** | `TestExpiredCredentialIsRejected`, plus `TestExpiryIsCheckedEvenWhileTheCredentialIsCached` |
 | A3 | drop the tenant-scope check | `internal/egress/server.go`, `tenantFor` | **caught** | `TestATenantScopedCredentialCannotSelectAnotherTenant` |
-| A4 | skip the `subject_pattern` match on append | `internal/ingress/server.go`, `postEvent` | **caught** | `TestSubjectPatternIsEnforced`, plus `TestAnEmptySubjectDoesNotMatchAPattern` |
+| A4 | skip the `subject_pattern` match on append | `internal/ingress/server.go`'s `postEvent` **and** `internal/ingress/cloudevents.go`'s `postCloudEvent` — the guard is duplicated across both routes, so both were mutated and both are reported here | **caught on both routes** | native: `TestSubjectPatternIsEnforced`, plus `TestAnEmptySubjectDoesNotMatchAPattern`; CloudEvents: `TestSubjectPatternIsEnforcedOnCloudEvents`, plus `TestAnEmptySubjectDoesNotMatchAPatternOnCloudEvents` (added 2026-09-23 — see note below) |
 | A5 | read `origin` from the body instead of the credential | `internal/ingress/server.go`, `eventRequest` + `postEvent` | **caught** | `TestPostIgnoresOriginInTheBody`, plus 10 more ingress tests whose bodies omit `origin` |
 | A6 | `subtle.ConstantTimeCompare` → `==` | `internal/auth/credential.go`, `VerifySecret` | **survives this repo's own functional suite, as predicted — caught only by the new source-reading test** (an external scanner also flagged it; see note) | `TestVerifySecretUsesAConstantTimeCompare` |
 | A7 | move `authz` inside `admit` | `internal/egress/server.go`, `Routes` | **caught** | `TestAuthRejectsBeforeAdmissionSpendsAPermit`, plus ~35 more (see note) |
@@ -272,6 +272,43 @@ After:
 (Leaves `subjectAllowed`/`subjectForbidden` otherwise unused — harmless for `go build`,
 flagged by `golangci-lint`'s unused check if left in place, which is one more reason the
 revert must be immediate.)
+
+**The same guard is duplicated in `internal/ingress/cloudevents.go`'s `postCloudEvent`**,
+which calls `subjectAllowed`/`subjectForbidden` in the identical order, past the
+CloudEvent's own validation and mapping to `core.Event`. At the time this table was first
+written, that copy had no HTTP-level test: every `postCE(...)` call in this suite used the
+unscoped producer credential, and `cloudevents_test.go` called `eventFromCloudEvent`
+directly rather than going through `ServeHTTP`, so this mutation applied there alone would
+have passed the entire suite. That gap was closed 2026-09-23 by adding
+`TestSubjectPatternIsEnforcedOnCloudEvents` and
+`TestAnEmptySubjectDoesNotMatchAPatternOnCloudEvents` to `internal/ingress/server_test.go`,
+and the mutation below was applied to confirm they catch it, then reverted.
+
+`internal/ingress/cloudevents.go`, inside `func (s *Server) postCloudEvent(w http.ResponseWriter, r *http.Request)`.
+
+Before:
+```go
+	if !subjectAllowed(p.SubjectPattern, ev.Subject) {
+		subjectForbidden(w, p.SubjectPattern, ev.Subject)
+		return
+	}
+	recordTenant(r.Context(), ev.Tenant)
+```
+After:
+```go
+	recordTenant(r.Context(), ev.Tenant)
+```
+Verified: with this mutation alone applied (native route's guard left intact),
+`TestSubjectPatternIsEnforcedOnCloudEvents` failed with a subject outside the pattern
+answered 201 instead of 403, and `TestAnEmptySubjectDoesNotMatchAPatternOnCloudEvents`
+failed with an absent subject answered 400 (rejected downstream by `core.Event`
+validation on append) instead of 403 — a different status than the native route's
+same-mutation empty-subject case, but still not the 403 the test requires, so the
+mutation is caught either way. `go test ./... -count=1` run against the full suite showed
+no other failures. `subjectAllowed`/`subjectForbidden` stayed in use throughout, via
+`postEvent`, so this mutation alone builds clean with no dangling import to flag it.
+Reverted with `git checkout -- internal/ingress/cloudevents.go` after a clean
+`git status --porcelain`, confirmed byte-identical to `HEAD` afterward.
 
 ### A5 — read `origin` from the body instead of the credential
 
