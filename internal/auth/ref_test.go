@@ -41,3 +41,17 @@ func TestValidateLocusAlsoRejectsSlash(t *testing.T) {
 	assert.Error(t, auth.ValidateLocus("github/actions"))
 	assert.Error(t, auth.ValidateLocus(""))
 }
+
+// TestValidateLocusRejectsLegacy pins Finding 2: migration 0004 prefixes every pre-existing
+// ref with legacy/ precisely so a real legacy-sourced credential's own writes stay
+// distinguishable from it. A credential issued with locus "legacy" would resolve
+// correlation_ref "deploy-42" to legacy/deploy-42 — the identical (tenant, ref) primary key a
+// pre-migration backfilled change already occupies — so the literal name is reserved outright,
+// not merely shaped like any other locus.
+func TestValidateLocusRejectsLegacy(t *testing.T) {
+	err := auth.ValidateLocus("legacy")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "legacy")
+	assert.NoError(t, auth.ValidateLocus("legacy2"), "only the literal name is reserved")
+	assert.NoError(t, auth.ValidateLocus("legacy-team"), "only the literal name is reserved")
+}

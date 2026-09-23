@@ -203,6 +203,16 @@ func TestIssueRejectsALocusContainingASlash(t *testing.T) {
 	assert.Contains(t, out, "unsplittable")
 }
 
+// TestIssueRejectsALegacySourceDefaultingToALegacyLocus pins the reported reproduction
+// directly: locus defaults to --source when --locus is omitted, so --source legacy resolves
+// to the reserved locus without an operator ever typing --locus legacy.
+func TestIssueRejectsALegacySourceDefaultingToALegacyLocus(t *testing.T) {
+	out, err := runHoroctlErr(t, "admin", "keys", "issue",
+		"--tenant", tenantID, "--role", "producer", "--source", "legacy")
+	require.Error(t, err)
+	assert.Contains(t, out, "legacy")
+}
+
 // devExplicitKeyPrefix is a valid-hex, 12-character prefix: parseExplicitKey validates an
 // explicit key against the identical rule auth.SplitKey enforces on a presented
 // credential, so a fixture prefix has to satisfy that rule to ever be usable, the same as
@@ -309,6 +319,18 @@ func credentialCount(t *testing.T, prefix string) int {
 	var n int
 	require.NoError(t, pool.QueryRow(context.Background(),
 		`SELECT count(*) FROM credential WHERE key_prefix = $1`, prefix).Scan(&n))
+	return n
+}
+
+// principalCount counts principal rows for the id issueCredential would derive from prefix,
+// for a test that must see a failed issue leave no orphaned principal behind.
+func principalCount(t *testing.T, prefix string) int {
+	t.Helper()
+	pool, err := testdb.Pool()
+	require.NoError(t, err)
+	var n int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM principal WHERE id = $1`, "prn_"+prefix).Scan(&n))
 	return n
 }
 
@@ -584,26 +606,54 @@ func seedRole(t *testing.T, capabilities []string) string {
 	return name
 }
 
+// TestIssueAllowsASubjectPatternOnProducer pins the case a subject pattern exists for: append
+// is the one capability a pattern narrows anything real about, and producer is the role
+// seeded with only it.
+func TestIssueAllowsASubjectPatternOnProducer(t *testing.T) {
+	stdout, _ := runHoroctlSplit(t, "admin", "keys", "issue", "--tenant", tenantID,
+		"--role", "producer", "--source", "github", "--subject-pattern", "team-a/*")
+
+	prefix, _, ok := auth.SplitKey(strings.TrimSpace(stdout))
+	require.True(t, ok)
+	cleanupCredential(t, prefix)
+}
+
+// TestIssueRefusesASubjectPatternOnReader pins Finding 1: a read is not narrowed by subject
+// at all — GET /v1/changes and its siblings answered with every subject in the tenant
+// regardless of what subject_pattern named — so a pattern on reader must be refused here, the
+// only place this branch backstops it, rather than accepted and then silently ignored on
+// every read route.
+func TestIssueRefusesASubjectPatternOnReader(t *testing.T) {
+	out, err := runHoroctlErr(t, "admin", "keys", "issue", "--tenant", tenantID,
+		"--role", "reader", "--source", "github", "--subject-pattern", "team-a/*")
+	require.Error(t, err)
+	assert.Contains(t, out, "grants more than append", "the refusal must name why")
+	assert.NotContains(t, out, "horo_",
+		"a credential a pattern would silently do nothing for must not be minted")
+}
+
 // TestIssueRefusesASubjectPatternOnEveryAdminCapableRole is the composition the whole-branch
 // review found: role is a table precisely so the vocabulary can grow, so an issue-time check
 // that enumerates tenant_admin and superuser goes stale the moment a role is added. Such a
 // credential inserted cleanly, printed a key, and then answered 401 on every request it ever
 // made, because internal/auth refuses an admin-capable credential carrying a subject pattern.
-// The check reads role.capabilities now, which is the same fact the middleware tests.
+// The check reads role.capabilities now, which is the same fact principal() tests.
 func TestIssueRefusesASubjectPatternOnEveryAdminCapableRole(t *testing.T) {
 	role := seedRole(t, []string{"read", "admin"})
 	out, err := runHoroctlErr(t, "admin", "keys", "issue", "--tenant", tenantID,
 		"--role", role, "--source", "github", "--subject-pattern", "x/*")
 	require.Error(t, err)
-	assert.Contains(t, out, "grants admin")
+	assert.Contains(t, out, "grants more than append")
 	assert.NotContains(t, out, "horo_",
 		"a credential that can never authenticate must not be minted, let alone printed")
 }
 
-// TestIssueAllowsASubjectPatternOnANewNonAdminRole is the other half: the check must follow
-// the capabilities rather than refuse every unfamiliar name.
-func TestIssueAllowsASubjectPatternOnANewNonAdminRole(t *testing.T) {
-	role := seedRole(t, []string{"read"})
+// TestIssueAllowsASubjectPatternOnANewAppendOnlyRole is the other half: the check must follow
+// the capabilities rather than refuse every unfamiliar name — a freshly seeded role granting
+// only append is exactly as eligible for a subject pattern as producer, without this check
+// ever being told its name.
+func TestIssueAllowsASubjectPatternOnANewAppendOnlyRole(t *testing.T) {
+	role := seedRole(t, []string{"append"})
 	stdout, _ := runHoroctlSplit(t, "admin", "keys", "issue", "--tenant", tenantID,
 		"--role", role, "--source", "github", "--subject-pattern", "x/*")
 
@@ -618,6 +668,26 @@ func TestIssueRejectsAnUnknownRole(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, out, "unknown role")
 	assert.NotContains(t, out, "horo_", "an unknown role must fail before a key is minted")
+}
+
+// TestIssueWithANonexistentTenantLeavesNoOrphanedPrincipal pins Finding 3: issueCredential
+// ran its principal and credential INSERTs against the raw pool, each committing
+// independently, so a --tenant naming no row let the principal INSERT commit and only the
+// credential INSERT fail on tenant_id's foreign key — leaving an orphaned principal a retry
+// with the corrected --tenant and the same --key could not get past, failing instead on
+// principal_pkey with nothing said about the real mistake.
+func TestIssueWithANonexistentTenantLeavesNoOrphanedPrincipal(t *testing.T) {
+	key, prefix := newExplicitKey(t)
+	cleanupCredential(t, prefix)
+
+	out, err := runHoroctlErr(t, "admin", "keys", "issue",
+		"--tenant", "tnt_does_not_exist", "--role", "producer", "--source", "test", "--key", key)
+	require.Error(t, err)
+	assert.Contains(t, out, "tnt_does_not_exist")
+	assert.Contains(t, out, "does not exist")
+	assert.Equal(t, 0, principalCount(t, prefix),
+		"a failed issue must not leave an orphaned principal")
+	assert.Equal(t, 0, credentialCount(t, prefix))
 }
 
 // bootstrapFixture is one bootstrap invocation over prefixes and a tenant no other test

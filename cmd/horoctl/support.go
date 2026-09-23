@@ -72,17 +72,21 @@ func tenantLabel(tenant string) string {
 	return tenant
 }
 
-// roleGrantsAdmin reads role's stored capabilities and reports whether they include admin.
+// roleIsAppendOnly reads role's stored capabilities and reports whether they are append and
+// nothing else — the only shape a subject pattern narrows anything real about. A read is not
+// narrowed by subject at all, and a rebuild an admin grant triggers is whole-tenant by
+// construction, so both are refused a pattern exactly as append-only roles are allowed one.
 //
 // It queries the row rather than enumerating role names, so issue time and request time agree
-// by construction: internal/auth's middleware refuses an admin-capable credential carrying a
+// by construction: internal/auth's principal() refuses an admin-capable credential carrying a
 // subject pattern by testing the same capability list. Enumerating names instead let a role
-// added to the table — one granting admin under a name nothing here knew — be issued with a
-// subject pattern, print a key, and then 401 on every request it ever made.
-func roleGrantsAdmin(ctx context.Context, pool *pgxpool.Pool, role string) (bool, error) {
-	var grants bool
-	err := pool.QueryRow(ctx, `SELECT $1 = ANY (capabilities) FROM role WHERE name = $2`,
-		string(auth.CapAdmin), role).Scan(&grants)
+// added to the table — one granting read or admin under a name nothing here knew — be issued
+// with a subject pattern that either 401s on every request (admin) or is silently ignored on
+// every read (Finding 1), with a key already printed either way.
+func roleIsAppendOnly(ctx context.Context, pool *pgxpool.Pool, role string) (bool, error) {
+	var appendOnly bool
+	err := pool.QueryRow(ctx, `SELECT capabilities = ARRAY[$1]::text[] FROM role WHERE name = $2`,
+		string(auth.CapAppend), role).Scan(&appendOnly)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, fmt.Errorf(
 			"unknown role %q; the role table is what names the roles this database has", role)
@@ -90,7 +94,7 @@ func roleGrantsAdmin(ctx context.Context, pool *pgxpool.Pool, role string) (bool
 	if err != nil {
 		return false, fmt.Errorf("read the capabilities of role %q: %w", role, err)
 	}
-	return grants, nil
+	return appendOnly, nil
 }
 
 // newTenantID mints an opaque, server-assigned tenant id. The display name is what an

@@ -39,16 +39,23 @@ CREATE TABLE credential (
     CONSTRAINT credential_type_vocabulary CHECK (type IN ('machine_key', 'oidc')),
     -- Mirrors auth.ValidateLocus clause for clause, so a direct INSERT cannot store a locus
     -- horoctl would have refused. No null-byte clause: TEXT cannot hold one, so the column
-    -- type already rejects it.
+    -- type already rejects it. locus <> 'legacy' mirrors ValidateLocus's reservation of that
+    -- literal name: this migration prefixes every pre-existing ref with legacy/ below, and a
+    -- credential issued with that locus would write into the same backfilled namespace.
     CONSTRAINT credential_locus_shape CHECK (
         locus <> ''
+        AND locus <> 'legacy'
         AND locus !~ '/'
         AND octet_length(locus) <= 64
         AND locus !~ '^[[:space:]]|[[:space:]]$'),
-    -- A BACKSTOP, not the authority. A column constraint cannot read the role table without
-    -- a trigger, so this enumerates the roles that grant admin today; horoctl reads
-    -- role.capabilities instead, which is what keeps issue time and request time in
-    -- agreement when the vocabulary grows.
+    -- A BACKSTOP, not the authority, and narrower than horoctl's own rule: horoctl refuses a
+    -- subject pattern on any role whose capabilities reach beyond append, because a read is
+    -- just as unnarrowed by subject as a rebuild is. A column constraint cannot read the role
+    -- table without a trigger, so only the admin case is enumerated here — the one where a
+    -- mismatched credential would otherwise mint cleanly and then never authenticate at all,
+    -- since internal/auth's principal() refuses it outright. horoctl reads role.capabilities
+    -- instead of naming roles, which is what keeps issue time and request time in agreement
+    -- as the vocabulary grows.
     CONSTRAINT credential_admin_has_no_subject_pattern
         CHECK (subject_pattern IS NULL OR role NOT IN ('tenant_admin', 'superuser'))
 );

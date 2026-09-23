@@ -156,10 +156,11 @@ func TestMigration0004RejectsAMalformedLocus(t *testing.T) {
 
 	for name, locus := range map[string]string{
 		"a slash makes <locus>/<ref> unsplittable": "github/actions",
-		"empty":                "",
-		"leading whitespace":   " github",
-		"trailing newline":     "github\n",
-		"over the 64-byte cap": strings.Repeat("g", 65),
+		"empty":                             "",
+		"leading whitespace":                " github",
+		"trailing newline":                  "github\n",
+		"over the 64-byte cap":              strings.Repeat("g", 65),
+		"the literal reserved legacy locus": "legacy",
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := pool.Exec(ctx, `INSERT INTO credential

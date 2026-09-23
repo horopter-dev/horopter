@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"horopter.dev/horopter/internal/auth"
 )
@@ -78,7 +79,7 @@ func runKeysIssue(args []string) error {
 		return err
 	}
 
-	if err := issueCredential(ctx, pool, issueParams{
+	if err := issueCredentialTx(ctx, pool, issueParams{
 		tenant: *tenant, role: *role, source: *source, locus: effectiveLocus,
 		subjectPattern: *subjectPattern, prefix: prefix, hash: hash,
 	}); err != nil {
@@ -119,21 +120,26 @@ func resolveAndValidateIssue(role, source, locus string) (string, error) {
 	return effectiveLocus, nil
 }
 
-// checkRoleAllowsSubjectPattern reads the role's stored capabilities and refuses a subject
-// pattern on one granting admin — Constraint 5: a rebuild is whole-tenant by construction, so
-// an admin grant cannot be narrowed by subject. The role is read whatever the pattern, so an
-// unknown role also fails here rather than as a foreign-key violation after a key is minted.
+// checkRoleAllowsSubjectPattern refuses a subject pattern on any role whose capabilities reach
+// beyond append. Append is the only capability a pattern narrows anything real about — a
+// producer really does post about fewer subjects when restricted. A read is not narrowed by
+// subject at all (Finding 1: every read route ignored it silently), and a rebuild an admin
+// grant triggers is whole-tenant by construction; both fall out of one general rule rather
+// than two special cases, so this check does not need rediscovering the next time a
+// capability is added. The role is read whatever the pattern, so an unknown role also fails
+// here rather than as a foreign-key violation after a key is minted.
 func checkRoleAllowsSubjectPattern(
 	ctx context.Context, pool *pgxpool.Pool, role, subjectPattern string,
 ) error {
-	grants, err := roleGrantsAdmin(ctx, pool, role)
+	appendOnly, err := roleIsAppendOnly(ctx, pool, role)
 	if err != nil {
 		return err
 	}
-	if grants && subjectPattern != "" {
+	if subjectPattern != "" && !appendOnly {
 		return fmt.Errorf(
-			"role %q grants admin, and an admin grant cannot be narrowed by a subject "+
-				"pattern", role)
+			"role %q grants more than append, and a subject pattern only narrows what a role "+
+				"may append; reads and admin rebuilds are whole-tenant regardless of subject",
+			role)
 	}
 	return nil
 }
@@ -155,10 +161,56 @@ func deriveKey(explicit string) (key, prefix, hash string, err error) {
 	return explicit, prefix, auth.HashSecret(secret), nil
 }
 
-// issueCredential writes the principal and credential rows for one issued key. A
-// principal is created per credential rather than reused: horoctl has no way to name an
-// existing one, and decision 4's several-credentials-per-principal model is served just as
-// well by principals that start with one credential each as it would be by a shared one.
+// issueCredentialTx wraps issueCredential in one transaction, checking the named tenant
+// exists first. Without the check, a --tenant naming no row let the principal INSERT commit
+// and only the credential INSERT fail on its foreign key, leaving an orphaned principal: a
+// retry with the corrected --tenant and the same --key then failed on principal_pkey,
+// reporting nothing about the real mistake. Without the transaction, that same partial write
+// would survive even a correctly reported failure. Matches d89ebbb's fix for bootstrap's own
+// unguarded writes; named apart from issueCredential, which bootstrap's ensureCredential also
+// calls, already inside its own transaction, against a plain dbExecer with no Begin of its own.
+func issueCredentialTx(ctx context.Context, pool *pgxpool.Pool, p issueParams) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin issue transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if p.tenant != "" {
+		if err := checkTenantExists(ctx, tx, p.tenant); err != nil {
+			return err
+		}
+	}
+	if err := issueCredential(ctx, tx, p); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit issue transaction: %w", err)
+	}
+	return nil
+}
+
+// checkTenantExists reports a clear, actionable error for a --tenant naming no row, rather
+// than letting credential.tenant_id's foreign key surface it after the principal row already
+// committed.
+func checkTenantExists(ctx context.Context, tx pgx.Tx, tenant string) error {
+	var exists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM tenant WHERE id = $1)`, tenant).Scan(&exists); err != nil {
+		return fmt.Errorf("check tenant %q exists: %w", tenant, err)
+	}
+	if !exists {
+		return fmt.Errorf("tenant %q does not exist", tenant)
+	}
+	return nil
+}
+
+// issueCredential writes the principal and credential rows for one issued key against db,
+// leaving atomicity to the caller: issueCredentialTx wraps a standalone issue in one
+// transaction, and bootstrap's ensureCredential runs it inside its own. A principal is
+// created per credential rather than reused: horoctl has no way to name an existing one, and
+// decision 4's several-credentials-per-principal model is served just as well by principals
+// that start with one credential each as it would be by a shared one.
 func issueCredential(ctx context.Context, db dbExecer, p issueParams) error {
 	principalID := "prn_" + p.prefix
 	credentialID := "cred_" + p.prefix
