@@ -216,6 +216,20 @@ func TestPostRejectsABodyCarryingTenant(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "tenant is derived from the credential")
 }
 
+// TestPostRejectsABodyCarryingANullTenant pins that a present-but-null "tenant" is
+// rejected exactly like a present-and-populated one. A body is caller-controlled, so a
+// producer sending the key at all — whatever its value — must be told, not just one
+// sending a non-empty value; treating null as "absent" is how a string-typed field would
+// have silently let a null-tenant body through the same check that catches every other
+// value.
+func TestPostRejectsABodyCarryingANullTenant(t *testing.T) {
+	f := newIngressFixture(t)
+	rec := post(t, f.srv, f.producerKey, `{"tenant":null,"source":"s","type":"t.started",
+		"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z"}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "tenant is derived from the credential")
+}
+
 func TestPostStoresTheTenantFromTheCredential(t *testing.T) {
 	f := newIngressFixture(t)
 	rec := post(t, f.srv, f.producerKey, validBody)
@@ -267,6 +281,19 @@ func TestRefAtTheCapIsAcceptedAndOneOverIsRejected(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, post(t, f.srv, f.producerKey, bodyWithRef(atCap)).Code)
 	assert.Equal(t, http.StatusBadRequest,
 		post(t, f.srv, f.producerKey, bodyWithRef(atCap+"x")).Code)
+}
+
+// TestPostRejectsARefWithLeadingWhitespaceEvenAfterTheLocusPrefix pins that the ref's
+// whitespace rule is checked before it is composed with the locus, not after. Composing
+// first moves a leading space away from the string's edge — "github/ dep-1" is not
+// caught by the same check that rejects " dep-1" — which would silently admit the one
+// producer mistake that check exists to catch: an untrimmed ref posts a start under one
+// ref and its completion under another, and nothing errors.
+func TestPostRejectsARefWithLeadingWhitespaceEvenAfterTheLocusPrefix(t *testing.T) {
+	f := newIngressFixture(t)
+	rec := post(t, f.srv, f.producerKey, bodyWithRef(" deploy-1"))
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "whitespace")
 }
 
 func TestStoredEventsCarrySchemaVersionTwo(t *testing.T) {
@@ -539,28 +566,36 @@ var unauthenticatedProbeRoutes = []string{
 }
 
 // routeRegistration is one mux.Handle/mux.HandleFunc call found in Routes(): the
-// pattern it registers, and whether the handler it registers is wrapped in the
-// authenticator's Require middleware.
+// pattern it registers, whether the handler it registers is wrapped in the
+// authenticator's Require middleware, and — when it is — which capability, e.g.
+// "CapAppend", that call names.
 type routeRegistration struct {
 	pattern     string
 	authWrapped bool
+	capability  string
 }
 
-// isAuthWrapper reports whether e is the expression s.authn.Require(...)(...) — the
-// credential middleware every non-probe route must be registered through. It matches the
-// call syntactically rather than by behaviour because that is the point: a route can
-// only be checked for a credential if the registration puts the middleware in its path,
-// and no HTTP-level probe of one URL can show that some other URL did the same.
-func isAuthWrapper(e ast.Expr) bool {
-	call, ok := e.(*ast.CallExpr)
+// capabilityName reports the auth.Cap* identifier e names, e.g. "CapAppend" for the
+// expression auth.CapAppend. It matches the qualified-identifier shape rather than
+// evaluating the expression, which is what lets authWrapperCapability tell one
+// capability from another by reading the source rather than by running it.
+func capabilityName(e ast.Expr) (string, bool) {
+	sel, ok := e.(*ast.SelectorExpr)
 	if !ok {
-		return false
+		return "", false
 	}
-	inner, ok := call.Fun.(*ast.CallExpr)
-	if !ok {
-		return false
+	pkg, ok := sel.X.(*ast.Ident)
+	if !ok || pkg.Name != "auth" {
+		return "", false
 	}
-	sel, ok := inner.Fun.(*ast.SelectorExpr)
+	return sel.Sel.Name, true
+}
+
+// isRequireOnAuthn reports whether e is the selector s.authn.Require — the credential
+// middleware's method expression, split out of authWrapperCapability so neither function
+// carries both the receiver check and the call shape's complexity at once.
+func isRequireOnAuthn(e ast.Expr) bool {
+	sel, ok := e.(*ast.SelectorExpr)
 	if !ok || sel.Sel.Name != "Require" {
 		return false
 	}
@@ -569,7 +604,31 @@ func isAuthWrapper(e ast.Expr) bool {
 		return false
 	}
 	recv, ok := recvSel.X.(*ast.Ident)
-	return ok && recv.Name == "s"
+	if !ok {
+		return false
+	}
+	return recv.Name == "s"
+}
+
+// authWrapperCapability reports the capability named by e, when e is the expression
+// s.authn.Require(auth.Cap...)(...) — the credential middleware every non-probe route
+// must be registered through. It matches the call syntactically rather than by
+// behaviour because that is the point: a route can only be checked for a credential if
+// the registration puts the middleware in its path, and no HTTP-level probe of one URL
+// can show that some other URL did the same, let alone which capability it required.
+func authWrapperCapability(e ast.Expr) (string, bool) {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return "", false
+	}
+	inner, ok := call.Fun.(*ast.CallExpr)
+	if !ok || len(inner.Args) != 1 {
+		return "", false
+	}
+	if !isRequireOnAuthn(inner.Fun) {
+		return "", false
+	}
+	return capabilityName(inner.Args[0])
 }
 
 // routeHandleCall reports the route a mux.Handle/mux.HandleFunc call registers, and
@@ -593,8 +652,9 @@ func routeHandleCall(t *testing.T, call *ast.CallExpr) (routeRegistration, bool)
 		"mux.%s's first argument must be a string literal pattern", sel.Sel.Name)
 	pattern, err := strconv.Unquote(lit.Value)
 	require.NoError(t, err)
+	capability, authWrapped := authWrapperCapability(call.Args[1])
 	return routeRegistration{
-		pattern: pattern, authWrapped: isAuthWrapper(call.Args[1]),
+		pattern: pattern, authWrapped: authWrapped, capability: capability,
 	}, true
 }
 
@@ -629,8 +689,10 @@ func collectRoutes(t *testing.T) []routeRegistration {
 }
 
 // TestEveryNonProbeRouteRequiresACredential asserts, structurally, that a credential
-// guards every write route ingress exposes — not just the one an HTTP-level test
-// happens to send an unauthenticated request to.
+// guards every write route ingress exposes with the append capability specifically —
+// not just the one an HTTP-level test happens to send an unauthenticated request to,
+// and not merely SOME capability, which Require(auth.CapRead) on a write route would
+// also satisfy.
 //
 // TestIngressRequiresACredential drives POST /v1/events without a credential, which
 // proves that one path is guarded and says nothing about any other. POST
@@ -639,7 +701,7 @@ func collectRoutes(t *testing.T) []routeRegistration {
 // CloudEvents test sets Authorization before sending, so none of them would ever have
 // noticed, and the same would be true of a write route nobody has added yet. Reading the
 // registration is what generalizes the property from "this URL requires a credential" to
-// "every non-probe route does".
+// "every non-probe route requires one that can append".
 //
 // It needs no database and runs unconditionally, like TestHealthzWorksWithNilStore: the
 // credential boundary on the write side of a system of record should not be a property
@@ -661,6 +723,9 @@ func TestEveryNonProbeRouteRequiresACredential(t *testing.T) {
 			"route %q is registered without the authenticator, so no credential guards "+
 				"it; the credential is the only boundary on the write side of the log",
 			r.pattern)
+		assert.Equal(t, "CapAppend", r.capability,
+			"route %q requires capability %q, not the append capability a write route "+
+				"on the write side of the log needs", r.pattern, r.capability)
 	}
 	for _, want := range unauthenticatedProbeRoutes {
 		assert.Contains(t, patterns, want,

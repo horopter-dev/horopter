@@ -143,7 +143,11 @@ func eventFromCloudEvent(
 	}
 	corr, err := resolveRef(p.Locus, pull("correlation_ref"))
 	if err != nil {
-		return core.Event{}, err
+		// Wrapped for the same reason as the data-not-JSON-object case above: the taxonomy
+		// must hold even though the sole caller today answers every error from here 400
+		// unconditionally, or an over-cap ref reaching appendFailed by some future path
+		// would be reported as a retryable 503 that can never succeed.
+		return core.Event{}, fmt.Errorf("%w: CloudEvent %q: %w", core.ErrInvalidEvent, ce.ID(), err)
 	}
 	title := pull("title")
 	actor := pull("actor")

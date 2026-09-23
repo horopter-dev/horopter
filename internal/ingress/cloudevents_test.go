@@ -181,7 +181,10 @@ func TestEventFromCloudEventSetsOriginFromThePrincipal(t *testing.T) {
 
 // TestEventFromCloudEventRejectsARefOverTheCap pins that the CloudEvents path validates
 // the stored, locus-prefixed ref through the same rule POST /v1/events does, rather than
-// validating the caller's shorter, unprefixed one.
+// validating the caller's shorter, unprefixed one. It must wrap core.ErrInvalidEvent:
+// postCloudEvent answers every error from here 400 today regardless, but an unwrapped
+// error would report an over-cap ref as a retryable 503 to any future caller that routes
+// it through appendFailed instead.
 func TestEventFromCloudEventRejectsARefOverTheCap(t *testing.T) {
 	ce := ceWithData(t, map[string]any{
 		"correlation_ref": strings.Repeat("x", auth.MaxRefBytes-len("github/")+1),
@@ -189,7 +192,23 @@ func TestEventFromCloudEventRejectsARefOverTheCap(t *testing.T) {
 
 	_, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
 	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrInvalidEvent)
 	assert.Contains(t, err.Error(), "ref")
+}
+
+// TestEventFromCloudEventRejectsARefWithLeadingWhitespaceEvenAfterTheLocusPrefix pins
+// that the whitespace rule is checked on the producer's ref BEFORE it is composed with
+// the locus, not after. Composing first moves a leading space away from the string's
+// edge — "github/ dep-1" is not caught by the same check that rejects " dep-1" — which
+// would silently admit the one producer mistake that check exists to catch: an untrimmed
+// ref posting a start under one ref and its completion under another.
+func TestEventFromCloudEventRejectsARefWithLeadingWhitespaceEvenAfterTheLocusPrefix(t *testing.T) {
+	ce := ceWithData(t, map[string]any{"correlation_ref": " dep-1"})
+
+	_, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrInvalidEvent)
+	assert.Contains(t, err.Error(), "whitespace")
 }
 
 // An absent tenant in data is not an error: only a PRESENT one is, per

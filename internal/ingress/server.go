@@ -107,16 +107,20 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 }
 
 type eventRequest struct {
-	Tenant         string         `json:"tenant"`
-	Source         string         `json:"source"`
-	Type           string         `json:"type"`
-	Subject        string         `json:"subject"`
-	Actor          string         `json:"actor"`
-	Title          string         `json:"title"`
-	OccurredAt     time.Time      `json:"occurred_at"`
-	CorrelationRef string         `json:"correlation_ref"`
-	IdempotencyKey string         `json:"idempotency_key"`
-	Attributes     map[string]any `json:"attributes"`
+	// Tenant is json.RawMessage, not string, so a present-but-null "tenant":null is
+	// distinguishable from an absent key: unmarshaling null into *string or string both
+	// leave the zero value, indistinguishable from omission, and the rule is reject a
+	// caller who sends the key at all, whatever its value — not just a non-empty one.
+	Tenant         json.RawMessage `json:"tenant"`
+	Source         string          `json:"source"`
+	Type           string          `json:"type"`
+	Subject        string          `json:"subject"`
+	Actor          string          `json:"actor"`
+	Title          string          `json:"title"`
+	OccurredAt     time.Time       `json:"occurred_at"`
+	CorrelationRef string          `json:"correlation_ref"`
+	IdempotencyKey string          `json:"idempotency_key"`
+	Attributes     map[string]any  `json:"attributes"`
 }
 
 // recordTenant puts the resolved tenant on the request's span. The tenant is the
@@ -151,17 +155,28 @@ func subjectAllowed(pattern, subject string) bool {
 	return ok
 }
 
-// resolveRef prefixes ref with the credential's locus and validates the result — the
-// form that is actually stored, so the cap applies to what is stored rather than to what
-// the producer sent. An empty ref stays empty: a point event has no correlation ref to
-// namespace.
+// resolveRef validates the producer's ref as given, prefixes it with the credential's
+// locus, and caps the composed form — the form that is actually stored, so the length
+// cap applies to what is stored rather than to what the producer sent. An empty ref
+// stays empty: a point event has no correlation ref to namespace.
+//
+// ValidateRef must run on ref BEFORE it is composed with locus, not after. Composing
+// first can move a leading or trailing space away from the string's edge: " deploy-1"
+// fails the whitespace check, but "github/ deploy-1" would not, since the space sits in
+// the middle once prefixed. That check exists for exactly this producer mistake — an
+// untrimmed ref posts a start under one ref and its completion under another, and
+// nothing errors — so disabling it for the composed form defeats the reason it exists.
 func resolveRef(locus, ref string) (string, error) {
 	if ref == "" {
 		return "", nil
 	}
-	stored := locus + "/" + ref
-	if err := auth.ValidateRef(stored); err != nil {
+	if err := auth.ValidateRef(ref); err != nil {
 		return "", err
+	}
+	stored := locus + "/" + ref
+	if len(stored) > auth.MaxRefBytes {
+		return "", fmt.Errorf("ref %q is %d bytes once prefixed with locus %q; the "+
+			"limit is %d", ref, len(stored), locus, auth.MaxRefBytes)
 	}
 	return stored, nil
 }
@@ -180,7 +195,7 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 			"; expected an object with source, type, subject and occurred_at")
 		return
 	}
-	if req.Tenant != "" {
+	if req.Tenant != nil {
 		writeError(w, http.StatusBadRequest,
 			"tenant is derived from the credential; remove it from the request body")
 		return

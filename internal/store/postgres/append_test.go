@@ -160,6 +160,42 @@ func TestAppendEventRejectsInvalid(t *testing.T) {
 	assert.Contains(t, err.Error(), "subject")
 }
 
+// TestEventTenantForeignKeyIsEnforced pins migration 0005's event_tenant_fk as a real
+// database constraint, not merely a property AppendEvent happens to uphold by always
+// routing tenant through a credential that already references a tenant row. An insert
+// naming a tenant with no row must be refused by Postgres itself, which is the last-line
+// defence the whole task establishes: every write's tenant provably exists.
+func TestEventTenantForeignKeyIsEnforced(t *testing.T) {
+	s := newStore(t)
+	missing := "tnt-missing-" + uniqueToken()
+
+	_, err := s.Pool().Exec(context.Background(), `
+		INSERT INTO event (id, tenant, schema_version, source, type, subject, actor,
+		                   title, occurred_at, received_at, correlation_ref, attributes,
+		                   origin, edited)
+		VALUES ($1, $2, $3, 'ci', 'deployment.started', 'acme/prod', '', '', now(), now(),
+		        'r', '{}'::jsonb, 'process', false)`,
+		eventID(t, "fk"), missing, core.CurrentSchemaVersion)
+	require.Error(t, err, "an event naming a tenant with no row must be refused")
+	assert.Contains(t, err.Error(), "event_tenant_fk")
+}
+
+// TestChangeTenantForeignKeyIsEnforced is TestEventTenantForeignKeyIsEnforced's sibling
+// for change_tenant_fk, the projection's own foreign key.
+func TestChangeTenantForeignKeyIsEnforced(t *testing.T) {
+	s := newStore(t)
+	missing := "tnt-missing-" + uniqueToken()
+
+	_, err := s.Pool().Exec(context.Background(), `
+		INSERT INTO change (tenant, ref, subject, type, title, actor, started_at,
+		                    first_seen_at, end_at, status, attributes, last_event_id)
+		VALUES ($1, 'r', 'acme/prod', 'deployment.started', '', '', now(), now(), NULL,
+		        'in_progress', '{}'::jsonb, 'e0')`,
+		missing)
+	require.Error(t, err, "a change naming a tenant with no row must be refused")
+	assert.Contains(t, err.Error(), "change_tenant_fk")
+}
+
 // TestAppendEventNormalizesNilAttributes pins the store's contract at the boundary
 // where the NOT NULL constraint actually lives: a nil Attributes map means "no
 // attributes," identically to an empty one, and AppendEvent must accept it rather than
