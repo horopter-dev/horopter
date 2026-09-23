@@ -125,7 +125,7 @@ func TestReadAdmissionMetrics(t *testing.T) {
 	limits.ReadMemoryBytes = 64 << 20
 	srv, s, tn := newServerWith(t, 1, limits)
 	key := readerKey(t, s, tn)
-	seed(t, s, tn, "metrics-ref", "deployment.started",
+	seed(t, s, tn, "ci/metrics-ref", "deployment.started",
 		time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC))
 	h := srv.Routes()
 

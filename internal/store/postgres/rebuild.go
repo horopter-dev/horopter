@@ -206,12 +206,18 @@ func clearProjection(ctx context.Context, tx pgx.Tx, tenantID string) error {
 // The accumulator passes a nil *core.Change for the first event of each ref, matching how
 // AppendEvent applies events incrementally; core.Fold is written so both spellings
 // converge.
+//
+// The SELECT names only the columns Fold reads, which is why origin and edited are absent
+// — but locus is NOT one of those omissions. core.RefFor composes a point change's ref
+// from it, so dropping it from this list rebuilds every point change under "/<id>" and
+// silently diverges from the projection AppendEvent wrote, which is the shape of the bug
+// 0004 shipped.
 func foldEventLog(
 	ctx context.Context, tx pgx.Tx, tenantID string,
 ) (map[string]core.Change, int, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT id, tenant, schema_version, source, type, subject, actor, title,
-		       occurred_at, received_at, correlation_ref, attributes
+		       occurred_at, received_at, correlation_ref, attributes, locus
 		FROM event WHERE tenant = $1 ORDER BY id ASC`, tenantID)
 	if err != nil {
 		return nil, 0, fmt.Errorf("read event log for tenant %q: %w", tenantID, err)
@@ -224,7 +230,7 @@ func foldEventLog(
 		var ev core.Event
 		if err := rows.Scan(&ev.ID, &ev.Tenant, &ev.SchemaVersion, &ev.Source, &ev.Type,
 			&ev.Subject, &ev.Actor, &ev.Title, &ev.OccurredAt, &ev.ReceivedAt,
-			&ev.CorrelationRef, &ev.Attributes); err != nil {
+			&ev.CorrelationRef, &ev.Attributes, &ev.Locus); err != nil {
 			return nil, 0, fmt.Errorf("scan event row for tenant %q: %w", tenantID, err)
 		}
 		events++

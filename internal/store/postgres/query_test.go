@@ -49,18 +49,18 @@ func TestOverlapPredicate(t *testing.T) {
 		refs[c.Ref] = true
 	}
 
-	assert.False(t, refs["before"], "a change entirely before the window must be excluded")
-	assert.False(t, refs["after"], "a change entirely after the window must be excluded")
-	assert.True(t, refs["spanning"], "a change straddling the window must be included")
-	assert.True(t, refs["openearly"],
+	assert.False(t, refs["ci/before"], "a change entirely before the window must be excluded")
+	assert.False(t, refs["ci/after"], "a change entirely after the window must be excluded")
+	assert.True(t, refs["ci/spanning"], "a change straddling the window must be included")
+	assert.True(t, refs["ci/openearly"],
 		"an open change that began before the window MUST appear — this is the bug "+
 			"the predicate exists to prevent")
-	assert.True(t, refs["subsecond"],
+	assert.True(t, refs["ci/subsecond"],
 		"sub-second precision must compare temporally, not as text")
-	assert.True(t, refs["onstartboundary"],
+	assert.True(t, refs["ci/onstartboundary"],
 		"a change starting exactly at the window's upper edge (start_at == To) must be "+
 			"included — start_at <= To is inclusive")
-	assert.True(t, refs["onendboundary"],
+	assert.True(t, refs["ci/onendboundary"],
 		"a change ending exactly at the window's lower edge (end_effective == From) must "+
 			"be included — end_effective >= From is inclusive")
 }
@@ -88,14 +88,14 @@ func TestQueryChangesFiltersBySubjectTypeAndStatus(t *testing.T) {
 	byStatus, _, err := s.QueryChanges(ctx, statusQuery)
 	require.NoError(t, err)
 	require.Len(t, byStatus, 1, "the in_progress d2 must be excluded by the status filter")
-	assert.Equal(t, "d1", byStatus[0].Ref)
+	assert.Equal(t, "ci/d1", byStatus[0].Ref)
 
 	typeQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0)
 	typeQuery.Type = "deployment.started"
 	byType, _, err := s.QueryChanges(ctx, typeQuery)
 	require.NoError(t, err)
 	require.Len(t, byType, 1, "d1's type moved on to deployment.failed; only d2 must match")
-	assert.Equal(t, "d2", byType[0].Ref)
+	assert.Equal(t, "ci/d2", byType[0].Ref)
 
 	subjectQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0)
 	subjectQuery.Subject = "other/stack"
@@ -138,9 +138,9 @@ func TestQueryChangesCombinesFiltersAndLimit(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, combined, 2,
 		"three filters combined must keep both completed changes and drop multi-c")
-	assert.Equal(t, "multi-a", combined[0].Ref,
+	assert.Equal(t, "ci/multi-a", combined[0].Ref,
 		"ORDER BY start_at ASC must list the earlier row first")
-	assert.Equal(t, "multi-b", combined[1].Ref)
+	assert.Equal(t, "ci/multi-b", combined[1].Ref)
 
 	limitedQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 1)
 	limitedQuery.Subject, limitedQuery.Type, limitedQuery.Status =
@@ -148,7 +148,7 @@ func TestQueryChangesCombinesFiltersAndLimit(t *testing.T) {
 	limited, _, err := s.QueryChanges(ctx, limitedQuery)
 	require.NoError(t, err)
 	require.Len(t, limited, 1, "limit must cap the combined-filter result set")
-	assert.Equal(t, "multi-a", limited[0].Ref, "the earliest row by start_at must be the one kept")
+	assert.Equal(t, "ci/multi-a", limited[0].Ref, "the earliest row by start_at must be the one kept")
 }
 
 func TestQueryChangesIsTenantScoped(t *testing.T) {
@@ -182,7 +182,7 @@ func TestChangeStatusVocabularyIsEnforced(t *testing.T) {
 				                    first_seen_at, end_at, status, attributes, last_event_id)
 				VALUES ($1,$2,'acme/prod','deployment.annotated','','ci-bot',NULL,$3,NULL,
 				        $4,'{}'::jsonb,'seed')`,
-				tn, eventID(t, "bad-status"), at, bad)
+				tn, "ci/"+eventID(t, "bad-status"), at, bad)
 			require.Error(t, err, "a status outside internal/core's vocabulary must be rejected")
 			assert.Contains(t, err.Error(), "change_status_vocabulary")
 		})
@@ -202,7 +202,7 @@ func TestChangeStatusVocabularyIsEnforced(t *testing.T) {
 				VALUES ($1,$2,'acme/prod','deployment.annotated','','ci-bot',NULL,$3,NULL,
 				        $4,'{}'::jsonb,'seed')
 				RETURNING 1`,
-				tn, eventID(t, "good-"+string(st)), at, string(st)).Scan(&valid),
+				tn, "ci/"+eventID(t, "good-"+string(st)), at, string(st)).Scan(&valid),
 				"migration 0002's CHECK must admit every value in core.Statuses; %q is in "+
 					"the Go vocabulary and not in the SQL one", st)
 		})
@@ -229,14 +229,14 @@ func TestEndEffectiveIsGeneratedFromEndAt(t *testing.T) {
 	_, _, err := s.AppendEvent(ctx,
 		mkEvent(tn, eventID(t, "start"), "k1", "gen-1", "deployment.started", at))
 	require.NoError(t, err)
-	assert.True(t, endEffective("gen-1").Equal(core.OpenSentinel),
+	assert.True(t, endEffective("ci/gen-1").Equal(core.OpenSentinel),
 		"an open change's end_effective must be core.OpenSentinel, generated from a NULL end_at")
 
 	done := at.Add(20 * time.Minute)
 	_, _, err = s.AppendEvent(ctx,
 		mkEvent(tn, eventID(t, "done"), "k2", "gen-1", "deployment.completed", done))
 	require.NoError(t, err)
-	assert.True(t, endEffective("gen-1").Equal(done),
+	assert.True(t, endEffective("ci/gen-1").Equal(done),
 		"closing a change must move end_effective to end_at without Go writing it")
 }
 
@@ -259,10 +259,10 @@ func TestListEventsFindsAPointChangesEvents(t *testing.T) {
 	require.Len(t, point, 1, "a point change's ref is its own event id, and must list that event")
 	assert.Equal(t, pointID, point[0].ID)
 
-	correlated, _, err := s.ListEvents(ctx, refQuery(t, tn, "dep-9"))
+	correlated, _, err := s.ListEvents(ctx, refQuery(t, tn, "ci/dep-9"))
 	require.NoError(t, err)
 	require.Len(t, correlated, 1, "a correlated ref must still list only its own events")
-	assert.Equal(t, "dep-9", correlated[0].CorrelationRef)
+	assert.Equal(t, "ci/dep-9", correlated[0].CorrelationRef)
 }
 
 // TestListEventsIdArmIgnoresCorrelatedEvents pins this qualifier in ListEvents' id arm:
@@ -301,7 +301,7 @@ func TestListEventsIdArmIgnoresCorrelatedEvents(t *testing.T) {
 		mkEvent(tn, sharedRef, "k2", eventID(t, "other-ref"), "deployment.started", at))
 	require.NoError(t, err)
 
-	got, _, err := s.ListEvents(ctx, refQuery(t, tn, sharedRef))
+	got, _, err := s.ListEvents(ctx, refQuery(t, tn, "ci/"+sharedRef))
 	require.NoError(t, err)
 	require.Len(t, got, 1,
 		"the id arm must only ever match the uncorrelated point that owns the ref; "+
@@ -338,7 +338,7 @@ func TestStartAtIsGeneratedFromTheTwoStartFacts(t *testing.T) {
 		mkEvent(tn, eventID(t, "annotated"), "k1", "gen-start", "deployment.annotated", at))
 	require.NoError(t, err)
 
-	inferred := read("gen-start")
+	inferred := read("ci/gen-start")
 	assert.Nil(t, inferred.startedAt, "no producer has asserted a start yet")
 	assert.True(t, inferred.firstSeenAt.Equal(at))
 	assert.True(t, inferred.startAt.Equal(at),
@@ -349,7 +349,7 @@ func TestStartAtIsGeneratedFromTheTwoStartFacts(t *testing.T) {
 		mkEvent(tn, eventID(t, "started"), "k2", "gen-start", "deployment.started", asserted))
 	require.NoError(t, err)
 
-	got := read("gen-start")
+	got := read("ci/gen-start")
 	require.NotNil(t, got.startedAt)
 	assert.True(t, got.startedAt.Equal(asserted))
 	assert.True(t, got.firstSeenAt.Equal(at),

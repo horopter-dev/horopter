@@ -30,13 +30,18 @@ func isStartType(t string) bool {
 	return strings.HasSuffix(t, ".started") || strings.HasSuffix(t, ".begun")
 }
 
-// RefFor returns the projection key for an event: its correlation ref when it
-// has one, otherwise its own id, which makes it a point.
+// RefFor returns the projection key for an event: its correlation ref when it has one,
+// otherwise its locus and its own id, which makes it a point.
+//
+// Both branches yield <locus>/<something>, which is the point: a correlated ref is
+// composed at ingest by resolveRef, and a point's is composed here. Composing a point's
+// from the stored event — rather than prefixing the projection — is what keeps
+// RebuildProjection able to reproduce it from the log alone.
 func RefFor(ev Event) string {
 	if ev.CorrelationRef != "" {
 		return ev.CorrelationRef
 	}
-	return ev.ID
+	return ev.Locus + "/" + ev.ID
 }
 
 // mergedAttributes returns cur's attributes overlaid with ev's, in a fresh map. Fold's

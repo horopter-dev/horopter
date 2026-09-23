@@ -19,15 +19,19 @@ var sizedBase = time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
 // and 21 bytes long, and returns their refs in start order with each row's measured size.
 func sizedChanges(t *testing.T, s *postgres.Store, tn string) ([]string, []int64) {
 	t.Helper()
-	refs := []string{"sized-a", "sized-b", "sized-c"}
-	sizes := make([]int64, 0, len(refs))
-	for i, ref := range refs {
-		ev := mkEvent(tn, eventID(t, ref), "k-"+ref, ref, "deployment.started",
-			sizedBase.Add(time.Duration(i)*10*time.Minute))
+	producerRefs := []string{"sized-a", "sized-b", "sized-c"}
+	refs := make([]string, 0, len(producerRefs))
+	sizes := make([]int64, 0, len(producerRefs))
+	for i, producerRef := range producerRefs {
+		ev := mkEvent(tn, eventID(t, producerRef), "k-"+producerRef, producerRef,
+			"deployment.started", sizedBase.Add(time.Duration(i)*10*time.Minute))
 		ev.Attributes = map[string]any{"k": strings.Repeat("x", 1+10*i)}
 		_, _, err := s.AppendEvent(context.Background(), ev)
 		require.NoError(t, err)
-		sizes = append(sizes, changeRowBytes(t, s, tn, ref))
+		// The stored ref, not the producer's: mkEvent composes the locus onto it, and a
+		// row is only measurable by the ref it was actually written under.
+		refs = append(refs, core.RefFor(ev))
+		sizes = append(sizes, changeRowBytes(t, s, tn, core.RefFor(ev)))
 	}
 	return refs, sizes
 }

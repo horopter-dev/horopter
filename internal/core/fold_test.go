@@ -44,7 +44,7 @@ func TestFoldFinishedClosesChange(t *testing.T) {
 
 func TestFoldEventWithoutCorrelationRefIsAPoint(t *testing.T) {
 	c := core.Fold(nil, ev("01C", "", "config.changed", t10))
-	assert.Equal(t, "01C", c.Ref, "a point's ref is its own event id")
+	assert.Equal(t, "ci/01C", c.Ref, "a point's ref is its locus and its own event id")
 	assert.Equal(t, core.StatusOccurred, c.Status, "only the no-correlation-ref path sets it")
 	require.NotNil(t, c.End)
 	assert.True(t, c.End.Equal(c.Start), "a point's end coincides with its start")
@@ -202,10 +202,12 @@ func TestFoldZeroDurationClosedIntervalIsNotAPoint(t *testing.T) {
 
 func TestRefFor(t *testing.T) {
 	withCorr := ev("01A", "dep-7", "deployment.started", t10)
-	assert.Equal(t, "dep-7", core.RefFor(withCorr))
+	assert.Equal(t, "dep-7", core.RefFor(withCorr),
+		"a correlated ref is already locus-prefixed at ingest and passes through")
 
 	withoutCorr := ev("01B", "", "config.changed", t10)
-	assert.Equal(t, "01B", core.RefFor(withoutCorr), "a point's ref is its own event id")
+	assert.Equal(t, "ci/01B", core.RefFor(withoutCorr),
+		"a point's ref is its locus and its own event id, so there is one ref shape")
 }
 
 // Pins the full v0.1 terminal vocabulary, including resolved/closed/done/ended
