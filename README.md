@@ -412,9 +412,13 @@ does not understand, so a skewed rollout fails loudly rather than corrupting dat
 
 The `change` table is a derived view of the immutable `event` log, so it can be discarded and
 replayed. This runs only after the schema-version assertion passes. What makes that true is
-that a change's ref is derived from its events — `correlation_ref` for a correlated change,
-the event's own id for a point — so any migration that rewrites one half has to rewrite the
-other; `0004` does, which is why refs that predate it carry `legacy/` on **both** sides.
+that a change's ref is derived from its events via `core.RefFor` — `correlation_ref` for a
+correlated change, `<locus>/<event id>` for a point — so any migration that rewrites one side
+of that derivation has to rewrite the other, or the projection stops being a function of the
+log. `0004` rewrites `event.correlation_ref` and `change.ref` together for correlated changes,
+which is why refs that predate it carry `legacy/` on **both** sides; `0006` does the analogous
+rewrite for point changes, backfilling `event.locus` and prefixing the point changes `0004`
+left bare.
 
 **It blocks every append for that tenant for the whole of its run.** Blocked appends fail
 after a few seconds with a retryable `503`, so producers retry rather than losing events,
@@ -446,20 +450,23 @@ replay may disagree with, not itself. If a change's outcome matters to you, read
 `<stored-ref>` is the ref as stored, which is what `GET /v1/changes` returns — `<locus>/<ref>`
 for anything appended since `0004`, and `legacy/<ref>` for anything that predates it.
 
-### Refs written before migration `0004` carry a `legacy/` prefix
+### Refs written before the locus migrations carry a `legacy/` prefix
 
 Every ref is stored as `<locus>/<ref>` within a tenant, where the locus comes from the
-appending credential. Refs that existed before `0004` were appended without one, so the
-migration gives them the locus `legacy`: a `deploy-42` posted under the old model reads back
-as `legacy/deploy-42`, in `GET /v1/changes` and in `GET /v1/events?ref=`. Point changes — an
-event with no `correlation_ref`, whose ref is its own event id — are not prefixed, because
-their ref never came from a producer.
+appending credential. Neither change shape carried one from the start: a correlated ref
+predating `0004` and a point ref predating `0006` were both appended without one, so each
+migration gives what it cannot recover the locus `legacy`. A `deploy-42` posted under the
+old model reads back as `legacy/deploy-42`, in `GET /v1/changes` and in
+`GET /v1/events?ref=`. A point change is no different — `0006` backfills `event.locus` from
+a correlated ref's own prefix where one exists, and falls back to `legacy` for a point
+event, which never carried one to recover, before prefixing the point changes `0004` left
+bare.
 
 The prefix is permanent and is not cosmetic damage: those refs genuinely predate the locus
-model, and a bare `github/deploy-1` written before `0004` would otherwise be
-indistinguishable from one a `github` credential wrote after it. Queries by ref need the
-stored form, so a dashboard or script carrying a pre-`0004` ref has to be updated to the
-prefixed one.
+model, and a bare `github/deploy-1` written before `0004` — or a bare point ref written
+before `0006` — would otherwise be indistinguishable from one a `github` credential wrote
+after it. Queries by ref need the stored form, so a dashboard or script carrying a
+pre-`0004` or pre-`0006` ref has to be updated to the prefixed one.
 
 ### v0.1 pre-release: the CloudEvents idempotency key format changed
 

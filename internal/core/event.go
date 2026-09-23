@@ -73,6 +73,16 @@ type Event struct {
 // risk; none exists today, and adding a migration to guard against one has a real cost
 // (a schema version bump, daemon coordination) for a hazard that is currently
 // hypothetical.
+//
+// Validate does not guard CorrelationRef against event_corr_ref_has_locus (a non-empty
+// correlation_ref must carry a slash after its first character) the way it guards Locus
+// against event_locus_shape below. The same argument applies — a constraint violation
+// reaches ingress as a store failure, a 503 telling the producer to retry a request that
+// can never succeed — but nothing reaches Validate with a CorrelationRef that could trip
+// it: resolveRef (internal/ingress/server.go) is the only production composer, and it
+// returns either an empty string or the locus and ref joined with a slash. A future
+// caller that appends directly, bypassing resolveRef, would need this guard added rather
+// than assuming Validate already provides it.
 func (e Event) Validate() error {
 	if _, err := ulid.ParseStrict(e.ID); err != nil {
 		return fmt.Errorf("%w %q: id must be a 26-character ULID: %w",

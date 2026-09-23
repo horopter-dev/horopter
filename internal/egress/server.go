@@ -443,7 +443,7 @@ func (s *Server) queryChanges(w http.ResponseWriter, r *http.Request) {
 // ref, for audit and export. It reads only — no write path exists here.
 //
 // "ref" is a projection ref, matched the way core.RefFor forms one: a correlated event's
-// correlation_ref, or an uncorrelated point change's own event id. See the store's
+// correlation_ref, or an uncorrelated event's locus and own id. See the store's
 // ListEvents for why the id arm is restricted to rows carrying no correlation_ref.
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 	limit, err := limitParam(r)
