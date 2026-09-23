@@ -228,6 +228,7 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		CorrelationRef: ref,
 		Attributes:     req.Attributes,
 		Origin:         p.Origin,
+		Locus:          p.Locus,
 	}
 	s.append(w, r, ev)
 }

@@ -38,7 +38,8 @@ minutes_ago() {
 # API now rejects a request body that names one. Every event this script posts lands in
 # whatever tenant HOROPTER_DEV_PRODUCER_KEY is bound to — the bootstrap service's "default"
 # tenant by default — and the credential's locus ("dev") is what prefixes every stored ref
-# below, so "dep-1" is stored, and queried back, as "dev/<run>-dep-1".
+# below, points included since 0006, so "dep-1" is stored and queried back as
+# "dev/<run>-dep-1", and a point is stored as "dev/<its own event id>".
 post() {
   local source=$1 type=$2 subject=$3 ago=$4 ref=$5 title=$6
   local occurred body status

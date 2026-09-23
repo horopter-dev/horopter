@@ -221,10 +221,17 @@ func postCE(t *testing.T, h http.Handler, key, body string) *httptest.ResponseRe
 
 // storedRow is the columns of a stored event that never appear in the 201 response, so
 // tests that need them read the row back rather than parsing the body a second way.
+//
+// The column list below is the same narrow-SELECT hazard rebuild.go's foldEventLog
+// warns about: a column absent from a SELECT is a column no test reading through this
+// helper can observe going wrong, however wrong production leaves it. Locus was added
+// here for exactly that reason — it used to be missing, and no native-route test could
+// have caught a wrong-but-valid locus reaching the stored row.
 type storedRow struct {
 	Tenant         string
 	CorrelationRef string
 	Origin         core.Origin
+	Locus          string
 	SchemaVersion  int
 }
 
@@ -240,9 +247,9 @@ func storedEvent(t *testing.T, store *postgres.Store, rec *httptest.ResponseReco
 	var row storedRow
 	var origin string
 	err := store.Pool().QueryRow(context.Background(),
-		`SELECT tenant, correlation_ref, origin, schema_version FROM event WHERE id = $1`,
+		`SELECT tenant, correlation_ref, origin, locus, schema_version FROM event WHERE id = $1`,
 		resp.ID,
-	).Scan(&row.Tenant, &row.CorrelationRef, &origin, &row.SchemaVersion)
+	).Scan(&row.Tenant, &row.CorrelationRef, &origin, &row.Locus, &row.SchemaVersion)
 	require.NoError(t, err)
 	row.Origin = core.Origin(origin)
 	return row
@@ -367,6 +374,18 @@ func TestPostSetsOriginFromTheCredentialType(t *testing.T) {
 	rec := post(t, f.srv, f.producerKey, validBody)
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	assert.Equal(t, core.OriginProcess, storedEvent(t, f.store, rec).Origin)
+}
+
+// TestPostSetsLocusFromTheCredential pins the value ev.Locus is stamped with, not merely
+// its presence. TestPostPrefixesTheRefWithTheCredentialLocus reads like it covers this
+// and does not: it exercises resolveRef's prefix on correlation_ref, a mechanism that
+// never touches ev.Locus, so a wrong-but-valid locus stamped at the ingest site would
+// leave that test, and every other test in this file, green.
+func TestPostSetsLocusFromTheCredential(t *testing.T) {
+	f := newIngressFixture(t) // producerKey's locus is "github"
+	rec := post(t, f.srv, f.producerKey, validBody)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Equal(t, "github", storedEvent(t, f.store, rec).Locus)
 }
 
 func TestPostIgnoresOriginInTheBody(t *testing.T) {

@@ -179,6 +179,18 @@ func TestEventFromCloudEventSetsOriginFromThePrincipal(t *testing.T) {
 	assert.Equal(t, core.OriginProcess, ev.Origin)
 }
 
+// TestEventFromCloudEventSetsLocusFromThePrincipal pins that locus, like tenant and
+// origin, comes from the resolved credential rather than from anything in the envelope:
+// core.Event's own doc comment makes the same argument for Locus that it makes for
+// Origin, since RefFor composes a point change's ref from it.
+func TestEventFromCloudEventSetsLocusFromThePrincipal(t *testing.T) {
+	ce := ceWithData(t, map[string]any{"correlation_ref": "dep-7"})
+
+	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
+	require.NoError(t, err)
+	assert.Equal(t, testPrincipal.Locus, ev.Locus)
+}
+
 // TestEventFromCloudEventRejectsARefOverTheCap pins that the CloudEvents path validates
 // the stored, locus-prefixed ref through the same rule POST /v1/events does, rather than
 // validating the caller's shorter, unprefixed one. It must wrap core.ErrInvalidEvent:

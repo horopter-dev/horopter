@@ -96,19 +96,6 @@ func DropTenantAfter(t *testing.T, tenant string) {
 	})
 }
 
-// DropRefAfter deletes one change and its events by tenant and ref, for a row a test has to
-// write into a real shared tenant. The default tenant cannot be made unique per test and
-// must not be emptied — an operator's own seeded rows live there — so the cleanup names
-// exactly the ref the test created and nothing else.
-func DropRefAfter(t *testing.T, tenant, ref string) {
-	t.Helper()
-	t.Cleanup(func() {
-		exec(t, `DELETE FROM change WHERE tenant = $1 AND ref = $2`, "delete change", tenant, ref)
-		exec(t, `DELETE FROM event WHERE tenant = $1 AND correlation_ref = $2`,
-			"delete events", tenant, ref)
-	})
-}
-
 func exec(t *testing.T, sql, what string, args ...any) {
 	t.Helper()
 	p, err := Pool()

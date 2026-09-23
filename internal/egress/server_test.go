@@ -183,6 +183,7 @@ func seed(t *testing.T, s *postgres.Store, tn, ref, typ string, at time.Time) {
 		Source: "ci", Type: typ, Subject: "acme/prod", Actor: "ci-bot",
 		OccurredAt: at, ReceivedAt: at, CorrelationRef: ref,
 		Attributes: map[string]any{"service.version": "2.5.0"}, Origin: core.OriginProcess,
+		Locus: "ci",
 	})
 	require.NoError(t, err)
 }
@@ -202,9 +203,9 @@ func seedManyEvents(t *testing.T, s *postgres.Store, tn string, n int) {
 		batch.Queue(`
 			INSERT INTO event (id, tenant, idempotency_key, schema_version, source, type,
 			                   subject, actor, title, occurred_at, received_at,
-			                   correlation_ref, attributes)
+			                   correlation_ref, attributes, locus)
 			VALUES ($1,$2,$3,1,'ci','deployment.started','acme/prod','ci-bot','',
-			        $4,$4,'bulk-ref','{}'::jsonb)`,
+			        $4,$4,'ci/bulk-ref','{}'::jsonb,'ci')`,
 			id, tn, id, at)
 	}
 	br := s.Pool().SendBatch(context.Background(), batch)
@@ -224,7 +225,7 @@ func seedManyChanges(t *testing.T, s *postgres.Store, tn string, n int) {
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
 	batch := &pgx.Batch{}
 	for range n {
-		ref := fmt.Sprintf("bulk-%s-%s-%d", t.Name(), procToken, tenantSeq.Add(1))
+		ref := fmt.Sprintf("ci/bulk-%s-%s-%d", t.Name(), procToken, tenantSeq.Add(1))
 		// start_at and end_effective are omitted deliberately: Postgres generates both,
 		// and a generated column rejects any value an INSERT supplies for it. started_at
 		// carries the asserted start these rows stand in for; first_seen_at repeats it,
@@ -317,7 +318,7 @@ func changesOf(t *testing.T, rec *httptest.ResponseRecorder) []jsonChange {
 func TestQueryChangesReturnsNeutralJSON(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
-	seed(t, s, tn, "dep-7", "deployment.started",
+	seed(t, s, tn, "ci/dep-7", "deployment.started",
 		time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC))
 
 	rec := get(t, h, key, "/v1/changes?tenant="+tn+
@@ -327,7 +328,7 @@ func TestQueryChangesReturnsNeutralJSON(t *testing.T) {
 	var changes []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &changes))
 	require.Len(t, changes, 1)
-	assert.Equal(t, "dep-7", changes[0]["ref"])
+	assert.Equal(t, "ci/dep-7", changes[0]["ref"])
 	assert.Equal(t, "in_progress", changes[0]["status"])
 	assert.NotContains(t, changes[0], "timeEnd",
 		"the neutral API must not leak a vendor field name")
@@ -336,7 +337,7 @@ func TestQueryChangesReturnsNeutralJSON(t *testing.T) {
 func TestGrafanaAdapterUsesEpochMillis(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
-	seed(t, s, tn, "dep-8", "deployment.started",
+	seed(t, s, tn, "ci/dep-8", "deployment.started",
 		time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC))
 
 	rec := get(t, h, key, "/adapters/grafana/annotations?tenant="+tn+
@@ -372,7 +373,7 @@ func TestOTLPAdapterUsesNanoseconds(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
 	start := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
-	seed(t, s, tn, "dep-9", "deployment.started", start)
+	seed(t, s, tn, "ci/dep-9", "deployment.started", start)
 
 	rec := get(t, h, key, "/adapters/otlp/spans?tenant="+tn+
 		"&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z")
@@ -415,16 +416,16 @@ func TestEgressRejectsMalformedTimeParams(t *testing.T) {
 func TestListEventsReturnsRawLog(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
-	seed(t, s, tn, "dep-10", "deployment.started",
+	seed(t, s, tn, "ci/dep-10", "deployment.started",
 		time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC))
 
-	rec := get(t, h, key, "/v1/events?tenant="+tn+"&ref=dep-10")
+	rec := get(t, h, key, "/v1/events?tenant="+tn+"&ref="+url.QueryEscape("ci/dep-10"))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	var events []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &events))
 	require.Len(t, events, 1)
-	assert.Equal(t, "dep-10", events[0]["correlation_ref"])
+	assert.Equal(t, "ci/dep-10", events[0]["correlation_ref"])
 	assert.Equal(t, "deployment.started", events[0]["type"])
 }
 
@@ -676,7 +677,7 @@ func TestQueryChangesEmitsBothStartFacts(t *testing.T) {
 	}
 
 	// An annotation only: evidence the change exists, with nothing asserting its start.
-	seed(t, s, tn, "dep-facts", "deployment.annotated", seen)
+	seed(t, s, tn, "ci/dep-facts", "deployment.annotated", seen)
 
 	inferred := only()
 	assert.Equal(t, seen.Format(time.RFC3339Nano), inferred["first_seen_at"],
@@ -687,7 +688,7 @@ func TestQueryChangesEmitsBothStartFacts(t *testing.T) {
 		"start falls through to the inference while the assertion is NULL")
 
 	// Now a start event asserting a LATER time than the earliest evidence.
-	seed(t, s, tn, "dep-facts", "deployment.started", asserted)
+	seed(t, s, tn, "ci/dep-facts", "deployment.started", asserted)
 
 	got := only()
 	assert.Equal(t, asserted.Format(time.RFC3339Nano), got["started_at"],
@@ -1009,6 +1010,7 @@ func seedWith(t *testing.T, s *postgres.Store, tn, ref, typ, subject string, at 
 		Source: "ci", Type: typ, Subject: subject, Actor: "ci-bot",
 		OccurredAt: at, ReceivedAt: at, CorrelationRef: ref,
 		Attributes: map[string]any{}, Origin: core.OriginProcess,
+		Locus: "ci",
 	})
 	require.NoError(t, err)
 }
@@ -1040,18 +1042,18 @@ func TestQueryChangesFiltersBySubjectAndType(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
-	seedWith(t, s, tn, "dep-90", "deployment.started", "acme/prod", at)
-	seedWith(t, s, tn, "inc-90", "incident.declared", "acme/staging", at)
+	seedWith(t, s, tn, "ci/dep-90", "deployment.started", "acme/prod", at)
+	seedWith(t, s, tn, "ci/inc-90", "incident.declared", "acme/staging", at)
 
 	window := "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
-	assert.Equal(t, []string{"dep-90", "inc-90"},
+	assert.Equal(t, []string{"ci/dep-90", "ci/inc-90"},
 		refsIn(t, get(t, h, key, "/v1/changes?tenant="+tn+window)),
 		"precondition: both changes are in the window")
 
-	assert.Equal(t, []string{"dep-90"},
+	assert.Equal(t, []string{"ci/dep-90"},
 		refsIn(t, get(t, h, key, "/v1/changes?tenant="+tn+window+"&subject=acme/prod")),
 		"subject= must filter on subject, not on type")
-	assert.Equal(t, []string{"inc-90"},
+	assert.Equal(t, []string{"ci/inc-90"},
 		refsIn(t, get(t, h, key, "/v1/changes?tenant="+tn+window+"&type=incident.declared")),
 		"type= must filter on type, not on subject")
 }
@@ -1063,19 +1065,19 @@ func TestQueryChangesFiltersByStatus(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
-	seedWith(t, s, tn, "dep-91", "deployment.started", "acme/prod", at)
-	seedWith(t, s, tn, "dep-92", "deployment.started", "acme/prod", at)
-	seedWith(t, s, tn, "dep-92", "deployment.completed", "acme/prod", at.Add(time.Minute))
+	seedWith(t, s, tn, "ci/dep-91", "deployment.started", "acme/prod", at)
+	seedWith(t, s, tn, "ci/dep-92", "deployment.started", "acme/prod", at)
+	seedWith(t, s, tn, "ci/dep-92", "deployment.completed", "acme/prod", at.Add(time.Minute))
 
 	window := "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
-	assert.Equal(t, []string{"dep-91", "dep-92"},
+	assert.Equal(t, []string{"ci/dep-91", "ci/dep-92"},
 		refsIn(t, get(t, h, key, "/v1/changes?tenant="+tn+window)),
 		"precondition: both changes are in the window")
 
-	assert.Equal(t, []string{"dep-92"},
+	assert.Equal(t, []string{"ci/dep-92"},
 		refsIn(t, get(t, h, key, "/v1/changes?tenant="+tn+window+"&status=completed")),
 		"status= must narrow the result set")
-	assert.Equal(t, []string{"dep-91"},
+	assert.Equal(t, []string{"ci/dep-91"},
 		refsIn(t, get(t, h, key, "/v1/changes?tenant="+tn+window+"&status=in_progress")),
 		"the complementary status must select the other change")
 }
@@ -1119,7 +1121,7 @@ func TestAuthRejectsBeforeAdmissionSpendsAPermit(t *testing.T) {
 	srv, s, tn := newServerWith(t, 1, testLimits())
 	h := srv.Routes()
 	key := readerKey(t, s, tn)
-	seed(t, s, tn, "dep-permit", "deployment.started", fixed)
+	seed(t, s, tn, "ci/dep-permit", "deployment.started", fixed)
 	url := "/v1/changes?tenant=" + tn + "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
 
 	release := holdRead(t, h, key, url)
@@ -1252,9 +1254,9 @@ func TestGrafanaAnnotationsRejectsARef(t *testing.T) {
 func TestListEventsReturnsOriginAndEdited(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
-	seed(t, s, tn, "dep-origin", "deployment.started", fixed)
+	seed(t, s, tn, "ci/dep-origin", "deployment.started", fixed)
 
-	rec := get(t, h, key, "/v1/events?tenant="+tn+"&ref=dep-origin")
+	rec := get(t, h, key, "/v1/events?tenant="+tn+"&ref="+url.QueryEscape("ci/dep-origin"))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	var events []map[string]any

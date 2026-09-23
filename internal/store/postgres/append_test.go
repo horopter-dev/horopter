@@ -98,12 +98,26 @@ func eventID(t *testing.T, suffix string) string {
 	return id
 }
 
-func mkEvent(tn, id, idem, corr, typ string, at time.Time) core.Event {
+// mkEvent builds the event ingest would have stored for a producer that posted
+// producerRef, which is why the locus is composed onto the ref here rather than passed in
+// already composed: ingress's resolveRef is what does it in production, and these tests
+// construct a core.Event directly, bypassing it. A fixture carrying a bare
+// correlation_ref would pin a shape no stored event has — and since 0006,
+// event_corr_ref_has_locus refuses one outright.
+//
+// The empty ref is left empty. That is a point event, whose ref core.RefFor composes from
+// the locus and the event's own id instead.
+func mkEvent(tn, id, idem, producerRef, typ string, at time.Time) core.Event {
+	corr := producerRef
+	if corr != "" {
+		corr = "ci/" + corr
+	}
 	return core.Event{
 		ID: id, Tenant: tn, IdempotencyKey: idem, SchemaVersion: core.CurrentSchemaVersion,
 		Source: "ci", Type: typ, Subject: "acme/prod", Actor: "ci-bot",
 		OccurredAt: at, ReceivedAt: at, CorrelationRef: corr,
 		Attributes: map[string]any{"service.version": "2.5.0"}, Origin: core.OriginProcess,
+		Locus: "ci",
 	}
 }
 
@@ -120,9 +134,9 @@ func TestAppendEventStoresAndProjects(t *testing.T) {
 	var endAt *time.Time
 	err = s.Pool().QueryRow(ctx,
 		`SELECT ref, status, end_at FROM change WHERE tenant = $1 AND ref = $2`,
-		tn, "dep-7").Scan(&ref, &status, &endAt)
+		tn, "ci/dep-7").Scan(&ref, &status, &endAt)
 	require.NoError(t, err)
-	assert.Equal(t, "dep-7", ref)
+	assert.Equal(t, "ci/dep-7", ref)
 	assert.Equal(t, "in_progress", status)
 	assert.Nil(t, endAt, "a started-but-unfinished change must have a NULL end")
 }
@@ -172,9 +186,9 @@ func TestEventTenantForeignKeyIsEnforced(t *testing.T) {
 	_, err := s.Pool().Exec(context.Background(), `
 		INSERT INTO event (id, tenant, schema_version, source, type, subject, actor,
 		                   title, occurred_at, received_at, correlation_ref, attributes,
-		                   origin, edited)
+		                   origin, edited, locus)
 		VALUES ($1, $2, $3, 'ci', 'deployment.started', 'acme/prod', '', '', now(), now(),
-		        'r', '{}'::jsonb, 'process', false)`,
+		        'ci/r', '{}'::jsonb, 'process', false, 'ci')`,
 		eventID(t, "fk"), missing, core.CurrentSchemaVersion)
 	require.Error(t, err, "an event naming a tenant with no row must be refused")
 	assert.Contains(t, err.Error(), "event_tenant_fk")
@@ -189,7 +203,7 @@ func TestChangeTenantForeignKeyIsEnforced(t *testing.T) {
 	_, err := s.Pool().Exec(context.Background(), `
 		INSERT INTO change (tenant, ref, subject, type, title, actor, started_at,
 		                    first_seen_at, end_at, status, attributes, last_event_id)
-		VALUES ($1, 'r', 'acme/prod', 'deployment.started', '', '', now(), now(), NULL,
+		VALUES ($1, 'ci/r', 'acme/prod', 'deployment.started', '', '', now(), now(), NULL,
 		        'in_progress', '{}'::jsonb, 'e0')`,
 		missing)
 	require.Error(t, err, "a change naming a tenant with no row must be refused")
@@ -281,7 +295,7 @@ func TestConcurrentAppendsToSameRefDoNotLoseUpdates(t *testing.T) {
 
 	var attrs map[string]any
 	err := s.Pool().QueryRow(ctx,
-		`SELECT attributes FROM change WHERE tenant = $1 AND ref = $2`, tn, "dep-7").Scan(&attrs)
+		`SELECT attributes FROM change WHERE tenant = $1 AND ref = $2`, tn, "ci/dep-7").Scan(&attrs)
 	require.NoError(t, err)
 
 	for i := 0; i < concurrentAppends; i++ {

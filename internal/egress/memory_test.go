@@ -33,7 +33,7 @@ func newMemoryFixture(t *testing.T) memoryFixture {
 	t.Helper()
 	s, tn := openTestStore(t, 0)
 	base := time.Date(2026, 9, 14, 9, 30, 0, 0, time.UTC)
-	for i, ref := range []string{"mem-a", "mem-b", "mem-c"} {
+	for i, ref := range []string{"ci/mem-a", "ci/mem-b", "ci/mem-c"} {
 		seed(t, s, tn, ref, "deployment.started", base.Add(time.Duration(i)*10*time.Minute))
 	}
 	q := changeQuery(t, tn,
@@ -93,7 +93,7 @@ func TestAReadThatFitsTheMemoryPoolIsServedWhole(t *testing.T) {
 
 	resp := get(t, srv.Routes(), f.key, changesURL(f.tn))
 
-	assert.Equal(t, []string{"mem-a", "mem-b", "mem-c"}, refsIn(t, resp))
+	assert.Equal(t, []string{"ci/mem-a", "ci/mem-b", "ci/mem-c"}, refsIn(t, resp))
 	assert.Empty(t, resp.Header().Get(egress.TruncatedHeader))
 	assert.Equal(t, bytesAttr(f.all.TotalBytes),
 		spanAttrValues(rec, "", "horopter.read.estimated_bytes"))
@@ -115,7 +115,7 @@ func TestAReadLargerThanTheMemoryPoolIsCutAndMarked(t *testing.T) {
 
 	resp := get(t, srv.Routes(), f.key, changesURL(f.tn))
 
-	assert.Equal(t, []string{"mem-a", "mem-b"}, refsIn(t, resp),
+	assert.Equal(t, []string{"ci/mem-a", "ci/mem-b"}, refsIn(t, resp),
 		"the oldest rows that fit the pool")
 	assert.Equal(t, "true", resp.Header().Get(egress.TruncatedHeader))
 	assert.Equal(t, []string{"true"}, spanAttrValues(rec, "", "horopter.read.byte_cut"))

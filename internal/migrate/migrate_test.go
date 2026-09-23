@@ -60,20 +60,21 @@ func TestRunRebuildsATenantsProjection(t *testing.T) {
 		SchemaVersion: core.CurrentSchemaVersion,
 		Source:        "ci", Type: "deployment.started", Subject: "acme/prod", Actor: "ci-bot",
 		Title: "from the event log", OccurredAt: at, ReceivedAt: at,
-		CorrelationRef: "dep-1", Attributes: map[string]any{}, Origin: core.OriginProcess,
+		CorrelationRef: "ci/dep-1", Attributes: map[string]any{}, Origin: core.OriginProcess,
+		Locus: "ci",
 	})
 	require.NoError(t, err)
 
 	title := func() string {
 		var got string
 		require.NoError(t, store.Pool().QueryRow(ctx,
-			`SELECT title FROM change WHERE tenant = $1 AND ref = $2`, tn, "dep-1").Scan(&got))
+			`SELECT title FROM change WHERE tenant = $1 AND ref = $2`, tn, "ci/dep-1").Scan(&got))
 		return got
 	}
 	require.Equal(t, "from the event log", title(), "precondition: the fold wrote the title")
 
 	_, err = store.Pool().Exec(ctx,
-		`UPDATE change SET title = 'corrupted' WHERE tenant = $1 AND ref = $2`, tn, "dep-1")
+		`UPDATE change SET title = 'corrupted' WHERE tenant = $1 AND ref = $2`, tn, "ci/dep-1")
 	require.NoError(t, err)
 	require.Equal(t, "corrupted", title(), "precondition: the projection is now wrong")
 
@@ -102,21 +103,22 @@ func TestRunWithoutRebuildTenantLeavesTheProjectionAlone(t *testing.T) {
 		ID: core.NewULID(time.Now(), rand.Reader), Tenant: tn,
 		SchemaVersion: core.CurrentSchemaVersion,
 		Source:        "ci", Type: "deployment.started", Subject: "acme/prod", Actor: "ci-bot",
-		OccurredAt: at, ReceivedAt: at, CorrelationRef: "dep-1",
+		OccurredAt: at, ReceivedAt: at, CorrelationRef: "ci/dep-1",
 		Attributes: map[string]any{}, Origin: core.OriginProcess,
+		Locus: "ci",
 	})
 	require.NoError(t, err)
 
 	marker := fmt.Sprintf("untouched-%s", token)
 	_, err = store.Pool().Exec(ctx,
-		`UPDATE change SET title = $3 WHERE tenant = $1 AND ref = $2`, tn, "dep-1", marker)
+		`UPDATE change SET title = $3 WHERE tenant = $1 AND ref = $2`, tn, "ci/dep-1", marker)
 	require.NoError(t, err)
 
 	require.NoError(t, Run(ctx, d, ""))
 
 	var got string
 	require.NoError(t, store.Pool().QueryRow(ctx,
-		`SELECT title FROM change WHERE tenant = $1 AND ref = $2`, tn, "dep-1").Scan(&got))
+		`SELECT title FROM change WHERE tenant = $1 AND ref = $2`, tn, "ci/dep-1").Scan(&got))
 	assert.Equal(t, marker, got,
 		"migrating without --rebuild-tenant must not replay anyone's event log")
 }

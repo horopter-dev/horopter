@@ -82,11 +82,15 @@ UPDATE change c SET tenant = tn.id FROM tenant tn WHERE tn.display_name = c.tena
 -- Both halves of a ref move together, or the projection stops being a function of the log:
 -- core.RefFor derives a correlated change's ref from event.correlation_ref, so prefixing
 -- change.ref alone would have RebuildProjection re-insert every change under the bare ref
--- and silently undo this. A POINT change is the exception and must stay bare: its events
--- carry correlation_ref = '' permanently, RefFor yields the event id, so a prefixed row
--- would be orphaned by the first rebuild. Matching change.ref against a correlated event is
--- what tells the two apart, and it has to run BEFORE correlation_ref is rewritten or it
--- matches nothing.
+-- and silently undo this. A POINT change is the exception here and must stay bare: its
+-- events carry correlation_ref = '' permanently, RefFor yields the event id, so a prefixed
+-- row would be orphaned by the first rebuild. Matching change.ref against a correlated
+-- event is what tells the two apart, and it has to run BEFORE correlation_ref is rewritten
+-- or it matches nothing.
+--
+-- That exception is superseded by 0006, which adds event.locus and prefixes the point
+-- changes left bare here — RefFor was changed to compose a point's ref from locus instead
+-- of yielding the bare event id. The statement above holds only as of this migration.
 UPDATE change c SET ref = 'legacy/' || c.ref
  WHERE EXISTS (SELECT 1 FROM event e
                 WHERE e.tenant = c.tenant AND e.correlation_ref = c.ref);

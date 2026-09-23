@@ -26,6 +26,7 @@ func validEvent() core.Event {
 		CorrelationRef: "dep-7",
 		Attributes:     map[string]any{"service.version": "2.5.0"},
 		Origin:         core.OriginProcess,
+		Locus:          "buildkite",
 	}
 }
 
@@ -95,6 +96,7 @@ func TestValidateFailuresAreInvalidEvent(t *testing.T) {
 		Source: "ci", Type: "deployment.started", Subject: "acme/prod",
 		OccurredAt: time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC),
 		Origin:     core.OriginProcess,
+		Locus:      "github",
 	}
 	require.NoError(t, valid.Validate(), "precondition: the base event is acceptable")
 
@@ -110,6 +112,8 @@ func TestValidateFailuresAreInvalidEvent(t *testing.T) {
 		"occurred_at":    {func(e *core.Event) { e.OccurredAt = time.Time{} }, "occurred_at"},
 		"schema_version": {func(e *core.Event) { e.SchemaVersion = 99 }, "schema_version"},
 		"origin":         {func(e *core.Event) { e.Origin = "" }, "origin"},
+		"locus_empty":    {func(e *core.Event) { e.Locus = "" }, "locus"},
+		"locus_slash":    {func(e *core.Event) { e.Locus = "a/b" }, "locus"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			bad := valid

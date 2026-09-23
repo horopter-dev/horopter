@@ -68,6 +68,13 @@ func mustExec(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) {
 // seedRows inserts n independent events and m changes under the same old-shape tenant,
 // each with its own ref so TestMigration0004PreservesRowCounts can seed more than one of
 // each without colliding on change's (tenant, ref) primary key.
+//
+// Change i takes event i's correlation_ref as its own, which is what a change row IS — the
+// projection of the events sharing that ref. A ref belonging to no event was never a state
+// the system could reach, and since 0006 it is one the schema refuses: change_ref_has_locus
+// requires every ref to carry a locus, and only a ref a migration recognises as correlated
+// (0004) or as a point (0006) is given one. Seeding more changes than events therefore
+// fails loudly in the migration rather than silently counting rows that mean nothing.
 func seedRows(t *testing.T, pool *pgxpool.Pool, events, changes int) {
 	t.Helper()
 	for i := range events {
@@ -81,7 +88,7 @@ func seedRows(t *testing.T, pool *pgxpool.Pool, events, changes int) {
 		mustExec(t, pool, `INSERT INTO change
 			(tenant, ref, subject, type, status, first_seen_at, last_event_id)
 			VALUES ('acme', $1, 'sub', 't', 'in_progress', now(), 'e0')`,
-			fmt.Sprintf("c%d", i))
+			fmt.Sprintf("e%d", i))
 	}
 }
 
@@ -173,6 +180,31 @@ func TestMigration0004RejectsAMalformedLocus(t *testing.T) {
 	}
 }
 
+// TestMigration0006RejectsAMalformedLocusOnAnEvent pins the backstop half of the locus
+// rule, as TestMigration0004RejectsAMalformedLocus does for the credential. core.Event's
+// Validate is the authority and runs first; this is what stops a direct INSERT, by some
+// later path that skips it, storing a locus that would make <locus>/<ref> unsplittable.
+func TestMigration0006RejectsAMalformedLocusOnAnEvent(t *testing.T) {
+	ctx := context.Background()
+	pool, _ := freshDatabase(t)
+	_, err := postgres.Migrate(ctx, pool)
+	require.NoError(t, err)
+
+	mustExec(t, pool, `INSERT INTO tenant (id, display_name) VALUES ('tnt_x', 'x')`)
+	for name, locus := range map[string]string{"slash": "a/b", "empty": ""} {
+		t.Run(name, func(t *testing.T) {
+			_, err := pool.Exec(ctx, `INSERT INTO event
+				(id, tenant, schema_version, source, type, subject, occurred_at,
+				 received_at, correlation_ref, origin, locus)
+				VALUES ($1, 'tnt_x', 2, 'ci', 'config.changed', 'sub', now(), now(),
+				        '', 'process', $2)`,
+				core.NewULID(legacyAt, rand.Reader), locus)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "event_locus_shape")
+		})
+	}
+}
+
 func TestMigration0004AcceptsALocusWithAnInteriorNewline(t *testing.T) {
 	ctx := context.Background()
 	pool, _ := freshDatabase(t)
@@ -188,9 +220,9 @@ func TestMigration0004AcceptsALocusWithAnInteriorNewline(t *testing.T) {
 		"git\nhub")
 }
 
-// legacySeed is the two change shapes 0004 must treat differently, seeded in the pre-0004
-// shape. The change rows are exactly what folding these events produces, so the only thing a
-// rebuild can disagree with them about is what 0004 did to the refs.
+// legacySeed is the two change shapes the migrations must treat differently, seeded in the
+// pre-0004 shape. The change rows are exactly what folding these events produces, so the only
+// thing a rebuild can disagree with them about is what 0004 and 0006 did to the refs.
 type legacySeed struct {
 	correlatedRef  string
 	pointEventID   string
@@ -202,10 +234,16 @@ var legacyAt = time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
 // seedLegacyProjection writes one correlated change and one point change under the old
 // tenant string, each with the event log that implies it.
 //
-// Both shapes are seeded deliberately. A correlated change's ref comes from
-// event.correlation_ref, so prefixing change.ref alone is invisible until a rebuild; a point
-// change's ref is its own event id and its correlation_ref stays empty forever, so it must NOT be
-// prefixed. A fixture carrying only correlated events passes with either bug present.
+// Both shapes are seeded deliberately, and each is prefixed from a different source. A
+// correlated change's ref comes from event.correlation_ref, which 0004 prefixes alongside it,
+// so prefixing change.ref alone is invisible until a rebuild. A point change's correlation_ref
+// stays empty forever, so there is nothing alongside to prefix: 0006 prefixes its ref from the
+// locus it backfilled onto the event, which is the same value core.RefFor composes a point ref
+// from. Both end up <locus>/<something>.
+//
+// A fixture carrying only correlated events cannot tell any of that apart. It passes with 0004's
+// bug present, and with either of 0006's two failure modes — an unbackfilled event.locus, and a
+// foldEventLog that does not select it.
 func seedLegacyProjection(t *testing.T, pool *pgxpool.Pool) legacySeed {
 	t.Helper()
 	seed := legacySeed{
@@ -259,15 +297,16 @@ func projectionRows(t *testing.T, pool *pgxpool.Pool) map[string]string {
 	return out
 }
 
-// TestMigration0004LeavesTheProjectionRebuildable is the invariant the whole design rests on
-// and the one nothing asserted: change is a derived view of the immutable event log, so it
-// must be discardable and replayable at any time — including straight after 0004.
+// TestMigrationsLeaveTheProjectionRebuildable is the invariant the whole design rests on
+// and the one nothing asserted until 0004 broke it: change is a derived view of the
+// immutable event log, so it must be discardable and replayable at any time — including
+// straight after a migration that rewrites refs.
 //
 // 0004 rewrote change.ref to 'legacy/<ref>' and left event.correlation_ref alone, so
 // RebuildProjection deleted every change row and re-inserted it under the UNPREFIXED ref,
-// silently undoing the migration. Nothing failed, no row count moved, and
-// GET /v1/events?ref=legacy/... matched nothing either way.
-func TestMigration0004LeavesTheProjectionRebuildable(t *testing.T) {
+// silently undoing the migration. 0006 can fail the same way twice over: by not backfilling
+// event.locus, and by not selecting it in foldEventLog.
+func TestMigrationsLeaveTheProjectionRebuildable(t *testing.T) {
 	ctx := context.Background()
 	pool, freshDSN := freshDatabase(t)
 	seed := seedLegacyProjection(t, pool)
@@ -283,8 +322,9 @@ func TestMigration0004LeavesTheProjectionRebuildable(t *testing.T) {
 	require.Len(t, migrated, 2)
 	assert.Contains(t, migrated, "legacy/"+seed.correlatedRef,
 		"a correlated change's ref is prefixed, and so is the correlation_ref it comes from")
-	assert.Contains(t, migrated, seed.pointEventID,
-		"a point change's ref is its own event id, which core.RefFor never prefixes")
+	assert.Contains(t, migrated, "legacy/"+seed.pointEventID,
+		"0006 prefixes a point change too, from the locus it backfilled onto the event, "+
+			"so there is exactly one ref shape")
 
 	s, err := postgres.OpenNoMigrate(ctx, freshDSN)
 	require.NoError(t, err)
@@ -292,6 +332,6 @@ func TestMigration0004LeavesTheProjectionRebuildable(t *testing.T) {
 	require.NoError(t, s.RebuildProjection(ctx, tenantID))
 
 	assert.Equal(t, migrated, projectionRows(t, pool),
-		"a rebuild after 0004 must reproduce the projection exactly — same refs, same rows, "+
-			"same contents — or change has stopped being a function of event")
+		"a rebuild after the migrations must reproduce the projection exactly — same refs, "+
+			"same rows, same contents — or change has stopped being a function of event")
 }

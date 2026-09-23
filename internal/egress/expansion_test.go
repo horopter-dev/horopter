@@ -74,7 +74,7 @@ func seedShape(t *testing.T, s *postgres.Store, tn string, rows int, attrs map[s
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
 	batch := &pgx.Batch{}
 	for i := range rows {
-		ref := fmt.Sprintf("shape-%d", i)
+		ref := fmt.Sprintf("ci/shape-%d", i)
 		batch.Queue(`
 			INSERT INTO change (tenant, ref, subject, type, title, actor, started_at,
 			                    first_seen_at, end_at, status, attributes, last_event_id)
@@ -85,9 +85,9 @@ func seedShape(t *testing.T, s *postgres.Store, tn string, rows int, attrs map[s
 		batch.Queue(`
 			INSERT INTO event (id, tenant, idempotency_key, schema_version, source, type,
 			                   subject, actor, title, occurred_at, received_at,
-			                   correlation_ref, attributes)
+			                   correlation_ref, attributes, locus)
 			VALUES ($1,$2,$1,1,'ci','deployment.completed','acme/prod','ci-bot','',
-			        $3,$3,$4,$5)`,
+			        $3,$3,$4,$5,'ci')`,
 			id, tn, at, ref, attrs)
 	}
 	br := s.Pool().SendBatch(context.Background(), batch)

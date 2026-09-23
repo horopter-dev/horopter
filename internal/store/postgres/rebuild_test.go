@@ -152,7 +152,7 @@ func TestRebuildDoesNotLoseConcurrentAppends(t *testing.T) {
 
 	var attrs map[string]any
 	err = s.Pool().QueryRow(ctx,
-		`SELECT attributes FROM change WHERE tenant = $1 AND ref = $2`, tn, "dep-7").Scan(&attrs)
+		`SELECT attributes FROM change WHERE tenant = $1 AND ref = $2`, tn, "ci/dep-7").Scan(&attrs)
 	require.NoError(t, err)
 	assert.Contains(t, attrs, "attr.seeded",
 		"the rebuilt row's contents must survive the concurrent append; losing them means "+
