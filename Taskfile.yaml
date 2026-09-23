@@ -37,7 +37,8 @@ tasks:
   up:local:
     desc: Build images from the working tree and start the stack
     cmds:
-      - goreleaser release --snapshot --clean
+      - ./hack/snapshot-config.sh
+      - goreleaser release --snapshot --clean -f .goreleaser.snapshot.yaml
       - ./hack/snapshot-override.sh
       - docker compose -f docker-compose.yaml -f docker-compose.snapshot.yaml up -d
   stop:
