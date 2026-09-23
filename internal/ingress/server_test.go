@@ -226,6 +226,24 @@ func bodySubject(subject string) string {
 		"occurred_at":"2026-09-22T00:00:00Z"}`, subject)
 }
 
+// bodyCE builds a minimal CloudEvents envelope for the given subject, omitting the subject
+// attribute entirely when it is empty rather than sending it as "". The CloudEvents spec —
+// and this SDK's Validate — rejects a PRESENT-but-empty subject as malformed ("if present,
+// MUST be a non-empty string"), so an envelope carrying no subject at all is the only way
+// to drive the "absent subject" case as far as subjectAllowed instead of failing earlier
+// as a 400.
+func bodyCE(t *testing.T, subject string) string {
+	t.Helper()
+	var subjectField string
+	if subject != "" {
+		subjectField = fmt.Sprintf(`,"subject":%q`, subject)
+	}
+	return fmt.Sprintf(`{"specversion":"1.0","id":%q,"source":"/buildkite/pipelines/api",
+		"type":"deployment.started","time":"2026-09-14T10:00:00Z",
+		"datacontenttype":"application/json","data":{}%s}`,
+		idemKey(t, "ce-subject"), subjectField)
+}
+
 func TestPostRejectsABodyCarryingTenant(t *testing.T) {
 	f := newIngressFixture(t)
 	rec := post(t, f.srv, f.producerKey, `{"tenant":"other","source":"s","type":"t.started",
@@ -289,6 +307,29 @@ func TestSubjectPatternIsEnforced(t *testing.T) {
 func TestAnEmptySubjectDoesNotMatchAPattern(t *testing.T) {
 	f := newIngressFixture(t)
 	assert.Equal(t, http.StatusForbidden, post(t, f.srv, f.scopedKey, bodySubject("")).Code,
+		"an absent subject must not satisfy a narrowing pattern by accident")
+}
+
+// TestSubjectPatternIsEnforcedOnCloudEvents mirrors TestSubjectPatternIsEnforced for the
+// CloudEvents route. postCloudEvent calls the same subjectAllowed guard as postEvent, in
+// the same order, but nothing before this drove it through the HTTP handler: every other
+// CloudEvents test in this suite uses the unscoped producer credential, and
+// cloudevents_test.go calls eventFromCloudEvent directly rather than going through
+// ServeHTTP. Without this, a regression deleting the guard from postCloudEvent alone would
+// pass the entire suite.
+func TestSubjectPatternIsEnforcedOnCloudEvents(t *testing.T) {
+	f := newIngressFixture(t)
+	assert.Equal(t, http.StatusCreated,
+		postCE(t, f.srv, f.scopedKey, bodyCE(t, "acme/prod")).Code)
+	assert.Equal(t, http.StatusForbidden,
+		postCE(t, f.srv, f.scopedKey, bodyCE(t, "acme/dev")).Code)
+}
+
+// TestAnEmptySubjectDoesNotMatchAPatternOnCloudEvents mirrors
+// TestAnEmptySubjectDoesNotMatchAPattern for the CloudEvents route.
+func TestAnEmptySubjectDoesNotMatchAPatternOnCloudEvents(t *testing.T) {
+	f := newIngressFixture(t)
+	assert.Equal(t, http.StatusForbidden, postCE(t, f.srv, f.scopedKey, bodyCE(t, "")).Code,
 		"an absent subject must not satisfy a narrowing pattern by accident")
 }
 
