@@ -10,6 +10,7 @@ import (
 	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2/event"
+	"horopter.dev/horopter/internal/auth"
 	"horopter.dev/horopter/internal/core"
 )
 
@@ -46,10 +47,15 @@ func (s *Server) postCloudEvent(w http.ResponseWriter, r *http.Request) {
 			strings.TrimSpace(err.Error()))
 		return
 	}
+	p, _ := auth.PrincipalFrom(r.Context())
 	now := s.clock()
-	ev, err := eventFromCloudEvent(ce, now, core.NewULID(now, s.entropy))
+	ev, err := eventFromCloudEvent(ce, now, core.NewULID(now, s.entropy), p)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !subjectAllowed(p.SubjectPattern, ev.Subject) {
+		subjectForbidden(w, p.SubjectPattern, ev.Subject)
 		return
 	}
 	recordTenant(r.Context(), ev.Tenant)
@@ -91,9 +97,10 @@ func idempotencyKey(source, id string) string {
 }
 
 // eventFromCloudEvent maps a CloudEvent onto the internal Event. Its source and id become
-// the idempotency key, which makes producer retries safe for free.
+// the idempotency key, which makes producer retries safe for free. Tenant and origin come
+// from p, the resolved credential, never from the envelope: see postCloudEvent.
 func eventFromCloudEvent(
-	ce cloudevents.Event, now time.Time, id string,
+	ce cloudevents.Event, now time.Time, id string, p auth.Principal,
 ) (core.Event, error) {
 	attrs := map[string]any{}
 	if len(ce.Data()) > 0 {
@@ -110,11 +117,19 @@ func eventFromCloudEvent(
 				core.ErrInvalidEvent, ce.ID(), err)
 		}
 	}
+	// A body still carrying tenant is rejected outright, whatever its type: silently
+	// dropping a field that used to be authoritative is how a broken migration ships
+	// unnoticed, with the caller believing it wrote one tenant while it wrote another.
+	if _, present := attrs["tenant"]; present {
+		return core.Event{}, fmt.Errorf(
+			"%w: CloudEvent %q: tenant is derived from the credential; remove it from data",
+			core.ErrInvalidEvent, ce.ID())
+	}
 	// pull lifts a recognised key out of the data payload into a first-class event
 	// field, removing it from the attribute map so the same value is not also stored as
 	// a generic attribute. The lifted set is exactly the core.Event fields CloudEvents
-	// has no envelope attribute for: tenant, correlation_ref, title and actor. Every
-	// other key stays in attributes untouched.
+	// has no envelope attribute for: correlation_ref, title and actor. Every other key
+	// stays in attributes untouched.
 	//
 	// Non-string values are left alone rather than coerced: a caller sending
 	// {"title": 7} keeps it as an attribute instead of having it silently stringified
@@ -126,11 +141,14 @@ func eventFromCloudEvent(
 		}
 		return ""
 	}
-	tenantID := pull("tenant")
-	if tenantID == "" {
-		tenantID = DefaultTenant
+	corr, err := resolveRef(p.Locus, pull("correlation_ref"))
+	if err != nil {
+		// Wrapped for the same reason as the data-not-JSON-object case above: the taxonomy
+		// must hold even though the sole caller today answers every error from here 400
+		// unconditionally, or an over-cap ref reaching appendFailed by some future path
+		// would be reported as a retryable 503 that can never succeed.
+		return core.Event{}, fmt.Errorf("%w: CloudEvent %q: %w", core.ErrInvalidEvent, ce.ID(), err)
 	}
-	corr := pull("correlation_ref")
 	title := pull("title")
 	actor := pull("actor")
 
@@ -140,7 +158,7 @@ func eventFromCloudEvent(
 	}
 	return core.Event{
 		ID:             id,
-		Tenant:         tenantID,
+		Tenant:         p.Tenant.String(),
 		IdempotencyKey: idempotencyKey(ce.Source(), ce.ID()),
 		SchemaVersion:  core.CurrentSchemaVersion,
 		Source:         ce.Source(),
@@ -152,5 +170,6 @@ func eventFromCloudEvent(
 		ReceivedAt:     now,
 		CorrelationRef: corr,
 		Attributes:     attrs,
+		Origin:         p.Origin,
 	}, nil
 }

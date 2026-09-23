@@ -11,16 +11,18 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"horopter.dev/horopter/internal/auth"
 	"horopter.dev/horopter/internal/egress"
 	"horopter.dev/horopter/internal/store/postgres"
 )
 
 // memoryFixture is three changes in changesURL's window, each seeded by one event, and estimates
 // of both: firstTwo, from a limit of 1, which over-fetches the second row, and all, as a read of
-// changesURL/eventsURL makes.
+// changesURL/eventsURL makes. key is a reader credential scoped to tn.
 type memoryFixture struct {
 	s              *postgres.Store
 	tn             string
+	key            string
 	firstTwo       postgres.ReadEstimate
 	all            postgres.ReadEstimate
 	eventsFirstTwo postgres.ReadEstimate
@@ -34,12 +36,9 @@ func newMemoryFixture(t *testing.T) memoryFixture {
 	for i, ref := range []string{"mem-a", "mem-b", "mem-c"} {
 		seed(t, s, tn, ref, "deployment.started", base.Add(time.Duration(i)*10*time.Minute))
 	}
-	q := postgres.ChangeQuery{
-		Tenant: tn,
-		From:   time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC),
-		To:     time.Date(2026, 9, 14, 11, 0, 0, 0, time.UTC),
-		Limit:  1,
-	}
+	q := changeQuery(t, tn,
+		time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC),
+		time.Date(2026, 9, 14, 11, 0, 0, 0, time.UTC), 1)
 	firstTwo, err := s.EstimateChanges(context.Background(), q)
 	require.NoError(t, err)
 	q.Limit = egress.MaxLimit
@@ -47,7 +46,7 @@ func newMemoryFixture(t *testing.T) memoryFixture {
 	require.NoError(t, err)
 	require.Equal(t, 3, all.Rows)
 
-	eq := postgres.EventQuery{Tenant: tn, Limit: 1}
+	eq := eventQuery(t, tn, 1)
 	eventsFirstTwo, err := s.EstimateEvents(context.Background(), eq)
 	require.NoError(t, err)
 	eq.Limit = egress.MaxLimit
@@ -56,16 +55,20 @@ func newMemoryFixture(t *testing.T) memoryFixture {
 	require.Equal(t, 3, eventsAll.Rows)
 
 	return memoryFixture{
-		s: s, tn: tn, firstTwo: firstTwo, all: all,
+		s: s, tn: tn, key: readerKey(t, s, tn), firstTwo: firstTwo, all: all,
 		eventsFirstTwo: eventsFirstTwo, eventsAll: eventsAll,
 	}
 }
 
 // server serves the fixture with a read memory pool of capacity bytes.
-func (f memoryFixture) server(capacity int64) *egress.Server {
+func (f memoryFixture) server(t *testing.T, capacity int64) *egress.Server {
+	t.Helper()
 	limits := testLimits()
 	limits.ReadMemoryBytes = capacity
-	return egress.New(f.s, fixedClock, limits)
+	authn := auth.New(auth.NewStore(f.s.Pool()), fixedClock, auth.DefaultOptions())
+	srv, err := egress.New(f.s, fixedClock, limits, authn)
+	require.NoError(t, err)
+	return srv
 }
 
 func bytesAttr(n int64) []string { return []string{strconv.FormatInt(n, 10)} }
@@ -86,9 +89,9 @@ func TestAReadThatFitsTheMemoryPoolIsServedWhole(t *testing.T) {
 	rec, restore := recordSpans(t)
 	defer restore()
 	f := newMemoryFixture(t)
-	srv := f.server(egress.ReadExpansionFactor * f.all.TotalBytes)
+	srv := f.server(t, egress.ReadExpansionFactor*f.all.TotalBytes)
 
-	resp := get(t, srv.Routes(), changesURL(f.tn))
+	resp := get(t, srv.Routes(), f.key, changesURL(f.tn))
 
 	assert.Equal(t, []string{"mem-a", "mem-b", "mem-c"}, refsIn(t, resp))
 	assert.Empty(t, resp.Header().Get(egress.TruncatedHeader))
@@ -108,9 +111,9 @@ func TestAReadLargerThanTheMemoryPoolIsCutAndMarked(t *testing.T) {
 	defer restore()
 	f := newMemoryFixture(t)
 	capacity := egress.ReadExpansionFactor * f.firstTwo.TotalBytes
-	srv := f.server(capacity)
+	srv := f.server(t, capacity)
 
-	resp := get(t, srv.Routes(), changesURL(f.tn))
+	resp := get(t, srv.Routes(), f.key, changesURL(f.tn))
 
 	assert.Equal(t, []string{"mem-a", "mem-b"}, refsIn(t, resp),
 		"the oldest rows that fit the pool")
@@ -125,10 +128,10 @@ func TestAReadWhoseFirstRowExceedsTheMemoryPoolIsRefused(t *testing.T) {
 	defer restore()
 	f := newMemoryFixture(t)
 	capacity := egress.ReadExpansionFactor*f.firstTwo.FirstRowBytes - 1
-	srv := f.server(capacity)
+	srv := f.server(t, capacity)
 	records := captureLogs(t)
 
-	resp := get(t, srv.Routes(), changesURL(f.tn))
+	resp := get(t, srv.Routes(), f.key, changesURL(f.tn))
 
 	require.Equal(t, http.StatusUnprocessableEntity, resp.Code, resp.Body.String())
 	assert.JSONEq(t, tooLargeBody(capacity), resp.Body.String())
@@ -149,15 +152,15 @@ func TestAReadIsShedWhileTheMemoryPoolIsHeld(t *testing.T) {
 	defer restore()
 	f := newMemoryFixture(t)
 	capacity := egress.ReadExpansionFactor * f.all.TotalBytes
-	srv := f.server(capacity)
+	srv := f.server(t, capacity)
 	h := srv.Routes()
 	release, err := egress.ReserveReadMemory(srv, capacity)
 	require.NoError(t, err)
 	records := captureLogs(t)
 
-	shed := get(t, h, changesURL(f.tn))
+	shed := get(t, h, f.key, changesURL(f.tn))
 	release()
-	served := get(t, h, changesURL(f.tn))
+	served := get(t, h, f.key, changesURL(f.tn))
 
 	require.Equal(t, http.StatusServiceUnavailable, shed.Code, shed.Body.String())
 	assert.JSONEq(t, shedBody, shed.Body.String())
@@ -182,9 +185,9 @@ func TestAReadIsShedWhileTheMemoryPoolIsHeld(t *testing.T) {
 func TestAnEventsReadLargerThanTheMemoryPoolIsCutAndMarked(t *testing.T) {
 	f := newMemoryFixture(t)
 	capacity := egress.ReadExpansionFactor * f.eventsFirstTwo.TotalBytes
-	srv := f.server(capacity)
+	srv := f.server(t, capacity)
 
-	resp := get(t, srv.Routes(), eventsURL(f.tn))
+	resp := get(t, srv.Routes(), f.key, eventsURL(f.tn))
 
 	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
 	var events []map[string]any
@@ -198,9 +201,9 @@ func TestAnEventsReadLargerThanTheMemoryPoolIsCutAndMarked(t *testing.T) {
 func TestAnEventsReadWhoseFirstRowExceedsTheMemoryPoolIsRefused(t *testing.T) {
 	f := newMemoryFixture(t)
 	capacity := egress.ReadExpansionFactor*f.eventsFirstTwo.FirstRowBytes - 1
-	srv := f.server(capacity)
+	srv := f.server(t, capacity)
 
-	resp := get(t, srv.Routes(), eventsURL(f.tn))
+	resp := get(t, srv.Routes(), f.key, eventsURL(f.tn))
 
 	require.Equal(t, http.StatusUnprocessableEntity, resp.Code, resp.Body.String())
 	assert.JSONEq(t, tooLargeBody(capacity), resp.Body.String())

@@ -1,8 +1,10 @@
 # Horopter, a trial stack. Everything runs on one machine and nothing here is a deployment:
-# horopter-egress has no authentication in v0.1, so anyone who reaches port 8081 can read
-# every tenant's full change and event log. Postgres is not published on the host here, but
-# it still uses the shared dev credentials below, and neither daemon's metrics port (9464) is
-# published either. See https://github.com/horopter-dev/horopter#security
+# every route but the two probes, on both daemons, requires a credential. The bootstrap
+# service below issues the two fixed dev credentials this stack runs on — a producer and a
+# reader, never a superuser — the same way docker-compose.yml does; see the README's
+# "Issuing credentials" section to issue your own. Postgres is not published on the host
+# here, and neither daemon's metrics port (9464) is published either. See
+# https://github.com/horopter-dev/horopter#security
 services:
   db:
     image: postgres:18
@@ -21,24 +23,35 @@ services:
       timeout: 3s
       retries: 15
 
-  migrate:
-    image: ghcr.io/horopter-dev/horopter-migrate:${HOROPTER_IMAGE_TAG}
+  horoctl-migrate:
+    image: ghcr.io/horopter-dev/horoctl-migrate:${HOROPTER_IMAGE_TAG}
     environment:
       DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
     depends_on:
       db:
         condition: service_healthy
 
+  bootstrap:
+    image: ghcr.io/horopter-dev/horoctl:${HOROPTER_IMAGE_TAG}
+    environment:
+      DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
+    command: >
+      admin bootstrap --display-name default --source dev --locus dev
+      --producer-key ${HOROPTER_DEV_PRODUCER_KEY:-horo_dead00000001_00000000000000000000000000000000000000000000000000000000000000}
+      --reader-key ${HOROPTER_DEV_READER_KEY:-horo_dead00000002_11111111111111111111111111111111111111111111111111111111111111}
+    depends_on:
+      horoctl-migrate:
+        condition: service_completed_successfully
+
   ingress:
     image: ghcr.io/horopter-dev/horopter-ingress:${HOROPTER_IMAGE_TAG}
     environment:
       DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
-      HOROPTER_INGRESS_TOKEN: local-dev-token
       HOROPTER_ADDR: 0.0.0.0:8080
     ports:
       - "8080:8080"
     depends_on:
-      migrate:
+      bootstrap:
         condition: service_completed_successfully
 
   egress:
@@ -49,7 +62,7 @@ services:
     ports:
       - "8081:8081"
     depends_on:
-      migrate:
+      bootstrap:
         condition: service_completed_successfully
 
 volumes:

@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"horopter.dev/horopter/internal/egress"
 	"horopter.dev/horopter/internal/store/postgres"
+	"horopter.dev/horopter/internal/testdb"
 )
 
 type expansionShape struct {
@@ -108,10 +109,10 @@ func expansionReads(t *testing.T, s *postgres.Store, tn string) []expansionRead 
 	t.Helper()
 	ctx := context.Background()
 	from := time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC)
-	changes, err := s.EstimateChanges(ctx, postgres.ChangeQuery{
-		Tenant: tn, From: from, To: from.Add(2 * time.Hour), Limit: egress.MaxLimit})
+	changes, err := s.EstimateChanges(ctx,
+		changeQuery(t, tn, from, from.Add(2*time.Hour), egress.MaxLimit))
 	require.NoError(t, err)
-	events, err := s.EstimateEvents(ctx, postgres.EventQuery{Tenant: tn, Limit: egress.MaxLimit})
+	events, err := s.EstimateEvents(ctx, eventQuery(t, tn, egress.MaxLimit))
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, min(changes.TotalBytes, events.TotalBytes), int64(2<<20),
 		"each shape needs megabytes of row text, or background allocation stops being noise")
@@ -158,20 +159,25 @@ func TestReadAllocationsStayWithinExpansionFactor(t *testing.T) {
 	srv, s, base := newServerWith(t, 0, limits)
 	h := srv.Routes()
 	for _, shape := range expansionShapes() {
-		tn := base + "-" + shape.name
+		tn := testdb.NewTenant(t, base+"-"+shape.name)
 		seedShape(t, s, tn, shape.rows, shape.attrs)
+		// A tenant-scoped reader, not a superuser: a global credential's tenant is checked
+		// against the store on every request, an extra allocation this test's ratio must
+		// not have to absorb. Minted and warmed outside every measured closure below.
+		key := readerKey(t, s, tn)
+		warmCredentialCache(t, h, key, tn)
 		for _, read := range expansionReads(t, s, tn) {
 			t.Run(shape.name+"-"+read.route, func(t *testing.T) {
-				assertWithinExpansionFactor(t, h, read)
+				assertWithinExpansionFactor(t, h, key, read)
 			})
 		}
 	}
 }
 
-func assertWithinExpansionFactor(t *testing.T, h http.Handler, read expansionRead) {
+func assertWithinExpansionFactor(t *testing.T, h http.Handler, key string, read expansionRead) {
 	t.Helper()
 	var rec *httptest.ResponseRecorder
-	allocated := allocatedDuring(func() { rec = get(t, h, read.url) })
+	allocated := allocatedDuring(func() { rec = get(t, h, key, read.url) })
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Empty(t, rec.Header().Get(egress.TruncatedHeader),

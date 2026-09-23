@@ -280,7 +280,7 @@ func TestStoreRecordsPoolStatisticsUnderAFixedPoolName(t *testing.T) {
 	}
 }
 
-// TestMigrateReportsTheFilesItApplied covers the fact horopter-migrate needs to tell an
+// TestMigrateReportsTheFilesItApplied covers the fact horoctl-migrate needs to tell an
 // operator what it did. The ledger alone cannot answer it: after the run, a file applied
 // just now and a file applied a year ago are both simply present, so a binary that reads
 // the ledger afterwards cannot say which of the rows it was responsible for.

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -13,15 +14,21 @@ import (
 	"horopter.dev/horopter/internal/core"
 )
 
-// ChangeQuery selects changes overlapping a time window.
+// ChangeQuery selects changes overlapping a time window, or by ref alone. tenant is
+// unexported: NewChangeQuery is the only way to set it, so a query naming no tenant is a
+// compile error, not a struct literal that happens to select nothing.
 type ChangeQuery struct {
-	Tenant  string
+	tenant  string
 	From    time.Time
 	To      time.Time
 	Subject string
 	Type    string
 	Status  string
-	Limit   int
+	// Ref selects a single change by its (tenant, ref) primary key. When set, the window
+	// predicate is omitted entirely: From and To are ignored, since a ref lookup is already
+	// exact and a window could only narrow it redundantly.
+	Ref   string
+	Limit int
 	// MaxRowTextBytes cuts the result after the leading rows whose row text, summed in order,
 	// fits within it; zero means no cut. Row text is a row's size as Postgres renders the whole
 	// row as text, octet_length(row::text). A cut that discards rows reports the result
@@ -29,9 +36,34 @@ type ChangeQuery struct {
 	MaxRowTextBytes int64
 }
 
-// EventQuery selects raw events for audit, export, and debugging.
+// ErrUnscopedQuery reports a query constructed from the zero core.TenantID.
+//
+// TenantID's unexported field is the compile-time half of the tenant gate: a query naming no
+// tenant cannot be written as a struct literal. Its zero value is still constructible, and a
+// query carrying one would select the empty tenant: an empty result set indistinguishable from a
+// legitimate one, which is the failure mode that makes this worth a runtime guard rather than
+// a convention. Nothing reaches it today; a future route registered without egress's admit
+// would.
+var ErrUnscopedQuery = errors.New(
+	"query is not scoped to a tenant; a tenant comes from the authenticated principal")
+
+// NewChangeQuery returns a ChangeQuery scoped to tenant over [from, to] — the only
+// constructor for one, and so the only place a core.TenantID crosses into the store
+// package. Subject, Type, Status and Ref are optional filters, assigned on the result
+// afterward.
+func NewChangeQuery(
+	tenant core.TenantID, from, to time.Time, limit int,
+) (ChangeQuery, error) {
+	if tenant.IsZero() {
+		return ChangeQuery{}, ErrUnscopedQuery
+	}
+	return ChangeQuery{tenant: tenant.String(), From: from, To: to, Limit: limit}, nil
+}
+
+// EventQuery selects raw events for audit, export, and debugging. tenant is unexported for
+// the same reason ChangeQuery's is: NewEventQuery is the only way to set it.
 type EventQuery struct {
-	Tenant string
+	tenant string
 	Ref    string
 	Limit  int
 	// MaxRowTextBytes cuts the result after the leading rows whose row text, summed in order,
@@ -39,6 +71,15 @@ type EventQuery struct {
 	// row as text, octet_length(row::text). A cut that discards rows reports the result
 	// truncated.
 	MaxRowTextBytes int64
+}
+
+// NewEventQuery returns an EventQuery scoped to tenant, the only constructor for one. Ref
+// and MaxRowTextBytes are optional and assigned on the result afterward.
+func NewEventQuery(tenant core.TenantID, limit int) (EventQuery, error) {
+	if tenant.IsZero() {
+		return EventQuery{}, ErrUnscopedQuery
+	}
+	return EventQuery{tenant: tenant.String(), Limit: limit}, nil
 }
 
 // ReadEstimate is the size of what a read will fetch, measured before it runs: how many rows,
@@ -87,15 +128,24 @@ const changeColumns = `tenant, ref, subject, type, title, actor, start_at, start
 
 // eventColumns are the columns scanEvents reads, in its order.
 const eventColumns = `id, tenant, idempotency_key, schema_version, source, type, subject,
-	actor, title, occurred_at, received_at, correlation_ref, attributes`
+	actor, title, occurred_at, received_at, correlation_ref, attributes, origin, edited`
 
-// changeSelection selects the change rows q reads.
+// changeSelection selects the change rows q reads: by ref alone when q.Ref is set, or by
+// window otherwise. The two predicates are mutually exclusive, not layered — a window
+// alongside a ref would be redundant, since (tenant, ref) already selects at most one row.
 func changeSelection(q ChangeQuery) selection {
 	sb := strings.Builder{}
-	sb.WriteString(`
-		SELECT c.* FROM change c
-		WHERE c.tenant = $1 AND c.start_at <= $2 AND c.end_effective >= $3`)
-	args := appendChangeFilters(&sb, []any{q.Tenant, q.To.UTC(), q.From.UTC()}, q)
+	var args []any
+	if q.Ref != "" {
+		sb.WriteString(`SELECT c.* FROM change c WHERE c.tenant = $1 AND c.ref = $2`)
+		args = []any{q.tenant, q.Ref}
+	} else {
+		sb.WriteString(`
+			SELECT c.* FROM change c
+			WHERE c.tenant = $1 AND c.start_at <= $2 AND c.end_effective >= $3`)
+		args = []any{q.tenant, q.To.UTC(), q.From.UTC()}
+	}
+	args = appendChangeFilters(&sb, args, q)
 	sb.WriteString(" ORDER BY c.start_at ASC, c.ref ASC")
 	if limit, bounded := overFetch(q.Limit); bounded {
 		args = append(args, limit)
@@ -107,7 +157,7 @@ func changeSelection(q ChangeQuery) selection {
 // eventSelection selects the event rows q reads. See ListEvents for the ref predicate.
 func eventSelection(q EventQuery) selection {
 	query := `SELECT e.* FROM event e WHERE e.tenant = $1`
-	args := []any{q.Tenant}
+	args := []any{q.tenant}
 	if q.Ref != "" {
 		args = append(args, q.Ref)
 		query += fmt.Sprintf(
@@ -176,7 +226,7 @@ func (s *Store) ListEvents(
 	// from the named results, which on every error path are the zero values this returns.
 	defer func() {
 		span.SetAttributes(
-			attribute.String("horopter.tenant", q.Tenant),
+			attribute.String("horopter.tenant", q.tenant),
 			attribute.Int("horopter.query.limit", q.Limit),
 			attribute.Int("horopter.query.rows", len(evs)),
 			attribute.Bool("horopter.query.truncated", truncated),
@@ -194,11 +244,11 @@ func (s *Store) ListEvents(
 	rows, err := s.pool.Query(ctx,
 		"SELECT "+eventColumns+" FROM ("+sel.sql+") l ORDER BY "+sel.order, sel.args...)
 	if err != nil {
-		return nil, false, fmt.Errorf("list events for tenant %q: %w", q.Tenant, err)
+		return nil, false, fmt.Errorf("list events for tenant %q: %w", q.tenant, err)
 	}
 	defer rows.Close()
 
-	evs, err = scanEvents(rows, q.Tenant)
+	evs, err = scanEvents(rows, q.tenant)
 	if err != nil {
 		return nil, false, err
 	}
@@ -214,12 +264,12 @@ func (s *Store) listEventsWithinBytes(
 	rows, err := s.pool.Query(ctx, byteCutSQL(eventColumns, sel, len(args)), args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("list events within %d bytes for tenant %q: %w",
-			q.MaxRowTextBytes, q.Tenant, err)
+			q.MaxRowTextBytes, q.tenant, err)
 	}
 	defer rows.Close()
 
 	var more bool
-	evs, err := scanEvents(rows, q.Tenant, &more)
+	evs, err := scanEvents(rows, q.tenant, &more)
 	if err != nil {
 		return nil, false, err
 	}
@@ -237,18 +287,20 @@ func scanEvents(rows pgx.Rows, tenantID string, extra ...any) ([]core.Event, err
 	var evs []core.Event
 	for rows.Next() {
 		var (
-			ev   core.Event
-			idem *string
+			ev     core.Event
+			idem   *string
+			origin string
 		)
 		dest := []any{&ev.ID, &ev.Tenant, &idem, &ev.SchemaVersion, &ev.Source, &ev.Type,
 			&ev.Subject, &ev.Actor, &ev.Title, &ev.OccurredAt, &ev.ReceivedAt,
-			&ev.CorrelationRef, &ev.Attributes}
+			&ev.CorrelationRef, &ev.Attributes, &origin, &ev.Edited}
 		if err := rows.Scan(append(dest, extra...)...); err != nil {
 			return nil, fmt.Errorf("scan event row for tenant %q: %w", tenantID, err)
 		}
 		if idem != nil {
 			ev.IdempotencyKey = *idem
 		}
+		ev.Origin = core.Origin(origin)
 		evs = append(evs, ev)
 	}
 	if err := rows.Err(); err != nil {
@@ -281,7 +333,7 @@ func (s *Store) QueryChanges(
 	// values this returns.
 	defer func() {
 		span.SetAttributes(
-			attribute.String("horopter.tenant", q.Tenant),
+			attribute.String("horopter.tenant", q.tenant),
 			attribute.Int("horopter.query.limit", q.Limit),
 			attribute.Int("horopter.query.rows", len(out)),
 			attribute.Bool("horopter.query.truncated", truncated),
@@ -300,7 +352,7 @@ func (s *Store) QueryChanges(
 	rows, err := s.pool.Query(ctx,
 		"SELECT "+changeColumns+" FROM ("+sel.sql+") l ORDER BY "+sel.order, sel.args...)
 	if err != nil {
-		return nil, false, fmt.Errorf("query changes for tenant %q: %w", q.Tenant, err)
+		return nil, false, fmt.Errorf("query changes for tenant %q: %w", q.tenant, err)
 	}
 	defer rows.Close()
 
@@ -320,7 +372,7 @@ func (s *Store) queryChangesWithinBytes(
 	rows, err := s.pool.Query(ctx, byteCutSQL(changeColumns, sel, len(args)), args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("query changes within %d bytes for tenant %q: %w",
-			q.MaxRowTextBytes, q.Tenant, err)
+			q.MaxRowTextBytes, q.tenant, err)
 	}
 	defer rows.Close()
 
@@ -385,16 +437,29 @@ func scanChanges(rows pgx.Rows, extra ...any) ([]core.Change, error) {
 	return out, nil
 }
 
+// TenantExists reports whether a tenant row named id exists. It answers egress's global
+// credential path: a superuser may name any tenant, and telling a real one from a typo
+// needs a lookup, not an inference from an empty result set.
+func (s *Store) TenantExists(ctx context.Context, id string) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx,
+		"SELECT EXISTS (SELECT 1 FROM tenant WHERE id = $1)", id).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check whether tenant %q exists: %w", id, err)
+	}
+	return exists, nil
+}
+
 // EstimateChanges measures the rows QueryChanges would fetch for q without fetching them: the
 // same tenant, window, filters, order and over-fetch limit. q.MaxRowTextBytes is ignored; an
 // estimate is what decides whether to set it.
 func (s *Store) EstimateChanges(ctx context.Context, q ChangeQuery) (ReadEstimate, error) {
-	return s.estimate(ctx, "EstimateChanges", q.Tenant, changeSelection(q))
+	return s.estimate(ctx, "EstimateChanges", q.tenant, changeSelection(q))
 }
 
 // EstimateEvents measures the rows ListEvents would fetch for q, as EstimateChanges does.
 func (s *Store) EstimateEvents(ctx context.Context, q EventQuery) (ReadEstimate, error) {
-	return s.estimate(ctx, "EstimateEvents", q.Tenant, eventSelection(q))
+	return s.estimate(ctx, "EstimateEvents", q.tenant, eventSelection(q))
 }
 
 // estimate sums the row text of every row sel selects and takes the first row's by sel's

@@ -12,7 +12,7 @@ ALTER TABLE change ADD COLUMN first_seen_at TIMESTAMPTZ;
 -- single-column model destroyed. first_seen_at = start_at with started_at left NULL
 -- encodes "we do not know" rather than guessing, which is the only honest answer a system
 -- of record can give here. Correct values for existing rows need a replay of the event
--- log: horopter-migrate --rebuild-tenant=<id>.
+-- log: horoctl-migrate --rebuild-tenant=<id>.
 UPDATE change SET first_seen_at = start_at;
 
 ALTER TABLE change ALTER COLUMN first_seen_at SET NOT NULL;

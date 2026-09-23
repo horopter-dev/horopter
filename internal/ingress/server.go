@@ -12,26 +12,22 @@ package ingress
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
+	"path"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"horopter.dev/horopter/internal/auth"
 	"horopter.dev/horopter/internal/core"
 	"horopter.dev/horopter/internal/store/postgres"
 )
-
-// DefaultTenant is used when a request omits one. v0.1 runs single-tenant in practice,
-// but every write is still tenant-scoped so enabling multi-tenancy is configuration.
-const DefaultTenant = "default"
 
 // MaxBodyBytes caps a request body. A fully populated event — every field set, a generous
 // attribute map — is a few kilobytes, and a CloudEvents envelope adds a little more, so
@@ -46,37 +42,34 @@ type Server struct {
 	store   *postgres.Store
 	clock   func() time.Time
 	entropy io.Reader
-	token   string
+	authn   *auth.Authenticator
 }
 
 // New returns an ingress Server. clock and entropy are injected so handlers stay
 // deterministic under test.
 //
-// An empty token is refused here rather than left to callers to check.
-// subtle.ConstantTimeCompare of two empty slices returns 1, so a Server built with ""
-// authenticates a request carrying no Authorization header at all — the write side of a
-// system of record, open to anyone who can reach the port. Enforcing it in the constructor
-// makes that structurally impossible instead of dependent on every caller remembering; it
-// returns an error rather than panicking because a panic is not this project's error
-// strategy.
+// A nil authenticator is refused here rather than left to callers to check: every write
+// route is gated on it, so a Server built without one would either panic on the first
+// request or, worse, need every caller to remember the guard itself.
 func New(
-	s *postgres.Store, clock func() time.Time, entropy io.Reader, token string,
+	s *postgres.Store, clock func() time.Time, entropy io.Reader, authn *auth.Authenticator,
 ) (*Server, error) {
-	if token == "" {
+	if authn == nil {
 		return nil, errors.New(
-			"ingress token is required; set HOROPTER_INGRESS_TOKEN to a non-empty secret — " +
-				"an empty token authenticates every request, including ones sending no " +
-				"credentials at all")
+			"ingress requires an authenticator; build one with auth.New over a credential " +
+				"store — a nil authenticator would panic on the first request rather than " +
+				"reject it")
 	}
-	return &Server{store: s, clock: clock, entropy: entropy, token: token}, nil
+	return &Server{store: s, clock: clock, entropy: entropy, authn: authn}, nil
 }
 
 // Routes returns the handler for every ingress endpoint. Probes are unauthenticated;
-// everything else requires the bearer token.
+// everything else requires a credential granting the append capability.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("POST /v1/events", s.auth(http.HandlerFunc(s.postEvent)))
-	mux.Handle("POST /v1/events/cloudevents", s.auth(http.HandlerFunc(s.postCloudEvent)))
+	mux.Handle("POST /v1/events", s.authn.Require(auth.CapAppend)(http.HandlerFunc(s.postEvent)))
+	mux.Handle("POST /v1/events/cloudevents",
+		s.authn.Require(auth.CapAppend)(http.HandlerFunc(s.postCloudEvent)))
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 	// otelhttp gives every route a server span carrying the http.* semantic
@@ -91,19 +84,6 @@ func (s *Server) Routes() http.Handler {
 	return otelhttp.NewHandler(mux, "")
 }
 
-// auth enforces the bearer token using a constant-time comparison.
-func (s *Server) auth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) != 1 {
-			writeError(w, http.StatusUnauthorized,
-				"missing or invalid bearer token; set Authorization: Bearer <token>")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
 // healthz reports process liveness only. It must not touch the database: a failing
 // liveness probe restarts the pod, and restarting will not fix a database outage.
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -113,7 +93,7 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 // readyz reports whether this instance can serve traffic, which requires the database.
 // A failing readiness probe removes the pod from the load balancer without killing it.
 //
-// The probe answers without a token, and pgx formats a failed connection with the
+// The probe answers without a credential, and pgx formats a failed connection with the
 // database user, database name, host and port, so the error goes to the server log and
 // the body says only that the database is unreachable — appendFailed's rule, applied to
 // the one route on this daemon that anyone can call.
@@ -127,16 +107,20 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 }
 
 type eventRequest struct {
-	Tenant         string         `json:"tenant"`
-	Source         string         `json:"source"`
-	Type           string         `json:"type"`
-	Subject        string         `json:"subject"`
-	Actor          string         `json:"actor"`
-	Title          string         `json:"title"`
-	OccurredAt     time.Time      `json:"occurred_at"`
-	CorrelationRef string         `json:"correlation_ref"`
-	IdempotencyKey string         `json:"idempotency_key"`
-	Attributes     map[string]any `json:"attributes"`
+	// Tenant is json.RawMessage, not string, so a present-but-null "tenant":null is
+	// distinguishable from an absent key: unmarshaling null into *string or string both
+	// leave the zero value, indistinguishable from omission, and the rule is reject a
+	// caller who sends the key at all, whatever its value — not just a non-empty one.
+	Tenant         json.RawMessage `json:"tenant"`
+	Source         string          `json:"source"`
+	Type           string          `json:"type"`
+	Subject        string          `json:"subject"`
+	Actor          string          `json:"actor"`
+	Title          string          `json:"title"`
+	OccurredAt     time.Time       `json:"occurred_at"`
+	CorrelationRef string          `json:"correlation_ref"`
+	IdempotencyKey string          `json:"idempotency_key"`
+	Attributes     map[string]any  `json:"attributes"`
 }
 
 // recordTenant puts the resolved tenant on the request's span. The tenant is the
@@ -144,6 +128,63 @@ type eventRequest struct {
 // exists for every request rather than only on the ones that reach the store.
 func recordTenant(ctx context.Context, tenantID string) {
 	trace.SpanFromContext(ctx).SetAttributes(attribute.String("horopter.tenant", tenantID))
+}
+
+// subjectAllowed reports whether subject is covered by pattern, an empty pattern meaning
+// the credential is unrestricted.
+//
+// An empty subject never satisfies a non-empty pattern, checked before path.Match rather
+// than left to it: path.Match's "*" matches an empty name too, so without this guard an
+// absent subject could satisfy a narrowing pattern by that accident rather than because a
+// producer actually posted one.
+func subjectAllowed(pattern, subject string) bool {
+	if pattern == "" {
+		return true
+	}
+	if subject == "" {
+		return false
+	}
+	ok, err := path.Match(pattern, subject)
+	if err != nil {
+		// A malformed pattern is an issuing defect, not this request's fault, and the
+		// safe default is the same refusal a genuine mismatch gets.
+		slog.Error("credential subject_pattern is not a valid pattern",
+			"pattern", pattern, "error", err)
+		return false
+	}
+	return ok
+}
+
+// resolveRef validates the producer's ref as given, prefixes it with the credential's
+// locus, and caps the composed form — the form that is actually stored, so the length
+// cap applies to what is stored rather than to what the producer sent. An empty ref
+// stays empty: a point event has no correlation ref to namespace.
+//
+// ValidateRef must run on ref BEFORE it is composed with locus, not after. Composing
+// first can move a leading or trailing space away from the string's edge: " deploy-1"
+// fails the whitespace check, but "github/ deploy-1" would not, since the space sits in
+// the middle once prefixed. That check exists for exactly this producer mistake — an
+// untrimmed ref posts a start under one ref and its completion under another, and
+// nothing errors — so disabling it for the composed form defeats the reason it exists.
+func resolveRef(locus, ref string) (string, error) {
+	if ref == "" {
+		return "", nil
+	}
+	if err := auth.ValidateRef(ref); err != nil {
+		return "", err
+	}
+	stored := locus + "/" + ref
+	if len(stored) > auth.MaxRefBytes {
+		return "", fmt.Errorf("ref %q is %d bytes once prefixed with locus %q; the "+
+			"limit is %d", ref, len(stored), locus, auth.MaxRefBytes)
+	}
+	return stored, nil
+}
+
+// subjectForbidden answers a subject the credential's subject_pattern does not cover.
+func subjectForbidden(w http.ResponseWriter, pattern, subject string) {
+	writeError(w, http.StatusForbidden, fmt.Sprintf(
+		"subject %q is outside this credential's scope %q", subject, pattern))
 }
 
 func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
@@ -154,15 +195,27 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 			"; expected an object with source, type, subject and occurred_at")
 		return
 	}
-	now := s.clock()
-	tenantID := req.Tenant
-	if tenantID == "" {
-		tenantID = DefaultTenant
+	if req.Tenant != nil {
+		writeError(w, http.StatusBadRequest,
+			"tenant is derived from the credential; remove it from the request body")
+		return
 	}
-	recordTenant(r.Context(), tenantID)
+	p, _ := auth.PrincipalFrom(r.Context())
+	if !subjectAllowed(p.SubjectPattern, req.Subject) {
+		subjectForbidden(w, p.SubjectPattern, req.Subject)
+		return
+	}
+	ref, err := resolveRef(p.Locus, req.CorrelationRef)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	now := s.clock()
+	recordTenant(r.Context(), p.Tenant.String())
 	ev := core.Event{
 		ID:             core.NewULID(now, s.entropy),
-		Tenant:         tenantID,
+		Tenant:         p.Tenant.String(),
 		IdempotencyKey: req.IdempotencyKey,
 		SchemaVersion:  core.CurrentSchemaVersion,
 		Source:         req.Source,
@@ -172,8 +225,9 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		Title:          req.Title,
 		OccurredAt:     req.OccurredAt,
 		ReceivedAt:     now,
-		CorrelationRef: req.CorrelationRef,
+		CorrelationRef: ref,
 		Attributes:     req.Attributes,
+		Origin:         p.Origin,
 	}
 	s.append(w, r, ev)
 }

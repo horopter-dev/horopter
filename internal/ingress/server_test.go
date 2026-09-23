@@ -25,6 +25,8 @@ import (
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"horopter.dev/horopter/internal/auth"
+	"horopter.dev/horopter/internal/core"
 	"horopter.dev/horopter/internal/ingress"
 	"horopter.dev/horopter/internal/store/postgres"
 	"horopter.dev/horopter/internal/testdb"
@@ -32,12 +34,10 @@ import (
 
 var fixed = time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
 
-const testToken = "test-token"
-
-// The tests share a database that nothing truncates, so every tenant and idempotency
-// key a test puts into it has to be one no earlier execution used — otherwise a POST
-// that should create a row finds one already there and returns 200 where the test
-// expects 201, failing for a reason unrelated to the code under test.
+// The tests share a database that nothing truncates, so every identifier a test puts
+// into it has to be one no earlier execution used — otherwise a POST that should create
+// a row finds one already there and returns 200 where the test expects 201, failing for
+// a reason unrelated to the code under test.
 //
 // procToken separates one `go test` process from the next; idSeq separates every call
 // within a process, which is what makes -count=N do real work instead of colliding
@@ -52,14 +52,6 @@ func uniqueToken() string {
 	return procToken + "-" + strconv.FormatUint(idSeq.Add(1), 36)
 }
 
-// tenant returns a tenant id unique to this call, naming the test for traceability.
-func tenant(t *testing.T) string {
-	t.Helper()
-	tn := "test-" + t.Name() + "-" + uniqueToken()
-	testdb.DropTenantAfter(t, tn)
-	return tn
-}
-
 // idemKey returns an idempotency key unique to this call. suffix names the call for
 // traceability and plays no part in uniqueness.
 func idemKey(t *testing.T, suffix string) string {
@@ -67,7 +59,19 @@ func idemKey(t *testing.T, suffix string) string {
 	return uniqueToken() + "-" + t.Name() + "-" + suffix
 }
 
-func newServer(t *testing.T, opts ...postgres.Option) (http.Handler, *postgres.Store) {
+// ingressFixture is a running server plus two credentials tenant now comes from instead
+// of the request body: producerKey, bound to producerTenant with locus "github" and no
+// subject_pattern, and scopedKey, bound to its own tenant with subject_pattern
+// "acme/prod".
+type ingressFixture struct {
+	srv            http.Handler
+	store          *postgres.Store
+	producerKey    string
+	producerTenant core.TenantID
+	scopedKey      string
+}
+
+func newIngressFixture(t *testing.T, opts ...postgres.Option) ingressFixture {
 	t.Helper()
 	v := os.Getenv("HOROPTER_TEST_DSN")
 	if v == "" {
@@ -76,42 +80,379 @@ func newServer(t *testing.T, opts ...postgres.Option) (http.Handler, *postgres.S
 	s, err := postgres.Open(context.Background(), v, opts...)
 	require.NoError(t, err)
 	t.Cleanup(s.Close)
-	// entropy is crypto/rand.Reader, not a seeded math/rand source, and that is
-	// deliberate: a seeded PRNG was tried here for determinism, but determinism is
-	// exactly what caused a collision — the same seed plus the same fixed clock below
-	// produces a byte-identical first ULID in every test, and event.id is a global
-	// primary key, so the second test to insert one fails on a unique-constraint
-	// violation. Nothing in this suite asserts on a generated event id (only on refs,
-	// status codes and response bodies), so the determinism bought nothing while
-	// guaranteeing a collision. crypto/rand.Reader is also what cmd/horopter-ingress
-	// uses in production, so the tests exercise the real entropy source.
-	srv, err := ingress.New(s, func() time.Time { return fixed }, rand.Reader, testToken)
+
+	clock := func() time.Time { return fixed }
+	authn := auth.New(auth.NewStore(s.Pool()), clock, auth.DefaultOptions())
+	srv, err := ingress.New(s, clock, rand.Reader, authn)
 	require.NoError(t, err)
-	return srv.Routes(), s
+
+	producerTenant, producerKey := seedCredential(t, s, "github", "")
+	_, scopedKey := seedCredential(t, s, "github", "acme/prod")
+
+	return ingressFixture{
+		srv: srv.Routes(), store: s,
+		producerKey: producerKey, producerTenant: producerTenant, scopedKey: scopedKey,
+	}
 }
 
-func post(t *testing.T, h http.Handler, path, body, token string) *httptest.ResponseRecorder {
+// seedCredential inserts a tenant, a principal and a producer credential scoped to locus
+// and subjectPattern (empty for none), registering cleanup for all three in the order
+// their foreign keys require. It returns the tenant, as the row-backed core.TenantID a
+// stored event's tenant is compared against, and the plaintext key SplitKey resolves.
+//
+// The insert goes through s's own pool, live for the call; the cleanup goes through
+// testdb's shared pool instead, since several tests in this package close s's pool before
+// the test ends, and a cleanup racing that closed pool would silently leave the row behind
+// for testdb's own tenant cleanup to trip over as a foreign-key violation.
+func seedCredential(
+	t *testing.T, s *postgres.Store, locus, subjectPattern string,
+) (core.TenantID, string) {
+	t.Helper()
+	key, prefix, hash, err := auth.NewKey(rand.Reader)
+	require.NoError(t, err)
+
+	tenantID := testdb.NewTenant(t, "tnt_test_"+prefix)
+	principalID := "prn_test_" + prefix
+	credentialID := "cred_test_" + prefix
+	ctx := context.Background()
+	pool := s.Pool()
+
+	_, err = pool.Exec(ctx, `INSERT INTO principal (id, display_name) VALUES ($1, $1)`,
+		principalID)
+	require.NoError(t, err)
+	t.Cleanup(func() { deleteRow(t, "principal", principalID) })
+
+	var pattern *string
+	if subjectPattern != "" {
+		pattern = &subjectPattern
+	}
+	_, err = pool.Exec(ctx, `
+		INSERT INTO credential (id, principal_id, type, key_prefix, key_hash, role,
+		                        tenant_id, source, locus, subject_pattern)
+		VALUES ($1, $2, 'machine_key', $3, $4, 'producer', $5, 'test', $6, $7)`,
+		credentialID, principalID, prefix, hash, tenantID, locus, pattern)
+	require.NoError(t, err)
+	t.Cleanup(func() { deleteRow(t, "credential", credentialID) })
+
+	return core.TenantIDFromRow(tenantID), key
+}
+
+// seedGlobalCredential inserts a principal and a credential of role with tenant_id left
+// NULL — the shape `horoctl admin keys issue --role producer` produces with --tenant
+// omitted, and the shape --role superuser always produces, since credential.tenant_id is
+// nullable. Mirrors seedCredential above, differing only in the tenant column and the
+// caller-chosen role in place of a fixed "producer".
+func seedGlobalCredential(t *testing.T, s *postgres.Store, role string) string {
+	t.Helper()
+	key, prefix, hash, err := auth.NewKey(rand.Reader)
+	require.NoError(t, err)
+
+	principalID := "prn_test_" + prefix
+	credentialID := "cred_test_" + prefix
+	ctx := context.Background()
+	pool := s.Pool()
+
+	_, err = pool.Exec(ctx, `INSERT INTO principal (id, display_name) VALUES ($1, $1)`,
+		principalID)
+	require.NoError(t, err)
+	t.Cleanup(func() { deleteRow(t, "principal", principalID) })
+
+	_, err = pool.Exec(ctx, `
+		INSERT INTO credential (id, principal_id, type, key_prefix, key_hash, role,
+		                        tenant_id, source, locus)
+		VALUES ($1, $2, 'machine_key', $3, $4, $5, NULL, 'test', 'test')`,
+		credentialID, principalID, prefix, hash, role)
+	require.NoError(t, err)
+	t.Cleanup(func() { deleteRow(t, "credential", credentialID) })
+
+	return key
+}
+
+// eventCountBySubject counts event rows carrying subject, for a test that must prove a
+// rejected append wrote nothing rather than trusting the response code alone.
+func eventCountBySubject(t *testing.T, store *postgres.Store, subject string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, store.Pool().QueryRow(context.Background(),
+		`SELECT count(*) FROM event WHERE subject = $1`, subject).Scan(&n))
+	return n
+}
+
+// deleteRow removes id from table through testdb's shared, never-closed pool. Failures are
+// logged, not fatal, matching testdb's own cleanup helper: residue is exactly the condition
+// being removed, so failing an otherwise passing test over it would trade a tidy database
+// for a flaky suite.
+func deleteRow(t *testing.T, table, id string) {
+	t.Helper()
+	pool, err := testdb.Pool()
+	if err != nil {
+		t.Logf("%s cleanup for %q: open pool: %v", table, id, err)
+		return
+	}
+	if _, err := pool.Exec(context.Background(),
+		"DELETE FROM "+table+" WHERE id = $1", id); err != nil {
+		t.Logf("%s cleanup for %q: %v", table, id, err)
+	}
+}
+
+func doPost(
+	t *testing.T, h http.Handler, path, contentType, key, body string,
+) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(body))
-	req.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", contentType)
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
 }
 
+func post(t *testing.T, h http.Handler, key, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	return doPost(t, h, "/v1/events", "application/json", key, body)
+}
+
+func postCE(t *testing.T, h http.Handler, key, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	return doPost(t, h, "/v1/events/cloudevents", "application/cloudevents+json", key, body)
+}
+
+// storedRow is the columns of a stored event that never appear in the 201 response, so
+// tests that need them read the row back rather than parsing the body a second way.
+type storedRow struct {
+	Tenant         string
+	CorrelationRef string
+	Origin         core.Origin
+	SchemaVersion  int
+}
+
+// storedEvent reads back the row rec's body names by id. Callers that care about the
+// response status check it themselves first, so a wrong status fails at its own
+// assertion rather than being masked by a confusing "no rows" from this helper.
+func storedEvent(t *testing.T, store *postgres.Store, rec *httptest.ResponseRecorder) storedRow {
+	t.Helper()
+	var resp struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	var row storedRow
+	var origin string
+	err := store.Pool().QueryRow(context.Background(),
+		`SELECT tenant, correlation_ref, origin, schema_version FROM event WHERE id = $1`,
+		resp.ID,
+	).Scan(&row.Tenant, &row.CorrelationRef, &origin, &row.SchemaVersion)
+	require.NoError(t, err)
+	row.Origin = core.Origin(origin)
+	return row
+}
+
+const validBody = `{"source":"s","type":"t.started","subject":"acme/prod",
+	"occurred_at":"2026-09-22T00:00:00Z"}`
+
+// bodyWith appends extra top-level JSON fields to validBody's object.
+func bodyWith(extra string) string {
+	return fmt.Sprintf(`{"source":"s","type":"t.started","subject":"acme/prod",
+		"occurred_at":"2026-09-22T00:00:00Z",%s}`, extra)
+}
+
+func bodyWithRef(ref string) string {
+	return fmt.Sprintf(`{"source":"s","type":"t.started","subject":"acme/prod",
+		"occurred_at":"2026-09-22T00:00:00Z","correlation_ref":%q}`, ref)
+}
+
+func bodySubject(subject string) string {
+	return fmt.Sprintf(`{"source":"s","type":"t.started","subject":%q,
+		"occurred_at":"2026-09-22T00:00:00Z"}`, subject)
+}
+
+// bodyCE builds a minimal CloudEvents envelope for the given subject, omitting the subject
+// attribute entirely when it is empty rather than sending it as "". The CloudEvents spec —
+// and this SDK's Validate — rejects a PRESENT-but-empty subject as malformed ("if present,
+// MUST be a non-empty string"), so an envelope carrying no subject at all is the only way
+// to drive the "absent subject" case as far as subjectAllowed instead of failing earlier
+// as a 400.
+func bodyCE(t *testing.T, subject string) string {
+	t.Helper()
+	var subjectField string
+	if subject != "" {
+		subjectField = fmt.Sprintf(`,"subject":%q`, subject)
+	}
+	return fmt.Sprintf(`{"specversion":"1.0","id":%q,"source":"/buildkite/pipelines/api",
+		"type":"deployment.started","time":"2026-09-14T10:00:00Z",
+		"datacontenttype":"application/json","data":{}%s}`,
+		idemKey(t, "ce-subject"), subjectField)
+}
+
+func TestPostRejectsABodyCarryingTenant(t *testing.T) {
+	f := newIngressFixture(t)
+	rec := post(t, f.srv, f.producerKey, `{"tenant":"other","source":"s","type":"t.started",
+		"correlation_ref":"r","occurred_at":"2026-09-22T00:00:00Z"}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "tenant is derived from the credential")
+}
+
+// TestPostRejectsABodyCarryingANullTenant pins that a present-but-null "tenant" is
+// rejected exactly like a present-and-populated one. A body is caller-controlled, so a
+// producer sending the key at all — whatever its value — must be told, not just one
+// sending a non-empty value; treating null as "absent" is how a string-typed field would
+// have silently let a null-tenant body through the same check that catches every other
+// value.
+func TestPostRejectsABodyCarryingANullTenant(t *testing.T) {
+	f := newIngressFixture(t)
+	rec := post(t, f.srv, f.producerKey, `{"tenant":null,"source":"s","type":"t.started",
+		"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z"}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "tenant is derived from the credential")
+}
+
+func TestPostStoresTheTenantFromTheCredential(t *testing.T) {
+	f := newIngressFixture(t)
+	rec := post(t, f.srv, f.producerKey, validBody)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Equal(t, f.producerTenant.String(), storedEvent(t, f.store, rec).Tenant)
+}
+
+// TestPostRejectsAGlobalAppendCredential and TestCloudEventPostRejectsAGlobalAppendCredential
+// pin that a tenant-less append credential — horoctl admin keys issue --role producer
+// with --tenant omitted, or any --role superuser credential, since credential.tenant_id
+// is nullable — is refused by core.Event.Validate's tenant check, not stamped some other
+// way. Tenant is set to p.Tenant.String(), which is "" for such a credential, and
+// Validate rejects an empty tenant with a 400.
+//
+// Egress pins the read-side equivalent, TestASuperuserNamingNoTenantIsRejected in
+// internal/egress; ingress had no counterpart on either route. The two routes are
+// separate handlers that each stamp Tenant from the credential independently, and this
+// package has already been bitten once by a guard exercised on the native route and
+// merely assumed on CloudEvents — subjectAllowed had no CloudEvents-route test until
+// TestSubjectPatternIsEnforcedOnCloudEvents was added — so each route gets its own pin
+// here rather than one standing in for both.
+func TestPostRejectsAGlobalAppendCredential(t *testing.T) {
+	f := newIngressFixture(t)
+	key := seedGlobalCredential(t, f.store, "superuser")
+	subject := idemKey(t, "global-native")
+
+	rec := post(t, f.srv, key, bodySubject(subject))
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "tenant is required")
+	assert.Equal(t, 0, eventCountBySubject(t, f.store, subject),
+		"a rejected append must write no event row")
+}
+
+func TestCloudEventPostRejectsAGlobalAppendCredential(t *testing.T) {
+	f := newIngressFixture(t)
+	key := seedGlobalCredential(t, f.store, "superuser")
+	subject := idemKey(t, "global-ce")
+
+	rec := postCE(t, f.srv, key, bodyCE(t, subject))
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "tenant is required")
+	assert.Equal(t, 0, eventCountBySubject(t, f.store, subject),
+		"a rejected append must write no event row")
+}
+
+func TestPostPrefixesTheRefWithTheCredentialLocus(t *testing.T) {
+	f := newIngressFixture(t) // producerKey's locus is "github"
+	rec := post(t, f.srv, f.producerKey, bodyWithRef("deploy-1"))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Equal(t, "github/deploy-1", storedEvent(t, f.store, rec).CorrelationRef,
+		"the response echoes the stored ref, which is what a query needs")
+}
+
+func TestPostSetsOriginFromTheCredentialType(t *testing.T) {
+	f := newIngressFixture(t)
+	rec := post(t, f.srv, f.producerKey, validBody)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Equal(t, core.OriginProcess, storedEvent(t, f.store, rec).Origin)
+}
+
+func TestPostIgnoresOriginInTheBody(t *testing.T) {
+	f := newIngressFixture(t)
+	rec := post(t, f.srv, f.producerKey, bodyWith(`"origin":"human"`))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Equal(t, core.OriginProcess, storedEvent(t, f.store, rec).Origin,
+		"origin is server-set; a caller-asserted value would be worthless")
+}
+
+func TestSubjectPatternIsEnforced(t *testing.T) {
+	f := newIngressFixture(t)
+	assert.Equal(t, http.StatusCreated,
+		post(t, f.srv, f.scopedKey, bodySubject("acme/prod")).Code)
+	assert.Equal(t, http.StatusForbidden,
+		post(t, f.srv, f.scopedKey, bodySubject("acme/dev")).Code)
+}
+
+func TestAnEmptySubjectDoesNotMatchAPattern(t *testing.T) {
+	f := newIngressFixture(t)
+	assert.Equal(t, http.StatusForbidden, post(t, f.srv, f.scopedKey, bodySubject("")).Code,
+		"an absent subject must not satisfy a narrowing pattern by accident")
+}
+
+// TestSubjectPatternIsEnforcedOnCloudEvents mirrors TestSubjectPatternIsEnforced for the
+// CloudEvents route. postCloudEvent calls the same subjectAllowed guard as postEvent, in
+// the same order, but nothing before this drove it through the HTTP handler: every other
+// CloudEvents test in this suite uses the unscoped producer credential, and
+// cloudevents_test.go calls eventFromCloudEvent directly rather than going through
+// ServeHTTP. Without this, a regression deleting the guard from postCloudEvent alone would
+// pass the entire suite.
+func TestSubjectPatternIsEnforcedOnCloudEvents(t *testing.T) {
+	f := newIngressFixture(t)
+	assert.Equal(t, http.StatusCreated,
+		postCE(t, f.srv, f.scopedKey, bodyCE(t, "acme/prod")).Code)
+	assert.Equal(t, http.StatusForbidden,
+		postCE(t, f.srv, f.scopedKey, bodyCE(t, "acme/dev")).Code)
+}
+
+// TestAnEmptySubjectDoesNotMatchAPatternOnCloudEvents mirrors
+// TestAnEmptySubjectDoesNotMatchAPattern for the CloudEvents route.
+func TestAnEmptySubjectDoesNotMatchAPatternOnCloudEvents(t *testing.T) {
+	f := newIngressFixture(t)
+	assert.Equal(t, http.StatusForbidden, postCE(t, f.srv, f.scopedKey, bodyCE(t, "")).Code,
+		"an absent subject must not satisfy a narrowing pattern by accident")
+}
+
+func TestRefAtTheCapIsAcceptedAndOneOverIsRejected(t *testing.T) {
+	f := newIngressFixture(t)
+	// The locus prefix counts toward the stored ref, so the cap applies to what is stored.
+	atCap := strings.Repeat("x", auth.MaxRefBytes-len("github/"))
+	assert.Equal(t, http.StatusCreated, post(t, f.srv, f.producerKey, bodyWithRef(atCap)).Code)
+	assert.Equal(t, http.StatusBadRequest,
+		post(t, f.srv, f.producerKey, bodyWithRef(atCap+"x")).Code)
+}
+
+// TestPostRejectsARefWithLeadingWhitespaceEvenAfterTheLocusPrefix pins that the ref's
+// whitespace rule is checked before it is composed with the locus, not after. Composing
+// first moves a leading space away from the string's edge — "github/ dep-1" is not
+// caught by the same check that rejects " dep-1" — which would silently admit the one
+// producer mistake that check exists to catch: an untrimmed ref posts a start under one
+// ref and its completion under another, and nothing errors.
+func TestPostRejectsARefWithLeadingWhitespaceEvenAfterTheLocusPrefix(t *testing.T) {
+	f := newIngressFixture(t)
+	rec := post(t, f.srv, f.producerKey, bodyWithRef(" deploy-1"))
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "whitespace")
+}
+
+func TestStoredEventsCarrySchemaVersionTwo(t *testing.T) {
+	f := newIngressFixture(t)
+	assert.Equal(t, 2, core.CurrentSchemaVersion)
+	rec := post(t, f.srv, f.producerKey, validBody)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	assert.Equal(t, 2, storedEvent(t, f.store, rec).SchemaVersion)
+}
+
 func TestPostEventCreatesChange(t *testing.T) {
-	h, _ := newServer(t)
-	body := fmt.Sprintf(`{
-		"tenant":%q,"source":"buildkite","type":"deployment.started",
+	f := newIngressFixture(t)
+	body := fmt.Sprintf(`{"source":"buildkite","type":"deployment.started",
 		"subject":"acme/prod","actor":"ci-bot","occurred_at":"2026-09-14T10:00:00Z",
 		"correlation_ref":"dep-7","idempotency_key":%q,
-		"attributes":{"service.version":"2.5.0"}}`, tenant(t), idemKey(t, "1"))
-	rec := post(t, h, "/v1/events", body, testToken)
+		"attributes":{"service.version":"2.5.0"}}`, idemKey(t, "1"))
+	rec := post(t, f.srv, f.producerKey, body)
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), `"ref":"dep-7"`)
+	assert.Contains(t, rec.Body.String(), `"ref":"github/dep-7"`)
 }
 
 // TestPostEventRecordsTheTenantOnTheSpan pins horopter.tenant on the request's server
@@ -131,14 +472,8 @@ func TestPostEventRecordsTheTenantOnTheSpan(t *testing.T) {
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)))
 	t.Cleanup(func() { otel.SetTracerProvider(prev) })
 
-	h, _ := newServer(t)
-	// A tenant of this test's own, not a literal: "acme" is a name the seeded demo data
-	// also uses, so a literal wrote a row per run into a tenant an operator looks at.
-	tn := tenant(t)
-	body := fmt.Sprintf(
-		`{"tenant":%q,"source":"ci","type":"deployment.started",`+
-			`"subject":"acme/prod","occurred_at":"2026-09-15T10:00:00Z"}`, tn)
-	resp := post(t, h, "/v1/events", body, testToken)
+	f := newIngressFixture(t)
+	resp := post(t, f.srv, f.producerKey, validBody)
 	require.Equal(t, http.StatusCreated, resp.Code)
 
 	var found bool
@@ -147,7 +482,7 @@ func TestPostEventRecordsTheTenantOnTheSpan(t *testing.T) {
 			continue
 		}
 		for _, kv := range span.Attributes() {
-			if kv.Key == "horopter.tenant" && kv.Value.AsString() == tn {
+			if kv.Key == "horopter.tenant" && kv.Value.AsString() == f.producerTenant.String() {
 				found = true
 			}
 		}
@@ -156,54 +491,43 @@ func TestPostEventRecordsTheTenantOnTheSpan(t *testing.T) {
 }
 
 func TestPostDuplicateIdempotencyKeyReturns200(t *testing.T) {
-	h, _ := newServer(t)
-	body := fmt.Sprintf(`{"tenant":%q,"source":"ci","type":"deployment.started",
-		"subject":"acme/prod","occurred_at":"2026-09-14T10:00:00Z",
-		"correlation_ref":"dep-7","idempotency_key":%q}`, tenant(t), idemKey(t, "dup"))
-	rec1 := post(t, h, "/v1/events", body, testToken)
+	f := newIngressFixture(t)
+	body := bodyWith(fmt.Sprintf(`"idempotency_key":%q`, idemKey(t, "dup")))
+	rec1 := post(t, f.srv, f.producerKey, body)
 	require.Equal(t, http.StatusCreated, rec1.Code, rec1.Body.String())
-	assert.Equal(t, http.StatusOK, post(t, h, "/v1/events", body, testToken).Code,
+	assert.Equal(t, http.StatusOK, post(t, f.srv, f.producerKey, body).Code,
 		"a CI retry is normal traffic, not an error")
 }
 
 func TestPostInvalidEventReturns400WithReason(t *testing.T) {
-	h, _ := newServer(t)
-	body := fmt.Sprintf(`{"tenant":%q,"source":"ci","type":"deployment.started",
-		  "occurred_at":"2026-09-14T10:00:00Z"}`, tenant(t))
-	rec := post(t, h, "/v1/events", body, testToken)
+	f := newIngressFixture(t)
+	body := `{"source":"ci","type":"deployment.started","occurred_at":"2026-09-14T10:00:00Z"}`
+	rec := post(t, f.srv, f.producerKey, body)
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "subject")
 }
 
-func TestIngressRequiresBearerToken(t *testing.T) {
-	h, _ := newServer(t)
-	body := fmt.Sprintf(`{"tenant":%q,"source":"ci","type":"deployment.started",
-		"subject":"acme/prod","occurred_at":"2026-09-14T10:00:00Z"}`, tenant(t))
-	assert.Equal(t, http.StatusUnauthorized, post(t, h, "/v1/events", body, "").Code)
-	assert.Equal(t, http.StatusUnauthorized, post(t, h, "/v1/events", body, "wrong").Code)
+func TestIngressRequiresACredential(t *testing.T) {
+	f := newIngressFixture(t)
+	assert.Equal(t, http.StatusUnauthorized, post(t, f.srv, "", validBody).Code)
+	assert.Equal(t, http.StatusUnauthorized, post(t, f.srv, "wrong", validBody).Code)
 }
 
-func TestHealthzNeedsNoToken(t *testing.T) {
-	h, _ := newServer(t)
+func TestHealthzNeedsNoCredential(t *testing.T) {
+	f := newIngressFixture(t)
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	f.srv.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code, "probes must not require credentials")
 }
 
 func TestCloudEventIngest(t *testing.T) {
-	h, _ := newServer(t)
+	f := newIngressFixture(t)
 	body := fmt.Sprintf(`{"specversion":"1.0","id":%q,"source":"/buildkite/pipelines/api",
 		"type":"deployment.started","subject":"acme/prod","time":"2026-09-14T10:00:00Z",
 		"datacontenttype":"application/json",
-		"data":{"tenant":%q,"correlation_ref":"dep-7","service.version":"2.5.0"}}`,
-		idemKey(t, "ce"), tenant(t))
-	req := httptest.NewRequest(http.MethodPost, "/v1/events/cloudevents",
-		bytes.NewBufferString(body))
-	req.Header.Set("Content-Type", "application/cloudevents+json")
-	req.Header.Set("Authorization", "Bearer "+testToken)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+		"data":{"correlation_ref":"dep-7","service.version":"2.5.0"}}`, idemKey(t, "ce"))
+	rec := postCE(t, f.srv, f.producerKey, body)
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
@@ -216,7 +540,9 @@ func TestCloudEventIngest(t *testing.T) {
 // zero coverage in that environment. If a future change reintroduces a
 // Pool().Ping call into healthz, this test panics on the nil store and fails.
 func TestHealthzWorksWithNilStore(t *testing.T) {
-	srv, err := ingress.New(nil, func() time.Time { return fixed }, rand.Reader, testToken)
+	clock := func() time.Time { return fixed }
+	authn := auth.New(nil, clock, auth.DefaultOptions())
+	srv, err := ingress.New(nil, clock, rand.Reader, authn)
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -234,17 +560,12 @@ func TestHealthzWorksWithNilStore(t *testing.T) {
 // The spec marks id REQUIRED; rejecting it here is what makes that failure impossible
 // instead of latent.
 func TestCloudEventMissingIDReturns400(t *testing.T) {
-	h, _ := newServer(t)
-	body := fmt.Sprintf(`{"specversion":"1.0","source":"/buildkite/pipelines/api",
+	f := newIngressFixture(t)
+	body := `{"specversion":"1.0","source":"/buildkite/pipelines/api",
 		"type":"deployment.started","subject":"acme/prod","time":"2026-09-14T10:00:00Z",
 		"datacontenttype":"application/json",
-		"data":{"tenant":%q,"correlation_ref":"dep-7"}}`, tenant(t))
-	req := httptest.NewRequest(http.MethodPost, "/v1/events/cloudevents",
-		bytes.NewBufferString(body))
-	req.Header.Set("Content-Type", "application/cloudevents+json")
-	req.Header.Set("Authorization", "Bearer "+testToken)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+		"data":{"correlation_ref":"dep-7"}}`
+	rec := postCE(t, f.srv, f.producerKey, body)
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	// "id" alone would also match inside "invalid" (inval-id) regardless of whether the
 	// missing-id detail is actually present in the body, so the assertion has to pin the
@@ -260,21 +581,12 @@ func TestCloudEventMissingIDReturns400(t *testing.T) {
 // TestCloudEventsFromDifferentSourcesSharingAnIDAreDistinct, covers the other half of
 // that key; neither test alone pins both.
 func TestCloudEventDuplicateIsIdempotent(t *testing.T) {
-	h, _ := newServer(t)
+	f := newIngressFixture(t)
 	body := fmt.Sprintf(`{"specversion":"1.0","id":%q,"source":"/buildkite/pipelines/api",
 		"type":"deployment.started","subject":"acme/prod","time":"2026-09-14T10:00:00Z",
 		"datacontenttype":"application/json",
-		"data":{"tenant":%q,"correlation_ref":"dep-7","service.version":"2.5.0"}}`,
-		idemKey(t, "ce-dup"), tenant(t))
-	send := func() *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/v1/events/cloudevents",
-			bytes.NewBufferString(body))
-		req.Header.Set("Content-Type", "application/cloudevents+json")
-		req.Header.Set("Authorization", "Bearer "+testToken)
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		return rec
-	}
+		"data":{"correlation_ref":"dep-7","service.version":"2.5.0"}}`, idemKey(t, "ce-dup"))
+	send := func() *httptest.ResponseRecorder { return postCE(t, f.srv, f.producerKey, body) }
 	first := send()
 	require.Equal(t, http.StatusCreated, first.Code, first.Body.String())
 	second := send()
@@ -289,18 +601,21 @@ func TestCloudEventDuplicateIsIdempotent(t *testing.T) {
 // every event posted during it, silently — and the raw text leaked connection strings,
 // table names and constraint names to callers who are not operators.
 //
-// Closing the pool is a real transient store failure rather than a faked error: every
-// subsequent AppendEvent fails inside pool.Begin, which is exactly where a database outage
-// lands. pgxpool.Close is guarded by a sync.Once, so newServer's own t.Cleanup close is
+// The credential is resolved once, successfully, before the store closes: the
+// authenticator shares the store's own pool, so an unwarmed cache would answer 503 from
+// the credential lookup instead of from the append this test means to exercise. Closing
+// the pool afterwards is a real transient store failure rather than a faked error, and
+// pgxpool.Close is guarded by a sync.Once, so newIngressFixture's own t.Cleanup close is
 // still safe.
 func TestPostEventReturns503WhenTheStoreFails(t *testing.T) {
-	h, s := newServer(t)
-	s.Close()
+	f := newIngressFixture(t)
+	warm := post(t, f.srv, f.producerKey, bodyWith(fmt.Sprintf(`"idempotency_key":%q`,
+		idemKey(t, "warm"))))
+	require.Equal(t, http.StatusCreated, warm.Code, warm.Body.String())
+	f.store.Close()
 
-	body := fmt.Sprintf(`{"tenant":%q,"source":"ci","type":"deployment.started",
-		"subject":"acme/prod","occurred_at":"2026-09-14T10:00:00Z",
-		"correlation_ref":"dep-7","idempotency_key":%q}`, tenant(t), idemKey(t, "down"))
-	rec := post(t, h, "/v1/events", body, testToken)
+	body := bodyWith(fmt.Sprintf(`"idempotency_key":%q`, idemKey(t, "down")))
+	rec := post(t, f.srv, f.producerKey, body)
 
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "retried",
@@ -318,22 +633,15 @@ func TestPostEventReturns503WhenTheStoreFails(t *testing.T) {
 // 200 {"created": false}. A dropped fact reported as a successful retry is the worst shape
 // that failure can take in a system of record.
 func TestCloudEventsFromDifferentSourcesSharingAnIDAreDistinct(t *testing.T) {
-	h, s := newServer(t)
-	tn := tenant(t)
+	f := newIngressFixture(t)
 	sharedID := idemKey(t, "shared-across-sources")
 
 	send := func(source string) *httptest.ResponseRecorder {
 		body := fmt.Sprintf(`{"specversion":"1.0","id":%q,"source":%q,
 			"type":"deployment.started","subject":"acme/prod","time":"2026-09-14T10:00:00Z",
 			"datacontenttype":"application/json",
-			"data":{"tenant":%q,"correlation_ref":"dep-7"}}`, sharedID, source, tn)
-		req := httptest.NewRequest(http.MethodPost, "/v1/events/cloudevents",
-			bytes.NewBufferString(body))
-		req.Header.Set("Content-Type", "application/cloudevents+json")
-		req.Header.Set("Authorization", "Bearer "+testToken)
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		return rec
+			"data":{"correlation_ref":"dep-7"}}`, sharedID, source)
+		return postCE(t, f.srv, f.producerKey, body)
 	}
 
 	first := send("/buildkite/pipelines/api")
@@ -343,26 +651,25 @@ func TestCloudEventsFromDifferentSourcesSharingAnIDAreDistinct(t *testing.T) {
 		"two sources sharing a CloudEvents id are two distinct events; keying on the id "+
 			"alone swallows the second and reports it as a retry")
 
-	evs, _, err := s.ListEvents(context.Background(), postgres.EventQuery{Tenant: tn})
+	q, err := postgres.NewEventQuery(f.producerTenant, 0)
+	require.NoError(t, err)
+	evs, _, err := f.store.ListEvents(context.Background(), q)
 	require.NoError(t, err)
 	assert.Len(t, evs, 2, "both events must be in the log, not one")
 }
 
-// TestNewRejectsAnEmptyToken pins the guard where it is structural rather than remembered.
-// subtle.ConstantTimeCompare of two empty slices returns 1, so a Server built with an
-// empty token authenticates a request carrying no Authorization header at all — the write
-// side of a system of record, open to anyone who can reach the port. It used to be
-// prevented only by a check in cmd/horopter-ingress, which any other caller (a test, a
-// future embedding, a second binary) would bypass without noticing.
+// TestNewRejectsANilAuthenticator pins the guard where it is structural rather than
+// remembered: every write route is gated on the authenticator, so a Server built
+// without one would either panic on the first request or need every caller to
+// remember the check itself.
 //
 // It runs unconditionally: a constructor that refuses its argument needs no database.
-func TestNewRejectsAnEmptyToken(t *testing.T) {
-	srv, err := ingress.New(nil, func() time.Time { return fixed }, rand.Reader, "")
-	require.Error(t, err,
-		"an empty token makes every unauthenticated request authenticate successfully")
+func TestNewRejectsANilAuthenticator(t *testing.T) {
+	clock := func() time.Time { return fixed }
+	srv, err := ingress.New(nil, clock, rand.Reader, nil)
+	require.Error(t, err, "a nil authenticator would panic on the first request rather "+
+		"than reject it")
 	assert.Nil(t, srv, "a rejected configuration must not yield a usable server")
-	assert.Contains(t, err.Error(), "HOROPTER_INGRESS_TOKEN",
-		"the error must name the setting an operator has to fix")
 }
 
 // TestPostEventRejectsAnOversizedBody covers the body cap on both readers. Neither reader
@@ -372,22 +679,17 @@ func TestNewRejectsAnEmptyToken(t *testing.T) {
 // and reporting it as malformed JSON would send the caller hunting for a syntax error
 // that does not exist.
 func TestPostEventRejectsAnOversizedBody(t *testing.T) {
-	h, _ := newServer(t)
-	huge := fmt.Sprintf(`{"tenant":%q,"source":"ci","type":"deployment.started",
+	f := newIngressFixture(t)
+	huge := fmt.Sprintf(`{"source":"ci","type":"deployment.started",
 		"subject":"acme/prod","occurred_at":"2026-09-14T10:00:00Z",
-		"attributes":{"blob":%q}}`, tenant(t), strings.Repeat("x", ingress.MaxBodyBytes+1))
+		"attributes":{"blob":%q}}`, strings.Repeat("x", ingress.MaxBodyBytes+1))
 
 	for path, contentType := range map[string]string{
 		"/v1/events":             "application/json",
 		"/v1/events/cloudevents": "application/cloudevents+json",
 	} {
 		t.Run(path, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(huge))
-			req.Header.Set("Content-Type", contentType)
-			req.Header.Set("Authorization", "Bearer "+testToken)
-			rec := httptest.NewRecorder()
-			h.ServeHTTP(rec, req)
-
+			rec := doPost(t, f.srv, path, contentType, f.producerKey, huge)
 			require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
 			assert.Contains(t, rec.Body.String(), "exceeds",
 				"the caller must be told the body was too large, not that it was malformed")
@@ -395,41 +697,79 @@ func TestPostEventRejectsAnOversizedBody(t *testing.T) {
 	}
 }
 
-// unauthenticatedProbeRoutes is TestEveryNonProbeRouteRequiresTheBearerToken's
-// documented exception list to "every route is registered through s.auth": the
-// liveness and readiness probes. A probe that demanded a credential could not be
-// used by the orchestrator that has to call it, so these two are deliberately open.
-// The test asserts they are both registered AND unwrapped, which is what stops this
-// list quietly growing to cover a write route: adding a pattern here to silence a
-// failure then fails the other half of the same assertion.
+// unauthenticatedProbeRoutes is TestEveryNonProbeRouteRequiresACredential's documented
+// exception list to "every route is registered through the authenticator": the liveness
+// and readiness probes. A probe that demanded a credential could not be used by the
+// orchestrator that has to call it, so these two are deliberately open.
 var unauthenticatedProbeRoutes = []string{
 	"GET /healthz",
 	"GET /readyz",
 }
 
 // routeRegistration is one mux.Handle/mux.HandleFunc call found in Routes(): the
-// pattern it registers, and whether the handler it registers is wrapped in s.auth.
+// pattern it registers, whether the handler it registers is wrapped in the
+// authenticator's Require middleware, and — when it is — which capability, e.g.
+// "CapAppend", that call names.
 type routeRegistration struct {
 	pattern     string
 	authWrapped bool
+	capability  string
 }
 
-// isAuthWrapper reports whether e is the expression s.auth(…) — the bearer-token
-// middleware every non-probe route must be registered through. It matches the call
-// syntactically rather than by behaviour because that is the point: a route can only
-// be checked for a credential if the registration puts the middleware in its path,
-// and no HTTP-level probe of one URL can show that some other URL did the same.
-func isAuthWrapper(e ast.Expr) bool {
-	call, ok := e.(*ast.CallExpr)
+// capabilityName reports the auth.Cap* identifier e names, e.g. "CapAppend" for the
+// expression auth.CapAppend. It matches the qualified-identifier shape rather than
+// evaluating the expression, which is what lets authWrapperCapability tell one
+// capability from another by reading the source rather than by running it.
+func capabilityName(e ast.Expr) (string, bool) {
+	sel, ok := e.(*ast.SelectorExpr)
+	if !ok {
+		return "", false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	if !ok || pkg.Name != "auth" {
+		return "", false
+	}
+	return sel.Sel.Name, true
+}
+
+// isRequireOnAuthn reports whether e is the selector s.authn.Require — the credential
+// middleware's method expression, split out of authWrapperCapability so neither function
+// carries both the receiver check and the call shape's complexity at once.
+func isRequireOnAuthn(e ast.Expr) bool {
+	sel, ok := e.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Require" {
+		return false
+	}
+	recvSel, ok := sel.X.(*ast.SelectorExpr)
+	if !ok || recvSel.Sel.Name != "authn" {
+		return false
+	}
+	recv, ok := recvSel.X.(*ast.Ident)
 	if !ok {
 		return false
 	}
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || sel.Sel.Name != "auth" {
-		return false
+	return recv.Name == "s"
+}
+
+// authWrapperCapability reports the capability named by e, when e is the expression
+// s.authn.Require(auth.Cap...)(...) — the credential middleware every non-probe route
+// must be registered through. It matches the call syntactically rather than by
+// behaviour because that is the point: a route can only be checked for a credential if
+// the registration puts the middleware in its path, and no HTTP-level probe of one URL
+// can show that some other URL did the same, let alone which capability it required.
+func authWrapperCapability(e ast.Expr) (string, bool) {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return "", false
 	}
-	recv, ok := sel.X.(*ast.Ident)
-	return ok && recv.Name == "s"
+	inner, ok := call.Fun.(*ast.CallExpr)
+	if !ok || len(inner.Args) != 1 {
+		return "", false
+	}
+	if !isRequireOnAuthn(inner.Fun) {
+		return "", false
+	}
+	return capabilityName(inner.Args[0])
 }
 
 // routeHandleCall reports the route a mux.Handle/mux.HandleFunc call registers, and
@@ -453,14 +793,15 @@ func routeHandleCall(t *testing.T, call *ast.CallExpr) (routeRegistration, bool)
 		"mux.%s's first argument must be a string literal pattern", sel.Sel.Name)
 	pattern, err := strconv.Unquote(lit.Value)
 	require.NoError(t, err)
+	capability, authWrapped := authWrapperCapability(call.Args[1])
 	return routeRegistration{
-		pattern: pattern, authWrapped: isAuthWrapper(call.Args[1]),
+		pattern: pattern, authWrapped: authWrapped, capability: capability,
 	}, true
 }
 
 // collectRoutes parses server.go and returns every route registered by a
 // mux.Handle/mux.HandleFunc call inside the Routes method — the route table
-// TestEveryNonProbeRouteRequiresTheBearerToken checks.
+// TestEveryNonProbeRouteRequiresACredential checks.
 func collectRoutes(t *testing.T) []routeRegistration {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -488,23 +829,25 @@ func collectRoutes(t *testing.T) []routeRegistration {
 	return routes
 }
 
-// TestEveryNonProbeRouteRequiresTheBearerToken asserts, structurally, that the bearer
-// token guards every write route ingress exposes — not just the one an HTTP-level test
-// happens to send an unauthenticated request to.
+// TestEveryNonProbeRouteRequiresACredential asserts, structurally, that a credential
+// guards every write route ingress exposes with the append capability specifically —
+// not just the one an HTTP-level test happens to send an unauthenticated request to,
+// and not merely SOME capability, which Require(auth.CapRead) on a write route would
+// also satisfy.
 //
-// TestIngressRequiresBearerToken drives POST /v1/events without a token, which proves
-// that one path is guarded and says nothing about any other. POST /v1/events/cloudevents
-// was in exactly that position: it IS wrapped, but deleting s.auth from its registration
-// compiled and broke no test in this suite. Every other CloudEvents test sets
-// Authorization before sending, so none of them would ever have noticed, and the same
-// would be true of a write route nobody has added yet. Reading the registration is what
-// generalizes the property from "this URL requires the token" to "every non-probe route
-// does".
+// TestIngressRequiresACredential drives POST /v1/events without a credential, which
+// proves that one path is guarded and says nothing about any other. POST
+// /v1/events/cloudevents was in exactly that position: it IS wrapped, but deleting the
+// middleware from its registration compiled and broke no test in this suite. Every other
+// CloudEvents test sets Authorization before sending, so none of them would ever have
+// noticed, and the same would be true of a write route nobody has added yet. Reading the
+// registration is what generalizes the property from "this URL requires a credential" to
+// "every non-probe route requires one that can append".
 //
 // It needs no database and runs unconditionally, like TestHealthzWorksWithNilStore: the
 // credential boundary on the write side of a system of record should not be a property
 // that only a CI leg with a live Postgres can check.
-func TestEveryNonProbeRouteRequiresTheBearerToken(t *testing.T) {
+func TestEveryNonProbeRouteRequiresACredential(t *testing.T) {
 	routes := collectRoutes(t)
 	require.NotEmpty(t, routes, "Routes() must register at least one handler")
 
@@ -514,13 +857,16 @@ func TestEveryNonProbeRouteRequiresTheBearerToken(t *testing.T) {
 		if slices.Contains(unauthenticatedProbeRoutes, r.pattern) {
 			assert.False(t, r.authWrapped,
 				"probe %q must stay unauthenticated; the orchestrator that calls it "+
-					"holds no token", r.pattern)
+					"holds no credential", r.pattern)
 			continue
 		}
 		assert.True(t, r.authWrapped,
-			"route %q is registered without s.auth, so no credential guards it; the "+
-				"bearer token is the only boundary on the write side of the log",
+			"route %q is registered without the authenticator, so no credential guards "+
+				"it; the credential is the only boundary on the write side of the log",
 			r.pattern)
+		assert.Equal(t, "CapAppend", r.capability,
+			"route %q requires capability %q, not the append capability a write route "+
+				"on the write side of the log needs", r.pattern, r.capability)
 	}
 	for _, want := range unauthenticatedProbeRoutes {
 		assert.Contains(t, patterns, want,
@@ -544,8 +890,8 @@ func getUnauthenticated(t *testing.T, h http.Handler, path string) *httptest.Res
 // Neither sends an Authorization header, so both also pin that readyz is reachable
 // without a credential — an orchestrator holds no token.
 func TestReadyzReportsReadyWithLiveDatabase(t *testing.T) {
-	h, _ := newServer(t)
-	rec := getUnauthenticated(t, h, "/readyz")
+	f := newIngressFixture(t)
+	rec := getUnauthenticated(t, f.srv, "/readyz")
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
@@ -556,12 +902,12 @@ func TestReadyzReportsReadyWithLiveDatabase(t *testing.T) {
 //
 // Closing the pool is a real outage rather than a faked error, the same technique
 // TestPostEventReturns503WhenTheStoreFails uses; pgxpool.Close is guarded by a sync.Once,
-// so newServer's own t.Cleanup close is still safe.
+// so newIngressFixture's own t.Cleanup close is still safe.
 func TestReadyzReports503WhenTheDatabaseIsUnreachable(t *testing.T) {
-	h, s := newServer(t)
-	s.Close()
+	f := newIngressFixture(t)
+	f.store.Close()
 
-	rec := getUnauthenticated(t, h, "/readyz")
+	rec := getUnauthenticated(t, f.srv, "/readyz")
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "database unreachable",
 		"an operator reading the probe's body must be told what is wrong")
@@ -592,15 +938,15 @@ func captureLogs(t *testing.T) func() []map[string]any {
 }
 
 // TestReadyzDoesNotRelayTheDatabaseError pins what the 503 body withholds. The probe sits
-// outside the bearer-token check — an orchestrator has no token to send — and pgx formats
-// a failed connection with the database user, database name, host and port, so relaying
-// the error handed all four to anyone who could reach the port during an outage. That
-// contradicted appendFailed's rule on the same daemon.
+// outside the credential check — an orchestrator has no credential to send — and pgx
+// formats a failed connection with the database user, database name, host and port, so
+// relaying the error handed all four to anyone who could reach the port during an
+// outage. That contradicted appendFailed's rule on the same daemon.
 func TestReadyzDoesNotRelayTheDatabaseError(t *testing.T) {
-	h, s := newServer(t)
-	s.Close()
+	f := newIngressFixture(t)
+	f.store.Close()
 
-	rec := getUnauthenticated(t, h, "/readyz")
+	rec := getUnauthenticated(t, f.srv, "/readyz")
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "closed pool",
 		"the database error must not reach an unauthenticated caller")
@@ -610,11 +956,11 @@ func TestReadyzDoesNotRelayTheDatabaseError(t *testing.T) {
 // body must not lose it. A pod that drops out of rotation with no record of why leaves an
 // operator reproducing the probe by hand to find out.
 func TestFailedReadinessProbeLogsItsCause(t *testing.T) {
-	h, s := newServer(t)
-	s.Close()
+	f := newIngressFixture(t)
+	f.store.Close()
 	records := captureLogs(t)
 
-	rec := getUnauthenticated(t, h, "/readyz")
+	rec := getUnauthenticated(t, f.srv, "/readyz")
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 
 	logged := slices.ContainsFunc(records(), func(r map[string]any) bool {
@@ -628,14 +974,12 @@ func TestFailedReadinessProbeLogsItsCause(t *testing.T) {
 // refuses the event as invalid, so the producer gets a 400 naming the size and the limit, not
 // a retryable 503.
 func TestPostEventRefusesAttributesOverTheCap(t *testing.T) {
-	h, _ := newServer(t, postgres.WithMaxEventAttributeBytes(26))
-	body := fmt.Sprintf(`{
-		"tenant":%q,"source":"buildkite","type":"deployment.started",
+	f := newIngressFixture(t, postgres.WithMaxEventAttributeBytes(26))
+	body := fmt.Sprintf(`{"source":"buildkite","type":"deployment.started",
 		"subject":"acme/prod","occurred_at":"2026-09-14T10:00:00Z",
-		"idempotency_key":%q,"attributes":{"service.version":"2.5.0"}}`,
-		tenant(t), idemKey(t, "1"))
+		"idempotency_key":%q,"attributes":{"service.version":"2.5.0"}}`, idemKey(t, "1"))
 
-	rec := post(t, h, "/v1/events", body, testToken)
+	rec := post(t, f.srv, f.producerKey, body)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(),

@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"horopter.dev/horopter/internal/auth"
 	"horopter.dev/horopter/internal/ingress"
 	"horopter.dev/horopter/internal/logging"
 	"horopter.dev/horopter/internal/store/postgres"
@@ -89,9 +90,13 @@ func run() error {
 		return err
 	}
 
-	// ingress.New rejects an empty token, so HOROPTER_INGRESS_TOKEN is checked exactly
-	// once, in the constructor, rather than here as well: two guards on one fact drift.
-	api, err := ingress.New(store, time.Now, rand.Reader, os.Getenv("HOROPTER_INGRESS_TOKEN"))
+	// DefaultOptions, never a zero Options: an uncached authenticator queries the
+	// database on every request, ahead of anything that could shed it.
+	authn := auth.New(auth.NewStore(store.Pool()), time.Now, auth.DefaultOptions())
+
+	// ingress.New rejects a nil authenticator, so this is checked exactly once, in the
+	// constructor, rather than here as well: two guards on one fact drift.
+	api, err := ingress.New(store, time.Now, rand.Reader, authn)
 	if err != nil {
 		return err
 	}
@@ -99,6 +104,10 @@ func run() error {
 	return serve(ctx, &http.Server{
 		Addr:    cfg.addr,
 		Handler: api.Routes(),
+		// auth.MaxHeaderBytes bounds the request line plus headers, Authorization
+		// included — see its own doc comment for why Go's 1 MiB default is worth
+		// tightening, and why one constant serves both daemons.
+		MaxHeaderBytes: auth.MaxHeaderBytes,
 		// ReadHeaderTimeout bounds a slowloris header dribble. ReadTimeout bounds the
 		// whole request including the body, so a client sending one byte a minute cannot
 		// hold a connection open indefinitely; 15s is far longer than a few-kilobyte

@@ -57,12 +57,13 @@ func uniqueToken() string {
 	return procToken + "-" + strconv.FormatUint(idSeq.Add(1), 36)
 }
 
-// tenant returns a tenant id unique to this call, naming the test for traceability.
+// tenant returns a tenant id unique to this call, naming the test for traceability, and
+// creates the tenant row migration 0005's foreign keys now require before anything can
+// write under it.
 func tenant(t *testing.T) string {
 	t.Helper()
 	tn := "test-" + t.Name() + "-" + uniqueToken()
-	testdb.DropTenantAfter(t, tn)
-	return tn
+	return testdb.NewTenant(t, tn)
 }
 
 // monotonicEntropy makes successive eventID calls sort in call order even when two land
@@ -99,10 +100,10 @@ func eventID(t *testing.T, suffix string) string {
 
 func mkEvent(tn, id, idem, corr, typ string, at time.Time) core.Event {
 	return core.Event{
-		ID: id, Tenant: tn, IdempotencyKey: idem, SchemaVersion: 1,
+		ID: id, Tenant: tn, IdempotencyKey: idem, SchemaVersion: core.CurrentSchemaVersion,
 		Source: "ci", Type: typ, Subject: "acme/prod", Actor: "ci-bot",
 		OccurredAt: at, ReceivedAt: at, CorrelationRef: corr,
-		Attributes: map[string]any{"service.version": "2.5.0"},
+		Attributes: map[string]any{"service.version": "2.5.0"}, Origin: core.OriginProcess,
 	}
 }
 
@@ -141,8 +142,10 @@ func TestAppendEventIsIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, created, "a duplicate idempotency key must not create a second event")
 	assert.Equal(t, first.ID, second.ID, "the originally stored event must be returned")
+	assert.Equal(t, core.OriginProcess, second.Origin,
+		"the duplicate lookup must return the stored origin, not the zero value")
 
-	evs, _, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn})
+	evs, _, err := s.ListEvents(ctx, eventQuery(t, tn, 0))
 	require.NoError(t, err)
 	assert.Len(t, evs, 1, "CI retries must not duplicate events")
 }
@@ -155,6 +158,42 @@ func TestAppendEventRejectsInvalid(t *testing.T) {
 	_, _, err := s.AppendEvent(ctx, bad)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "subject")
+}
+
+// TestEventTenantForeignKeyIsEnforced pins migration 0005's event_tenant_fk as a real
+// database constraint, not merely a property AppendEvent happens to uphold by always
+// routing tenant through a credential that already references a tenant row. An insert
+// naming a tenant with no row must be refused by Postgres itself, which is the last-line
+// defence the whole task establishes: every write's tenant provably exists.
+func TestEventTenantForeignKeyIsEnforced(t *testing.T) {
+	s := newStore(t)
+	missing := "tnt-missing-" + uniqueToken()
+
+	_, err := s.Pool().Exec(context.Background(), `
+		INSERT INTO event (id, tenant, schema_version, source, type, subject, actor,
+		                   title, occurred_at, received_at, correlation_ref, attributes,
+		                   origin, edited)
+		VALUES ($1, $2, $3, 'ci', 'deployment.started', 'acme/prod', '', '', now(), now(),
+		        'r', '{}'::jsonb, 'process', false)`,
+		eventID(t, "fk"), missing, core.CurrentSchemaVersion)
+	require.Error(t, err, "an event naming a tenant with no row must be refused")
+	assert.Contains(t, err.Error(), "event_tenant_fk")
+}
+
+// TestChangeTenantForeignKeyIsEnforced is TestEventTenantForeignKeyIsEnforced's sibling
+// for change_tenant_fk, the projection's own foreign key.
+func TestChangeTenantForeignKeyIsEnforced(t *testing.T) {
+	s := newStore(t)
+	missing := "tnt-missing-" + uniqueToken()
+
+	_, err := s.Pool().Exec(context.Background(), `
+		INSERT INTO change (tenant, ref, subject, type, title, actor, started_at,
+		                    first_seen_at, end_at, status, attributes, last_event_id)
+		VALUES ($1, 'r', 'acme/prod', 'deployment.started', '', '', now(), now(), NULL,
+		        'in_progress', '{}'::jsonb, 'e0')`,
+		missing)
+	require.Error(t, err, "a change naming a tenant with no row must be refused")
+	assert.Contains(t, err.Error(), "change_tenant_fk")
 }
 
 // TestAppendEventNormalizesNilAttributes pins the store's contract at the boundary
@@ -173,7 +212,7 @@ func TestAppendEventNormalizesNilAttributes(t *testing.T) {
 	require.NoError(t, err, "a nil Attributes map must not violate the NOT NULL column")
 	assert.True(t, created)
 
-	evs, _, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn})
+	evs, _, err := s.ListEvents(ctx, eventQuery(t, tn, 0))
 	require.NoError(t, err)
 	require.Len(t, evs, 1)
 	assert.NotNil(t, evs[0].Attributes,
@@ -326,7 +365,7 @@ func TestConcurrentDuplicateIdempotencyKeyReturnsTheOriginal(t *testing.T) {
 	assert.Equal(t, 1, creates, "exactly one of the two callers may have created the event")
 	assert.Len(t, returned, 1, "both callers must be told about the same stored event")
 
-	evs, _, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn})
+	evs, _, err := s.ListEvents(ctx, eventQuery(t, tn, 0))
 	require.NoError(t, err)
 	require.Len(t, evs, 1, "a concurrent retry must not duplicate the event")
 	assert.True(t, returned[evs[0].ID], "the id both callers got must be the id that was stored")
@@ -614,7 +653,7 @@ func TestAppendRefusesAnEventOverTheAttributeCap(t *testing.T) {
 
 	require.ErrorIs(t, err, core.ErrInvalidEvent)
 	assert.Contains(t, err.Error(), "attributes encode to 27 bytes of JSON; the limit is 26")
-	evs, _, err := s.ListEvents(ctx, postgres.EventQuery{Tenant: tn})
+	evs, _, err := s.ListEvents(ctx, eventQuery(t, tn, 0))
 	require.NoError(t, err)
 	assert.Empty(t, evs, "a refused event must not be stored")
 	assert.Equal(t, map[string]int64{appendFailedInvalid: 1}, appendCounts(t, reader))

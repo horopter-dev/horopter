@@ -35,7 +35,7 @@ type Option func(*Store)
 
 // WithMaxEventAttributeBytes makes AppendEvent refuse, as an invalid event, one whose
 // attributes are larger than n bytes of JSON as core.Event.CheckAttributeSize measures them.
-// A store opened without it applies no cap: horopter-migrate never appends, and
+// A store opened without it applies no cap: horoctl-migrate never appends, and
 // horopter-ingress passes the cap its operator configured.
 func WithMaxEventAttributeBytes(n int) Option {
 	return func(s *Store) { s.maxAttributeBytes = n }

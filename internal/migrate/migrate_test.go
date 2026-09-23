@@ -1,4 +1,4 @@
-package main
+package migrate
 
 import (
 	"bytes"
@@ -21,6 +21,15 @@ import (
 	"horopter.dev/horopter/internal/testdb"
 )
 
+func dsn(t *testing.T) string {
+	t.Helper()
+	v := os.Getenv(testdb.DSNVar)
+	if v == "" {
+		t.Skip("set " + testdb.DSNVar + " to run Postgres tests (docker compose up -d db)")
+	}
+	return v
+}
+
 // TestRunRebuildsATenantsProjection covers the operator surface for the safety property
 // the whole derived-view design rests on: the projection is always rebuildable. Until
 // --rebuild-tenant existed there was no way for an operator to exercise it, which made it
@@ -32,13 +41,10 @@ import (
 // before the run and visibly right after it is the same evidence, without needing a bug to
 // exist.
 func TestRunRebuildsATenantsProjection(t *testing.T) {
-	dsn := os.Getenv("HOROPTER_TEST_DSN")
-	if dsn == "" {
-		t.Skip("set HOROPTER_TEST_DSN to run migrate tests (docker compose up -d db)")
-	}
+	d := dsn(t)
 	ctx := context.Background()
 
-	store, err := postgres.Open(ctx, dsn)
+	store, err := postgres.Open(ctx, d)
 	require.NoError(t, err)
 	t.Cleanup(store.Close)
 
@@ -47,14 +53,14 @@ func TestRunRebuildsATenantsProjection(t *testing.T) {
 	// Validate requires it to be a syntactically valid ULID, so it comes from
 	// core.NewULID rather than the token embedded in the tenant id below.
 	token := strconv.FormatInt(time.Now().UnixNano(), 36)
-	tn := "migrate-rebuild-" + token
-	testdb.DropTenantAfter(t, tn)
+	tn := testdb.NewTenant(t, "migrate-rebuild-"+token)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	_, _, err = store.AppendEvent(ctx, core.Event{
-		ID: core.NewULID(time.Now(), rand.Reader), Tenant: tn, SchemaVersion: 1,
-		Source: "ci", Type: "deployment.started", Subject: "acme/prod", Actor: "ci-bot",
+		ID: core.NewULID(time.Now(), rand.Reader), Tenant: tn,
+		SchemaVersion: core.CurrentSchemaVersion,
+		Source:        "ci", Type: "deployment.started", Subject: "acme/prod", Actor: "ci-bot",
 		Title: "from the event log", OccurredAt: at, ReceivedAt: at,
-		CorrelationRef: "dep-1", Attributes: map[string]any{},
+		CorrelationRef: "dep-1", Attributes: map[string]any{}, Origin: core.OriginProcess,
 	})
 	require.NoError(t, err)
 
@@ -71,7 +77,7 @@ func TestRunRebuildsATenantsProjection(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "corrupted", title(), "precondition: the projection is now wrong")
 
-	require.NoError(t, run(ctx, dsn, tn))
+	require.NoError(t, Run(ctx, d, tn))
 
 	assert.Equal(t, "from the event log", title(),
 		"--rebuild-tenant must replay the event log over the projection; a corrupted row "+
@@ -82,25 +88,22 @@ func TestRunRebuildsATenantsProjection(t *testing.T) {
 // opt-in. A rebuild that ran on every migrate would take every tenant's write lock on
 // every deploy, and this is the only place that would notice.
 func TestRunWithoutRebuildTenantLeavesTheProjectionAlone(t *testing.T) {
-	dsn := os.Getenv("HOROPTER_TEST_DSN")
-	if dsn == "" {
-		t.Skip("set HOROPTER_TEST_DSN to run migrate tests (docker compose up -d db)")
-	}
+	d := dsn(t)
 	ctx := context.Background()
 
-	store, err := postgres.Open(ctx, dsn)
+	store, err := postgres.Open(ctx, d)
 	require.NoError(t, err)
 	t.Cleanup(store.Close)
 
 	token := strconv.FormatInt(time.Now().UnixNano(), 36)
-	tn := "migrate-norebuild-" + token
-	testdb.DropTenantAfter(t, tn)
+	tn := testdb.NewTenant(t, "migrate-norebuild-"+token)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	_, _, err = store.AppendEvent(ctx, core.Event{
-		ID: core.NewULID(time.Now(), rand.Reader), Tenant: tn, SchemaVersion: 1,
-		Source: "ci", Type: "deployment.started", Subject: "acme/prod", Actor: "ci-bot",
+		ID: core.NewULID(time.Now(), rand.Reader), Tenant: tn,
+		SchemaVersion: core.CurrentSchemaVersion,
+		Source:        "ci", Type: "deployment.started", Subject: "acme/prod", Actor: "ci-bot",
 		OccurredAt: at, ReceivedAt: at, CorrelationRef: "dep-1",
-		Attributes: map[string]any{},
+		Attributes: map[string]any{}, Origin: core.OriginProcess,
 	})
 	require.NoError(t, err)
 
@@ -109,7 +112,7 @@ func TestRunWithoutRebuildTenantLeavesTheProjectionAlone(t *testing.T) {
 		`UPDATE change SET title = $3 WHERE tenant = $1 AND ref = $2`, tn, "dep-1", marker)
 	require.NoError(t, err)
 
-	require.NoError(t, run(ctx, dsn, ""))
+	require.NoError(t, Run(ctx, d, ""))
 
 	var got string
 	require.NoError(t, store.Pool().QueryRow(ctx,
@@ -172,10 +175,7 @@ func captureLog(t *testing.T) *bytes.Buffer {
 // The runs are compared to each other, not only to keywords, because equality is the defect
 // stated exactly: it is the identical output that was the bug.
 func TestVerifyAndRebuildLogsWhichMigrationsItApplied(t *testing.T) {
-	base := os.Getenv("HOROPTER_TEST_DSN")
-	if base == "" {
-		t.Skip("set HOROPTER_TEST_DSN to run migrate tests (docker compose up -d db)")
-	}
+	base := dsn(t)
 	ctx := context.Background()
 	d := isolatedSchemaDSN(t, base)
 
@@ -201,4 +201,12 @@ func TestVerifyAndRebuildLogsWhichMigrationsItApplied(t *testing.T) {
 	assert.NotEqual(t, built, alreadyCurrent,
 		"building a schema and finding one already current must not log identically; that "+
 			"identity is the defect this test exists for")
+}
+
+// TestRunRequiresADSN pins Run's own guard: an empty dsn must fail before any connection
+// is attempted, with a message naming the environment variable an operator sets.
+func TestRunRequiresADSN(t *testing.T) {
+	err := Run(context.Background(), "", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "DATABASE_URL")
 }

@@ -26,17 +26,16 @@ import (
 	"horopter.dev/horopter/internal/adapter/grafana"
 	"horopter.dev/horopter/internal/adapter/otlp"
 	"horopter.dev/horopter/internal/admission"
+	"horopter.dev/horopter/internal/auth"
 	"horopter.dev/horopter/internal/core"
 	"horopter.dev/horopter/internal/store/postgres"
 )
 
-// DefaultTenant is used when a request omits one.
-const DefaultTenant = "default"
-
 // MaxLimit bounds every query's result set, by default and as a hard cap on any
-// caller-supplied "limit" parameter. Egress has no auth in v0.1, so without a cap an
-// unauthenticated caller could exhaust the database or exfiltrate an entire tenant's
-// event log or change history in a single request.
+// caller-supplied "limit" parameter. A credential's read capability bounds WHOSE data a
+// caller can reach; MaxLimit bounds HOW MUCH of it a single request can pull, so a valid
+// reader still cannot exhaust the database or exfiltrate an entire tenant's event log or
+// change history in one request.
 const MaxLimit = 1000
 
 // TruncatedHeader is set to "true" on a response whose result set was cut short by the
@@ -52,14 +51,6 @@ const MaxLimit = 1000
 // without breaking any of them.
 const TruncatedHeader = "X-Horopter-Truncated"
 
-// MaxAnnotationBodyBytes caps a Grafana annotation POST body. The documented shape —
-// a time range plus a short "rangeRaw" and "annotation" echo — is a few hundred bytes;
-// 64 KiB is two orders of magnitude of headroom for an unusually long saved-query
-// name, and nowhere near enough to be a memory lever on this unauthenticated route.
-// Until this batch every egress route was a GET, so caller input was bounded by
-// http.Server.MaxHeaderBytes; this is the first route that reads a body at all.
-const MaxAnnotationBodyBytes = 1 << 16
-
 // Server is the egress HTTP surface.
 type Server struct {
 	store   *postgres.Store
@@ -70,20 +61,35 @@ type Server struct {
 	limiter *admission.Limiter
 	memory  *admission.BytePool
 	metrics readMetrics
+	authn   *auth.Authenticator
 }
 
-// New returns an egress Server admitting reads against limits. clock is injected so rendering an
-// open change stays deterministic under test.
-func New(s *postgres.Store, clock func() time.Time, limits Limits) *Server {
+// New returns an egress Server admitting reads against limits and authenticating every
+// non-probe route through authn. clock is injected so rendering an open change stays
+// deterministic under test.
+//
+// A nil authenticator is refused here rather than left to callers to check: every read
+// route is gated on it, so a Server built without one would either panic on the first
+// request or, worse, need every caller to remember the guard itself.
+func New(
+	s *postgres.Store, clock func() time.Time, limits Limits, authn *auth.Authenticator,
+) (*Server, error) {
+	if authn == nil {
+		return nil, errors.New(
+			"egress requires an authenticator; build one with auth.New over a credential " +
+				"store — a nil authenticator would panic on the first request rather than " +
+				"reject it")
+	}
 	floor, initial, ceiling := concurrencyBounds(s)
 	srv := &Server{
 		store: s, clock: clock, grafana: grafana.New(), otlp: otlp.New(),
 		limits:  limits,
 		limiter: admission.NewLimiter(floor, initial, ceiling),
 		memory:  admission.NewBytePool(limits.ReadMemoryBytes),
+		authn:   authn,
 	}
 	srv.metrics = newReadMetrics(srv.limiter, srv.memory)
-	return srv
+	return srv, nil
 }
 
 // concurrencyBounds derives the read concurrency limit from the store's connection pool: it
@@ -101,18 +107,19 @@ func concurrencyBounds(s *postgres.Store) (floor, initial, ceiling int) {
 // Routes returns the handler for every egress endpoint.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /v1/changes", s.admit(s.queryChanges))
-	mux.Handle("GET /v1/events", s.admit(s.listEvents))
-	mux.Handle("GET /adapters/grafana/annotations", s.admit(s.grafanaAnnotations))
-	mux.Handle("POST /adapters/grafana/annotations", s.admit(s.grafanaAnnotationsPOST))
-	mux.Handle("POST /adapters/grafana/{tenant}/annotations", s.admit(s.grafanaAnnotationsPOST))
-	mux.Handle("GET /adapters/otlp/spans", s.admit(s.otlpSpans))
+	mux.Handle("GET /v1/changes", s.authz(auth.CapRead, s.admit(s.queryChanges)))
+	mux.Handle("GET /v1/events", s.authz(auth.CapRead, s.admit(s.listEvents)))
+	mux.Handle("GET /adapters/grafana/annotations",
+		s.authz(auth.CapRead, s.admit(s.grafanaAnnotations)))
+	mux.Handle("GET /adapters/otlp/spans", s.authz(auth.CapRead, s.admit(s.otlpSpans)))
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 	// otelhttp gives every route a server span carrying the http.* semantic
 	// conventions. It wraps the mux rather than each handler so a route added later is
 	// covered without anyone remembering. With no provider installed it is a no-op.
-	// Every route but the probes passes admit, so a probe answers while reads are being shed.
+	// Every route but the probes passes auth then admit, in that order, so a probe answers
+	// while reads are being shed, and an unauthenticated request is refused before it can
+	// spend a read permit.
 	//
 	// The operation argument is empty because it has no effect here. Without a
 	// WithSpanNameFormatter option, otelhttp's default formatter ignores the operation
@@ -120,6 +127,13 @@ func (s *Server) Routes() http.Handler {
 	// binary name only made it look load-bearing. The binary name already reaches
 	// backends as the service.name resource attribute.
 	return otelhttp.NewHandler(mux, "")
+}
+
+// authz gates next on capability c, wrapping admission rather than sitting inside it: an
+// unauthenticated request — and the pool connection its credential lookup would take — is
+// refused before a read permit is ever spent. See admission.go's admit for the other half.
+func (s *Server) authz(c auth.Capability, next http.Handler) http.Handler {
+	return s.authn.Require(c)(next)
 }
 
 // healthz reports process liveness only. It must not touch the database: a failing
@@ -131,9 +145,10 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 // readyz reports whether this instance can serve traffic, which requires the database.
 // A failing readiness probe removes the pod from the load balancer without killing it.
 //
-// pgx formats a failed connection with the database user, database name, host and port,
-// and every egress route is unauthenticated, so the error goes to the server log and the
-// body says only that the database is unreachable, as readFailed does for a failed read.
+// The probe itself is unauthenticated, like ingress's: an orchestrator holds no credential
+// to send. pgx formats a failed connection with the database user, database name, host and
+// port, so the error goes to the server log and the body says only that the database is
+// unreachable, as readFailed does for a failed read.
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.Pool().Ping(r.Context()); err != nil {
 		slog.ErrorContext(r.Context(), "readiness probe failed", "error", err)
@@ -143,25 +158,76 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
-// tenantOf resolves the tenant and reports which mechanism supplied it.
+// errTenantRequired reports a global credential naming no tenant: there is no default left
+// to fall back to.
+var errTenantRequired = errors.New(`query parameter "tenant" is required for this credential`)
+
+// errTenantForbidden reports a tenant-scoped credential naming a tenant other than its own.
+var errTenantForbidden = errors.New("credential is scoped to a different tenant")
+
+// errTenantNotFound reports a named tenant no row matches. Its text must never include the
+// id: a uniform 404 exists precisely so a caller enumerating tenant ids cannot tell an
+// unowned tenant from one that never existed.
+var errTenantNotFound = errors.New("tenant not found")
+
+// tenantFor resolves the tenant a request may read, from the authenticated principal
+// auth.Require attached to its context and the "?tenant=" query parameter — the only place
+// a tenant is named now that no route carries a {tenant} path segment.
 //
-// The source is recorded because the path-scoped Grafana route exists precisely
-// because both of Grafana's access modes discard a query string baked into a
-// configured datasource URL. If that is wrong, this attribute reads "default" on every
-// Grafana-originated request in production — visible at once, rather than surfacing
-// later as quietly wrong data.
+// A tenant-scoped credential may name its own tenant, redundantly, or none at all; naming
+// any other is errTenantForbidden. A global credential carries no tenant of its own, so it
+// must name one: errTenantRequired when it does not, errTenantNotFound when the named
+// tenant does not exist.
 //
-// The results are NAMED because they are two bare same-typed strings: nothing catches a
-// transposition at either end, which is the same reason replayProjection names its two
-// ints in internal/store/postgres.
-func tenantOf(r *http.Request) (tenantID, source string) {
-	if v := r.PathValue("tenant"); v != "" {
-		return v, "path"
+// A request reaching here without a principal on its context — every route Routes()
+// registers passes through authz first, so this should never happen — must not be read as
+// a global credential: Principal{}.IsGlobal() is true for the zero value, which would
+// otherwise treat a bypassed auth check as a superuser able to name any tenant. Failing
+// closed here is the runtime default; the structural test that every route is authz-wrapped
+// catches the bypass itself, but that test is not where this guarantee should live.
+func (s *Server) tenantFor(r *http.Request) (core.TenantID, error) {
+	p, ok := auth.PrincipalFrom(r.Context())
+	if !ok {
+		return core.TenantID{}, errTenantRequired
 	}
-	if v := r.URL.Query().Get("tenant"); v != "" {
-		return v, "query"
+	named := r.URL.Query().Get("tenant")
+	if !p.IsGlobal() {
+		if named != "" && named != p.Tenant.String() {
+			return core.TenantID{}, errTenantForbidden
+		}
+		return p.Tenant, nil
 	}
-	return DefaultTenant, "default"
+	if named == "" {
+		return core.TenantID{}, errTenantRequired
+	}
+	exists, err := s.store.TenantExists(r.Context(), named)
+	if err != nil {
+		return core.TenantID{}, fmt.Errorf("check tenant %q exists: %w", named, err)
+	}
+	if !exists {
+		return core.TenantID{}, errTenantNotFound
+	}
+	return core.TenantIDFromRow(named), nil
+}
+
+// writeTenantError answers a failed tenantFor resolution with the status its error names:
+// 400 for no tenant named, 403 for one outside the credential's scope, 404 for one that
+// does not exist, and 500 — logged, never relayed, as readFailed does — for a store failure
+// encountered while checking.
+func writeTenantError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, errTenantRequired):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, errTenantForbidden):
+		writeError(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, errTenantNotFound):
+		writeError(w, http.StatusNotFound, err.Error())
+	default:
+		slog.ErrorContext(r.Context(), "tenant resolution failed", "error", err,
+			"route", r.Pattern)
+		writeError(w, http.StatusInternalServerError,
+			"could not resolve the requested tenant; the cause has been logged on the server")
+	}
 }
 
 // rfc3339Param parses an RFC3339 query parameter, naming the expected format on error.
@@ -256,9 +322,9 @@ type window struct {
 }
 
 // newWindow assembles a validated window, and is the single place from and to are
-// checked against each other. All three parsers below build their result through it —
-// RFC3339 query parameters, Grafana's epoch milliseconds, and Grafana's RFC3339 POST
-// body — so a fourth transport cannot be added without inheriting the rule.
+// checked against each other. Both parsers below build their result through it — RFC3339
+// query parameters and Grafana's epoch milliseconds — so a third transport cannot be added
+// without inheriting the rule.
 //
 // An inverted window is the caller's error, not an empty result. The overlap predicate
 // is "start_at <= :to AND end_effective >= :from", which for from > to selects the
@@ -273,9 +339,19 @@ func newWindow(from, to time.Time, limit int) (window, error) {
 	return window{from: from, to: to, limit: limit}, nil
 }
 
-// windowFromRFC3339 reads from/to as RFC3339 and limit as an optional bounded
-// integer, matching the neutral API and the OTLP adapter's parameter contract.
+// windowFromRFC3339 reads from/to as RFC3339 and limit as an optional bounded integer,
+// matching the neutral API and the OTLP adapter's parameter contract. When the request
+// names a ref, from and to are not required: (tenant, ref) is a change's primary key, so a
+// ref lookup is already exact, and changeSelection omits the window predicate entirely
+// whenever a ref is set — a window alongside one would be parsed for nothing.
 func windowFromRFC3339(r *http.Request) (window, error) {
+	limit, err := limitParam(r)
+	if err != nil {
+		return window{}, err
+	}
+	if r.URL.Query().Get("ref") != "" {
+		return window{limit: limit}, nil
+	}
 	from, err := rfc3339Param(r, "from")
 	if err != nil {
 		return window{}, err
@@ -284,18 +360,13 @@ func windowFromRFC3339(r *http.Request) (window, error) {
 	if err != nil {
 		return window{}, err
 	}
-	limit, err := limitParam(r)
-	if err != nil {
-		return window{}, err
-	}
 	return newWindow(from, to, limit)
 }
 
 // windowFromEpochMillis reads from/to as epoch milliseconds and limit as an optional
-// bounded integer: the neutral epoch-millisecond query-parameter contract. This is
-// not Grafana's own contract — windowFromAnnotationBody, reading RFC3339 out of a
-// POST body, is the parser grafana/simple-json-datasource — an archived Grafana
-// datasource plugin, but the only one that speaks this transport — actually drives.
+// bounded integer: the neutral epoch-millisecond query-parameter contract, and the one
+// grafana/simple-json-datasource — an archived Grafana datasource plugin, but the only one
+// that speaks this transport — actually drives.
 func windowFromEpochMillis(r *http.Request) (window, error) {
 	from, err := epochMillisParam(r, "from")
 	if err != nil {
@@ -312,70 +383,31 @@ func windowFromEpochMillis(r *http.Request) (window, error) {
 	return newWindow(from, to, limit)
 }
 
-// grafanaAnnotationRequest is the JSON body grafana/simple-json-datasource — an
-// archived Grafana datasource plugin, but the only one that implements this
-// transport — POSTs to an annotations endpoint. It also sends "rangeRaw" (the
-// panel's relative range, e.g. "now-1h") and "annotation" (the query config);
-// this adapter's contract needs neither, only the resolved range.
-type grafanaAnnotationRequest struct {
-	Range struct {
-		From string `json:"from"`
-		To   string `json:"to"`
-	} `json:"range"`
-}
-
-// windowFromAnnotationBody reads a Grafana annotation POST body's time range.
-// This is the third window parser alongside windowFromRFC3339 and
-// windowFromEpochMillis, feeding the same render path — Grafana's POST body
-// carries RFC3339 timestamps with fractional seconds (e.g.
-// "2016-04-15T13:44:39.070Z"), not the epoch milliseconds its GET query
-// parameters use: a different contract from the same vendor, not a
-// duplicate of one already handled. time.Parse(time.RFC3339, …) already
-// accepts the fractional-second form, so no new parsing helper is needed for
-// it.
-func windowFromAnnotationBody(r *http.Request) (window, error) {
-	var body grafanaAnnotationRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		return window{}, fmt.Errorf("request body is not valid JSON: %w", err)
-	}
-	from, err := time.Parse(time.RFC3339, body.Range.From)
-	if err != nil {
-		return window{}, fmt.Errorf("range.from=%q is not RFC3339: %w", body.Range.From, err)
-	}
-	to, err := time.Parse(time.RFC3339, body.Range.To)
-	if err != nil {
-		return window{}, fmt.Errorf("range.to=%q is not RFC3339: %w", body.Range.To, err)
-	}
-	limit, err := limitParam(r)
-	if err != nil {
-		return window{}, err
-	}
-	return newWindow(from, to, limit)
-}
-
 // changesFor reads the changes win selects: it estimates their size, has admission reserve
 // their memory, then queries them. It answers the request itself on any failure, and then
 // reports ok false.
+//
+// The tenant comes from context, not a fresh tenantFor(r) call: admit already resolved and
+// validated it before this handler ever ran, and for a global credential that resolution is
+// a database round trip a query-building step must not repeat.
 func (s *Server) changesFor(
 	w http.ResponseWriter, r *http.Request, win window, adapter string,
 ) (changes []core.Change, truncated, ok bool) {
-	tenantID, source := tenantOf(r)
+	tenantID := tenantFromContext(r.Context())
 	trace.SpanFromContext(r.Context()).SetAttributes(
-		attribute.String("horopter.tenant", tenantID),
-		attribute.String("horopter.tenant.source", source),
-	)
-	q := postgres.ChangeQuery{
-		Tenant:  tenantID,
-		From:    win.from,
-		To:      win.to,
-		Subject: r.URL.Query().Get("subject"),
-		Type:    r.URL.Query().Get("type"),
-		Status:  r.URL.Query().Get("status"),
-		Limit:   win.limit,
+		attribute.String("horopter.tenant", tenantID.String()))
+	q, err := postgres.NewChangeQuery(tenantID, win.from, win.to, win.limit)
+	if err != nil {
+		s.readFailed(w, r, adapter, err)
+		return nil, false, false
 	}
+	q.Subject = r.URL.Query().Get("subject")
+	q.Type = r.URL.Query().Get("type")
+	q.Status = r.URL.Query().Get("status")
+	q.Ref = r.URL.Query().Get("ref")
 	est, err := s.store.EstimateChanges(r.Context(), q)
 	if err != nil {
-		readFailed(w, r, adapter, err)
+		s.readFailed(w, r, adapter, err)
 		return nil, false, false
 	}
 	budget, admitted := s.admitMemory(w, r, est)
@@ -385,7 +417,7 @@ func (s *Server) changesFor(
 	q.MaxRowTextBytes = budget
 	changes, truncated, err = s.store.QueryChanges(r.Context(), q)
 	if err != nil {
-		readFailed(w, r, adapter, err)
+		s.readFailed(w, r, adapter, err)
 		return nil, false, false
 	}
 	return changes, truncated, true
@@ -419,16 +451,20 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	tenantID, source := tenantOf(r)
+	tenantID := tenantFromContext(r.Context())
 	trace.SpanFromContext(r.Context()).SetAttributes(
 		attribute.String("horopter.adapter", "neutral"),
-		attribute.String("horopter.tenant", tenantID),
-		attribute.String("horopter.tenant.source", source),
+		attribute.String("horopter.tenant", tenantID.String()),
 	)
-	q := postgres.EventQuery{Tenant: tenantID, Ref: r.URL.Query().Get("ref"), Limit: limit}
+	q, err := postgres.NewEventQuery(tenantID, limit)
+	if err != nil {
+		s.readFailed(w, r, "neutral", err)
+		return
+	}
+	q.Ref = r.URL.Query().Get("ref")
 	est, err := s.store.EstimateEvents(r.Context(), q)
 	if err != nil {
-		readFailed(w, r, "neutral", err)
+		s.readFailed(w, r, "neutral", err)
 		return
 	}
 	budget, admitted := s.admitMemory(w, r, est)
@@ -438,57 +474,34 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 	q.MaxRowTextBytes = budget
 	events, truncated, err := s.store.ListEvents(r.Context(), q)
 	if err != nil {
-		readFailed(w, r, "neutral", err)
+		s.readFailed(w, r, "neutral", err)
 		return
 	}
 	markTruncated(w, truncated)
 	writeJSON(w, http.StatusOK, eventsToJSON(events))
 }
 
+// grafanaAnnotations renders the changes overlapping a window as Grafana annotations.
+//
+// It refuses "ref" rather than honouring it. The spec adds fetch-by-ref to GET /v1/changes
+// alone and leaves this adapter's shape unchanged; the filter takes the full stored
+// <locus>/<ref>, which no Grafana dashboard variable can produce; and this route's whole
+// contract is "what overlapped this window", which a primary-key lookup ignoring the window
+// has no reading for. Accepting it while still demanding from/to — which changeSelection then
+// discards — was a second, undocumented spelling of a route that already exists.
 func (s *Server) grafanaAnnotations(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("ref") != "" {
+		writeError(w, http.StatusBadRequest,
+			`query parameter "ref" is not supported here; this route renders what overlaps `+
+				`from/to. Fetch one change by ref with GET /v1/changes?ref=<locus>/<ref>`)
+		return
+	}
 	win, err := windowFromEpochMillis(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	s.render(w, r, win, "grafana", s.grafana.Render)
-}
-
-// grafanaAnnotationsPOST serves the same annotations the GET route does, for the
-// caller that needs it: grafana/simple-json-datasource — an archived Grafana
-// datasource plugin, but the only one that speaks this transport — queries
-// annotations with a POST carrying a JSON body, not a GET with query parameters, so
-// without this route no such Grafana instance could call this adapter at all. The
-// renderer is unchanged — grafana.Renderer.Render is identical either way — only how
-// the time window, and now the tenant, arrive differs.
-//
-// Both the tenant-less route and the path-scoped "/{tenant}/annotations" route (see
-// Routes) reach this same handler: tenantOf reads the path wildcard when the matched
-// route registered one and falls back to DefaultTenant when it did not, so one
-// handler serves both without a branch here.
-func (s *Server) grafanaAnnotationsPOST(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, MaxAnnotationBodyBytes)
-	win, err := windowFromAnnotationBody(r)
-	if err != nil {
-		writeAnnotationBodyError(w, err)
-		return
-	}
-	s.render(w, r, win, "grafana", s.grafana.Render)
-}
-
-// writeAnnotationBodyError answers a POST body that could not be read. An
-// over-sized body is 413, not 400: it may be well-formed JSON that is merely too
-// large, and http.MaxBytesReader surfaces the cap as a read error indistinguishable
-// from malformed JSON unless checked explicitly — see ingress's writeBodyError for
-// the same reasoning applied to the write side of this project.
-func writeAnnotationBodyError(w http.ResponseWriter, err error) {
-	var tooLarge *http.MaxBytesError
-	if errors.As(err, &tooLarge) {
-		writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf(
-			"request body exceeds the %d-byte limit", tooLarge.Limit))
-		return
-	}
-	writeError(w, http.StatusBadRequest, err.Error())
 }
 
 func (s *Server) otlpSpans(w http.ResponseWriter, r *http.Request) {
@@ -516,7 +529,7 @@ func (s *Server) render(
 	}
 	payload, err := render(changes, s.clock())
 	if err != nil {
-		readFailed(w, r, adapter, err)
+		s.readFailed(w, r, adapter, err)
 		return
 	}
 	markTruncated(w, truncated)
@@ -526,17 +539,16 @@ func (s *Server) render(
 // readFailed answers a read the store, or the adapter rendering its result, could not
 // complete, and it draws the same line ingress's appendFailed does. The underlying text
 // names tables, columns and constraints — for a failed connection, the database host,
-// user and name — and the store wraps it around the caller's own tenant string. Egress's
-// callers are unauthenticated, so that detail goes to the server log, where an operator
-// can see it, and the caller is told only that the read failed.
+// user and name — and the store wraps it around the caller's own tenant string, so it goes
+// to the server log, where an operator can see it, rather than to the caller.
 //
 // The status stays 500 rather than ingress's 503. There, 503 is what makes a producer
 // retry instead of dropping an event; a failed read drops nothing, and its caller — a
 // dashboard panel or an export — simply asks again.
-func readFailed(w http.ResponseWriter, r *http.Request, adapter string, err error) {
-	tenantID, _ := tenantOf(r)
+func (s *Server) readFailed(w http.ResponseWriter, r *http.Request, adapter string, err error) {
+	tenant := requestedTenantFromContext(r.Context())
 	slog.ErrorContext(r.Context(), "read failed", "error", err,
-		"tenant", tenantID, "adapter", adapter, "route", r.Pattern)
+		"tenant", tenant, "adapter", adapter, "route", r.Pattern)
 	writeError(w, http.StatusInternalServerError,
 		"could not complete the read; the cause has been logged on the server")
 }
@@ -573,6 +585,11 @@ func changesToJSON(changes []core.Change) []map[string]any {
 }
 
 // eventsToJSON renders the raw event log in neutral terms, for audit and export.
+//
+// origin and edited are emitted like every other stored column. Both are server-set and
+// unreadable from a request body, which is what makes them worth reading back: origin is the
+// only record of whether a human or a process appended the event, and audit is this route's
+// whole purpose.
 func eventsToJSON(events []core.Event) []map[string]any {
 	out := make([]map[string]any, 0, len(events))
 	for _, e := range events {
@@ -583,6 +600,7 @@ func eventsToJSON(events []core.Event) []map[string]any {
 			"occurred_at":     e.OccurredAt.UTC().Format(time.RFC3339Nano),
 			"received_at":     e.ReceivedAt.UTC().Format(time.RFC3339Nano),
 			"correlation_ref": e.CorrelationRef, "attributes": e.Attributes,
+			"origin": string(e.Origin), "edited": e.Edited,
 		})
 	}
 	return out

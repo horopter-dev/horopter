@@ -142,7 +142,7 @@ Commits follow [Conventional Commits][cc]. A `commit-msg` hook rejects a
 non-conforming message once you have run `prek install` above. CI does not check
 commit messages, so that hook is the only thing that will tell you:
 
-    fix: log which migrations horopter-migrate applied
+    fix: log which migrations horoctl-migrate applied
     feat(egress): return Retry-After when a read is shed
     chore: pin the dev compose stack to v0.1.0-dev.3
 
@@ -172,7 +172,7 @@ that has never been red proves nothing.
 
 ## Reporting security issues
 
-Please do not open a public issue for a security problem. Horopter's egress API
-has no authentication in v0.1 and the README's Security section says so; if you
-have found something beyond what is documented there, raise it privately with
-the maintainer first.
+Please do not open a public issue for a security problem. Check the README's
+Security section first — a caveat already documented there is not a new
+finding; anything beyond what is documented, raise privately with the
+maintainer first.

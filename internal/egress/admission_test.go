@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"horopter.dev/horopter/internal/auth"
 	"horopter.dev/horopter/internal/egress"
 	"horopter.dev/horopter/internal/store/postgres"
 )
@@ -34,11 +35,35 @@ func changesURL(tn string) string {
 	return "/v1/changes?tenant=" + tn + "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
 }
 
-// holdRead starts a GET of url on h and returns once that read holds its concurrency permit,
-// with a function that lets it finish and returns its response. Only the first read admitted
-// after the call is held; later ones pass the hook straight through. The read is let go when
-// the test ends if the test has not done so.
-func holdRead(t *testing.T, h http.Handler, url string) func() *httptest.ResponseRecorder {
+// newServerWithWarmedAuth is newServerWith, plus one authenticated request already made
+// through a throwaway server that shares the returned server's Authenticator. The
+// concurrency limiter raises its limit by one on every admitted, non-overloaded read, so a
+// test that asserts the limiter's exact value cannot pay an unwarmed credential cache's cost
+// on the server it is measuring — that first lookup would itself count as a read and nudge
+// the limit up before the test ever gets to look at it. The throwaway server pays that cost
+// on a limiter nothing asserts against.
+func newServerWithWarmedAuth(
+	t *testing.T, poolMaxConns int, limits egress.Limits,
+) (srv *egress.Server, s *postgres.Store, tn, key string) {
+	t.Helper()
+	s, tn = openTestStore(t, poolMaxConns)
+	authn := auth.New(auth.NewStore(s.Pool()), fixedClock, auth.DefaultOptions())
+	key = readerKey(t, s, tn)
+
+	warmup, err := egress.New(s, fixedClock, egress.DefaultLimits(), authn)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, get(t, warmup.Routes(), key, changesURL(tn)).Code)
+
+	srv, err = egress.New(s, fixedClock, limits, authn)
+	require.NoError(t, err)
+	return srv, s, tn, key
+}
+
+// holdRead starts an authenticated GET of url on h and returns once that read holds its
+// concurrency permit, with a function that lets it finish and returns its response. Only the
+// first read admitted after the call is held; later ones pass the hook straight through. The
+// read is let go when the test ends if the test has not done so.
+func holdRead(t *testing.T, h http.Handler, key, url string) func() *httptest.ResponseRecorder {
 	t.Helper()
 	held, release := make(chan struct{}), make(chan struct{})
 	var taken atomic.Bool
@@ -52,8 +77,10 @@ func holdRead(t *testing.T, h http.Handler, url string) func() *httptest.Respons
 
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		req.Header.Set("Authorization", "Bearer "+key)
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, url, nil))
+		h.ServeHTTP(rec, req)
 		done <- rec
 	}()
 	select {
@@ -93,17 +120,18 @@ func recordsWithMessage(records []map[string]any, msg string) []map[string]any {
 func TestAReadOverTheConcurrencyLimitIsShed(t *testing.T) {
 	rec, restore := recordSpans(t)
 	defer restore()
-	srv, _, tn := newServerWith(t, 1, testLimits())
+	srv, s, tn := newServerWith(t, 1, testLimits())
 	h := srv.Routes()
+	key := readerKey(t, s, tn)
 	records := captureLogs(t)
-	finish := holdRead(t, h, changesURL(tn))
+	finish := holdRead(t, h, key, changesURL(tn))
 
-	shed := get(t, h, changesURL(tn))
+	shed := get(t, h, key, changesURL(tn))
 	held := finish()
 
 	require.Equal(t, http.StatusOK, held.Code, held.Body.String())
 
-	after := get(t, h, changesURL(tn))
+	after := get(t, h, key, changesURL(tn))
 	assert.Equal(t, http.StatusOK, after.Code,
 		"the held read must have given its permit back: %s", after.Body.String())
 
@@ -133,18 +161,72 @@ func TestAReadOverTheConcurrencyLimitIsShed(t *testing.T) {
 			"connection-wait attribute; the shed read never acquired one and must not")
 }
 
-func TestProbesPassNoGate(t *testing.T) {
-	srv, _, tn := newServerWith(t, 1, testLimits())
+// TestConcurrencyShedFromAGlobalCredentialDoesNotQueryTenantExists pins the property that
+// took two revisions to land: resolving a global credential's named tenant is a database
+// round trip (TenantExists), and it must be neither ungated by the concurrency limiter (an
+// earlier revision resolved before Acquire, so the lookup ran once per request rather than
+// once per admitted one — an unbounded burst of global-credential requests reached Postgres
+// before admission ever applied) nor reachable from the shed path itself (a still earlier
+// revision re-resolved the tenant after Acquire had already failed, so a request the limiter
+// had just refused queried the database anyway, exactly because it was congested).
+//
+// Neither failure is visible in the HTTP response — both are about what the database saw, not
+// what the caller got back — so this checks the otelpgx statement spans every real query
+// carries, via the "db.query.text" attribute pool.go documents them as carrying. Holding one
+// read fills the one-connection limiter; the second request, on a global credential naming a
+// tenant that genuinely exists, must be shed without ever running TenantExists — if resolution
+// ran either before the gate or from the shed path, this is the query that would appear.
+//
+// recordSpans runs before newServerWith, not after: otelpgx binds its tracer to whatever
+// provider is global at pool construction (postgres/pool.go), not dynamically per query, so
+// starting the recorder any later would leave rec seeing no database spans at all — the
+// negative assertion below would then pass whether or not TenantExists ran. The held read is
+// finished, not merely released, before that assertion: its own query is the positive control
+// proving spans are actually being captured.
+func TestConcurrencyShedFromAGlobalCredentialDoesNotQueryTenantExists(t *testing.T) {
+	rec, restore := recordSpans(t)
+	defer restore()
+
+	srv, s, tn := newServerWith(t, 1, testLimits())
 	h := srv.Routes()
+	key := readerKey(t, s, tn)
+	superuserKey := seedCredential(t, s, "superuser", "")
+
+	finish := holdRead(t, h, key, changesURL(tn))
+
+	shed := get(t, h, superuserKey, changesURL(tn))
+	require.Equal(t, http.StatusServiceUnavailable, shed.Code, shed.Body.String())
+
+	held := finish()
+	require.Equal(t, http.StatusOK, held.Code, held.Body.String())
+
+	queries := spanAttrValues(rec, "", "db.query.text")
+	require.True(t, slices.ContainsFunc(queries, func(text string) bool {
+		return strings.Contains(text, "FROM change")
+	}), "positive control: the held read's own query must appear in the recorded spans, or "+
+		"an absent TenantExists span proves nothing — tracing itself could be the thing "+
+		"that silently stopped working; got %v", queries)
+	for _, text := range queries {
+		assert.NotContains(t, text, "FROM tenant WHERE id",
+			"a request shed at the concurrency gate must never reach tenantFor's own "+
+				"database round trip: it holds no permit, and TenantExists is exactly the "+
+				"load admission exists to bound")
+	}
+}
+
+func TestProbesPassNoGate(t *testing.T) {
+	srv, s, tn := newServerWith(t, 1, testLimits())
+	h := srv.Routes()
+	key := readerKey(t, s, tn)
 	release, err := egress.ReserveReadMemory(srv, testLimits().ReadMemoryBytes)
 	require.NoError(t, err)
 	t.Cleanup(release)
-	holdRead(t, h, changesURL(tn))
-	require.Equal(t, http.StatusServiceUnavailable, get(t, h, changesURL(tn)).Code,
+	holdRead(t, h, key, changesURL(tn))
+	require.Equal(t, http.StatusServiceUnavailable, get(t, h, key, changesURL(tn)).Code,
 		"the concurrency limit must be full, or this test proves nothing")
 
-	assert.Equal(t, http.StatusOK, get(t, h, "/healthz").Code)
-	assert.Equal(t, http.StatusOK, get(t, h, "/readyz").Code)
+	assert.Equal(t, http.StatusOK, getUnauthenticated(t, h, "GET /healthz").Code)
+	assert.Equal(t, http.StatusOK, getUnauthenticated(t, h, "GET /readyz").Code)
 }
 
 // TestEveryReadRouteIsGated reads Routes' source: every route but the probes must be registered
@@ -192,14 +274,23 @@ func routeGating(t *testing.T) (gated, ungated []string) {
 	return gated, ungated
 }
 
-// isAdmitCall reports whether e is a call to a method named admit.
+// isAdmitCall reports whether e is a call to a method named admit, or a call to authz whose
+// last argument is one: Routes wraps every gated handler as
+// s.authz(cap, s.admit(handler)), so admit sits one call deeper than it used to.
 func isAdmitCall(e ast.Expr) bool {
 	call, ok := e.(*ast.CallExpr)
 	if !ok {
 		return false
 	}
 	sel, ok := call.Fun.(*ast.SelectorExpr)
-	return ok && sel.Sel.Name == "admit"
+	if !ok {
+		return false
+	}
+	if sel.Sel.Name == "admit" {
+		return true
+	}
+	return sel.Sel.Name == "authz" && len(call.Args) > 0 &&
+		isAdmitCall(call.Args[len(call.Args)-1])
 }
 
 func TestRetryAfterRoundsTheAdmissionWaitUpToWholeSeconds(t *testing.T) {
@@ -239,12 +330,13 @@ func holdConnections(t *testing.T, s *postgres.Store, n int) func() {
 // TestAReadThatWaitsForAConnectionHalvesTheLimit holds a two-connection pool's connections
 // while a read starts, so the read waits past the threshold before it gets one.
 func TestAReadThatWaitsForAConnectionHalvesTheLimit(t *testing.T) {
-	rec, restore := recordSpans(t)
-	defer restore()
 	limits := egress.DefaultLimits()
 	limits.DBWaitThreshold = 50 * time.Millisecond
-	srv, s, tn := newServerWith(t, 2, limits)
+	srv, s, tn, key := newServerWithWarmedAuth(t, 2, limits)
 	h := srv.Routes()
+
+	rec, restore := recordSpans(t)
+	defer restore()
 	records := captureLogs(t)
 	require.Equal(t, 2, egress.ReadConcurrencyLimit(srv), "the limit starts at the pool size")
 
@@ -253,7 +345,7 @@ func TestAReadThatWaitsForAConnectionHalvesTheLimit(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 		release()
 	}()
-	require.Equal(t, http.StatusOK, get(t, h, changesURL(tn)).Code)
+	require.Equal(t, http.StatusOK, get(t, h, key, changesURL(tn)).Code)
 
 	assert.Equal(t, 1, egress.ReadConcurrencyLimit(srv))
 	halved := slices.ContainsFunc(records(), func(r map[string]any) bool {
@@ -269,7 +361,7 @@ func TestAReadThatWaitsForAConnectionHalvesTheLimit(t *testing.T) {
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, waited, 150)
 
-	require.Equal(t, http.StatusOK, get(t, h, changesURL(tn)).Code)
+	require.Equal(t, http.StatusOK, get(t, h, key, changesURL(tn)).Code)
 	assert.Equal(t, 2, egress.ReadConcurrencyLimit(srv), "a healthy read raises the limit again")
 }
 
@@ -280,12 +372,18 @@ func TestAReadWhoseClientGivesUpDoesNotLowerTheLimit(t *testing.T) {
 	limits.DBWaitThreshold = 500 * time.Millisecond
 	srv, s, tn := newServerWith(t, 2, limits)
 	h := srv.Routes()
+	key := readerKey(t, s, tn)
+	// Warmed before both connections are held: an uncached credential lookup would itself
+	// wait on them, on a context this test never cancels, rather than reaching the read.
+	require.Equal(t, http.StatusOK, get(t, h, key, changesURL(tn)).Code)
 	holdConnections(t, s, 2)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 
+	req := httptest.NewRequest(http.MethodGet, changesURL(tn), nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+key)
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, changesURL(tn), nil).WithContext(ctx))
+	h.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusInternalServerError, rec.Code,
 		"the read must have failed to get a connection, or this test proves nothing")
@@ -297,13 +395,13 @@ func TestAReadWhoseClientGivesUpDoesNotLowerTheLimit(t *testing.T) {
 // waited. A second read against the still-closed pool must not log a second decrease: the limit
 // is already at its floor, so releasing it again changes nothing to report.
 func TestAFailedConnectionAcquisitionHalvesTheLimit(t *testing.T) {
-	srv, s, tn := newServerWith(t, 2, egress.DefaultLimits())
+	srv, s, tn, key := newServerWithWarmedAuth(t, 2, egress.DefaultLimits())
 	h := srv.Routes()
 	records := captureLogs(t)
 	s.Close()
 
-	require.Equal(t, http.StatusInternalServerError, get(t, h, changesURL(tn)).Code)
-	require.Equal(t, http.StatusInternalServerError, get(t, h, changesURL(tn)).Code)
+	require.Equal(t, http.StatusInternalServerError, get(t, h, key, changesURL(tn)).Code)
+	require.Equal(t, http.StatusInternalServerError, get(t, h, key, changesURL(tn)).Code)
 
 	assert.Equal(t, 1, egress.ReadConcurrencyLimit(srv))
 	var halved []map[string]any
