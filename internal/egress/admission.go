@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	"horopter.dev/horopter/internal/admission"
+	"horopter.dev/horopter/internal/core"
 	"horopter.dev/horopter/internal/store/postgres"
 )
 
@@ -42,10 +43,14 @@ const readExpansionFactor = 46
 var afterAdmissionHook func()
 
 // readState is what admission learned about one read, recorded on the read's server span when
-// the read finishes. The connection-wait observer fills in longestConnectionWait and
-// acquisitionFailed; it runs on the read's own goroutine, as pgxpool acquires connections on the
-// caller's. admitMemory fills in estimated, estimatedBytes, reserved, reservedBytes and byteCut.
+// the read finishes. tenant is resolved once, before the concurrency gate, and carried here so
+// nothing downstream — shed, tooLarge, a handler's own query, a failed read's log line — repeats
+// that resolution, which for a global credential is a database round trip of its own. The
+// connection-wait observer fills in longestConnectionWait and acquisitionFailed; it runs on the
+// read's own goroutine, as pgxpool acquires connections on the caller's. admitMemory fills in
+// estimated, estimatedBytes, reserved, reservedBytes and byteCut.
 type readState struct {
+	tenant                core.TenantID
 	outcome               string
 	waited                time.Duration
 	longestConnectionWait time.Duration
@@ -57,17 +62,39 @@ type readState struct {
 	byteCut               bool
 }
 
-// readStateKey is the context key admit attaches a read's *readState under, so admitMemory can
-// reach it without threading it through every handler signature.
+// readStateKey is the context key admit attaches a read's *readState under, so admitMemory and a
+// handler's own query can reach it without threading it through every signature.
 type readStateKey struct{}
 
-// admit gates a read route on the concurrency limit. A read that gets no permit within
+// tenantFromContext returns the tenant admit already resolved for this request. A context that
+// never passed through admit — none exists once Routes is built, but a defensive read is cheaper
+// than a nil-pointer panic — reports the zero TenantID.
+func tenantFromContext(ctx context.Context) core.TenantID {
+	state, _ := ctx.Value(readStateKey{}).(*readState)
+	if state == nil {
+		return core.TenantID{}
+	}
+	return state.tenant
+}
+
+// admit resolves the request's tenant, then gates it on the concurrency limit. Resolving the
+// tenant first — and answering its own failure directly, before the limiter is ever touched —
+// is what keeps a read that will not be served from spending a permit, and what keeps a read
+// shed at the limiter from then issuing a tenant lookup of its own: a global credential's
+// tenant check is a database round trip, and the read most likely to need one shed is exactly
+// the one arriving while the database is already congested. A read that gets no permit within
 // Limits.AdmissionWait is shed with 503; an admitted read holds its permit until its response
 // has been written. It also attaches the read's state and connection-wait observer to the
 // context the handler runs with, which the handler's own memory gate (admitMemory) uses.
 func (s *Server) admit(read http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		state := &readState{outcome: outcomeAdmitted}
+		tenantID, err := s.tenantFor(r)
+		if err != nil {
+			writeTenantError(w, r, err)
+			return
+		}
+
+		state := &readState{outcome: outcomeAdmitted, tenant: tenantID}
 		defer state.record(r.Context())
 
 		started := time.Now()
@@ -147,9 +174,8 @@ func limitHalvedMessage(before, after int, state *readState) string {
 func (s *Server) shed(
 	w http.ResponseWriter, r *http.Request, state *readState, gate string, figures ...any,
 ) {
-	tenantID, _ := s.tenantFor(r)
 	retryAfter := retryAfterSeconds(s.limits.AdmissionWait)
-	fields := []any{"route", r.Pattern, "tenant", tenantID.String(), "gate", gate,
+	fields := []any{"route", r.Pattern, "tenant", state.tenant.String(), "gate", gate,
 		"waited_ms", state.waited.Milliseconds(), "retry_after_s", retryAfter}
 	slog.WarnContext(r.Context(), "read shed", append(fields, figures...)...)
 	s.metrics.shed.Add(r.Context(), 1,
@@ -202,7 +228,7 @@ func (s *Server) admitMemory(
 	capacity := s.memory.Capacity()
 	if est.FirstRowBytes*readExpansionFactor > capacity {
 		state.outcome = outcomeTooLarge
-		s.tooLarge(w, r, est)
+		s.tooLarge(w, r, state, est)
 		return 0, false
 	}
 	needed := est.TotalBytes * readExpansionFactor
@@ -231,11 +257,12 @@ func (s *Server) admitMemory(
 
 // tooLarge answers a read whose first row alone needs more memory than the pool holds. The body
 // names the limit, which is configuration, and nothing from the store.
-func (s *Server) tooLarge(w http.ResponseWriter, r *http.Request, est postgres.ReadEstimate) {
-	tenantID, _ := s.tenantFor(r)
+func (s *Server) tooLarge(
+	w http.ResponseWriter, r *http.Request, state *readState, est postgres.ReadEstimate,
+) {
 	capacity := s.memory.Capacity()
-	slog.WarnContext(r.Context(), "read too large", "route", r.Pattern, "tenant", tenantID.String(),
-		"first_row_bytes", est.FirstRowBytes,
+	slog.WarnContext(r.Context(), "read too large", "route", r.Pattern,
+		"tenant", state.tenant.String(), "first_row_bytes", est.FirstRowBytes,
 		"needed_bytes", est.FirstRowBytes*readExpansionFactor, "capacity_bytes", capacity)
 	writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf(
 		"the first row of this read is larger than egress's read memory limit of %d bytes "+

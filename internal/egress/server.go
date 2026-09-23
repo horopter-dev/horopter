@@ -178,8 +178,18 @@ var errTenantNotFound = errors.New("tenant not found")
 // any other is errTenantForbidden. A global credential carries no tenant of its own, so it
 // must name one: errTenantRequired when it does not, errTenantNotFound when the named
 // tenant does not exist.
+//
+// A request reaching here without a principal on its context — every route Routes()
+// registers passes through authz first, so this should never happen — must not be read as
+// a global credential: Principal{}.IsGlobal() is true for the zero value, which would
+// otherwise treat a bypassed auth check as a superuser able to name any tenant. Failing
+// closed here is the runtime default; the structural test that every route is authz-wrapped
+// catches the bypass itself, but that test is not where this guarantee should live.
 func (s *Server) tenantFor(r *http.Request) (core.TenantID, error) {
-	p, _ := auth.PrincipalFrom(r.Context())
+	p, ok := auth.PrincipalFrom(r.Context())
+	if !ok {
+		return core.TenantID{}, errTenantRequired
+	}
 	named := r.URL.Query().Get("tenant")
 	if !p.IsGlobal() {
 		if named != "" && named != p.Tenant.String() {
@@ -376,14 +386,14 @@ func windowFromEpochMillis(r *http.Request) (window, error) {
 // changesFor reads the changes win selects: it estimates their size, has admission reserve
 // their memory, then queries them. It answers the request itself on any failure, and then
 // reports ok false.
+//
+// The tenant comes from context, not a fresh tenantFor(r) call: admit already resolved and
+// validated it before this handler ever ran, and for a global credential that resolution is
+// a database round trip a query-building step must not repeat.
 func (s *Server) changesFor(
 	w http.ResponseWriter, r *http.Request, win window, adapter string,
 ) (changes []core.Change, truncated, ok bool) {
-	tenantID, err := s.tenantFor(r)
-	if err != nil {
-		writeTenantError(w, r, err)
-		return nil, false, false
-	}
+	tenantID := tenantFromContext(r.Context())
 	trace.SpanFromContext(r.Context()).SetAttributes(
 		attribute.String("horopter.tenant", tenantID.String()))
 	q := postgres.NewChangeQuery(tenantID, win.from, win.to, win.limit)
@@ -437,11 +447,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	tenantID, err := s.tenantFor(r)
-	if err != nil {
-		writeTenantError(w, r, err)
-		return
-	}
+	tenantID := tenantFromContext(r.Context())
 	trace.SpanFromContext(r.Context()).SetAttributes(
 		attribute.String("horopter.adapter", "neutral"),
 		attribute.String("horopter.tenant", tenantID.String()),
@@ -519,7 +525,7 @@ func (s *Server) render(
 // retry instead of dropping an event; a failed read drops nothing, and its caller — a
 // dashboard panel or an export — simply asks again.
 func (s *Server) readFailed(w http.ResponseWriter, r *http.Request, adapter string, err error) {
-	tenantID, _ := s.tenantFor(r)
+	tenantID := tenantFromContext(r.Context())
 	slog.ErrorContext(r.Context(), "read failed", "error", err,
 		"tenant", tenantID.String(), "adapter", adapter, "route", r.Pattern)
 	writeError(w, http.StatusInternalServerError,

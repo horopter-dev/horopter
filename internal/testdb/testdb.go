@@ -61,8 +61,8 @@ func NewTenant(t *testing.T, id string) string {
 }
 
 // EnsureTenant makes id exist as a tenant row without registering any cleanup, for a
-// fixed, shared tenant — like egress's DefaultTenant — that other tests and other runs
-// also write into and that must not be dropped out from under them.
+// fixed, shared tenant that other tests and other runs also write into and that must not
+// be dropped out from under them.
 func EnsureTenant(t *testing.T, id string) string {
 	t.Helper()
 	p, err := Pool()

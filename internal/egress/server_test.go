@@ -806,7 +806,7 @@ func TestGrafanaRejectsAnOutOfRangeEpochWindow(t *testing.T) {
 			assert.Contains(t, rec.Body.String(), "out of range",
 				"the caller must be told its own value was rejected")
 			assert.NotContains(t, strings.ToLower(rec.Body.String()), "postgres",
-				"a bad window must never surface store detail to an unauthenticated caller")
+				"a bad window must never surface store detail, even to an authenticated caller")
 		})
 	}
 }
@@ -1082,15 +1082,27 @@ func TestQueryChangesFiltersByStatus(t *testing.T) {
 
 // TestEveryNonProbeEgressRouteRequiresACredential asserts, by enumerating the mux rather
 // than driving a hand-written list of URLs, that a credential guards every route but the
-// two probes. A hand-written list can go stale the moment a route is added; this cannot,
-// because it is the same enumeration TestNoWriteRouteIsRegisteredAnywhere reads.
+// two probes. A hand-written list of routes can go stale the moment a route is added; this
+// cannot, because it is the same enumeration TestNoWriteRouteIsRegisteredAnywhere reads.
+//
+// isProbe itself is a hand-written two-entry list, so the count below is what keeps it
+// honest: without it, a fifth non-probe route would just be looped over and asserted like
+// the other four, and nothing would say the count had changed at all.
 func TestEveryNonProbeEgressRouteRequiresACredential(t *testing.T) {
 	srv, _, _ := newServerWith(t, 0, egress.DefaultLimits())
 	h := srv.Routes()
+
+	var nonProbe []string
 	for _, route := range routesOf(t, h) { // enumerates the mux, never a hand-written list
-		if isProbe(route) {
-			continue
+		if !isProbe(route) {
+			nonProbe = append(nonProbe, route)
 		}
+	}
+	require.Len(t, nonProbe, 4,
+		"egress has four non-probe routes; a fifth (or a third) must be a deliberate "+
+			"change to this count, not a silent one")
+
+	for _, route := range nonProbe {
 		t.Run(route, func(t *testing.T) {
 			assert.Equal(t, http.StatusUnauthorized, getUnauthenticated(t, h, route).Code)
 		})
@@ -1112,12 +1124,22 @@ func TestAuthRejectsBeforeAdmissionSpendsAPermit(t *testing.T) {
 
 	release := holdRead(t, h, key, url)
 	defer release()
+	require.Equal(t, 1, admittedCount(t, srv),
+		"the limiter's one permit must be held, or this test proves nothing")
 
-	before := admittedCount(t, srv)
+	// A wrong ordering — admission reached before auth — would not answer 401 here: the
+	// limiter's one permit is held, so the concurrency gate alone would wait out
+	// AdmissionWait and shed with 503, and admit's own tenant resolution (which needs the
+	// principal auth attaches) would refuse with 400 before it ever found one to read.
+	// Comparing InFlight() before and after this call does not discriminate a wrong
+	// ordering from the correct one: a permit taken and released within this one
+	// synchronous request is gone again by the time the caller reads the count afterward,
+	// so that comparison would pass either way. 401 is the only outcome the correct
+	// ordering produces.
 	rec := getUnauthenticated(t, h, "GET /v1/changes")
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Equal(t, before, admittedCount(t, srv),
-		"auth outside admit: an unauthenticated request must not consume a permit")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"auth outside admit: an unauthenticated request must be rejected before it can "+
+			"reach a saturated limiter, not shed by it")
 }
 
 func TestATenantScopedCredentialCannotSelectAnotherTenant(t *testing.T) {

@@ -5,10 +5,21 @@
 # /v1/changes and /adapters/otlp/spans require RFC3339 from/to; /adapters/grafana/annotations
 # requires the same window in epoch milliseconds instead; /v1/events takes no window at all —
 # EventQuery has no From/To, so passing one is pointless and mixing formats elsewhere gets a
-# 400. Every query also resolves to tenant "default" unless tenant is passed, and "default" is
-# not where hack/seed.sh writes its data, so a run without a tenant misses it. This drives a
-# six-hour window ending now against a seeded tenant (acme by default; override with
-# HOROPTER_TENANT).
+# 400. Every route also requires a credential now, and a tenant-scoped one may only read its
+# own tenant — HOROPTER_EGRESS_READER_KEY must be one scoped to (or a global credential naming)
+# whatever HOROPTER_TENANT names, or every request 401s and this prints a 401 histogram
+# instead of measuring anything. This drives a six-hour window ending now against a seeded
+# tenant (acme by default; override with HOROPTER_TENANT).
+#
+# horoctl does not exist yet (Task 7), so there is no `horoctl admin keys issue` to point at:
+# mint a reader credential by hand against the dev database, e.g.
+#   INSERT INTO principal (id, display_name) VALUES ('prn_load', 'prn_load');
+#   INSERT INTO credential (id, principal_id, type, key_prefix, key_hash, role, tenant_id,
+#                           source, locus)
+#     VALUES ('cred_load', 'prn_load', 'machine_key', '<prefix>', '<sha256 of secret>',
+#             'reader', '<tenant id>', 'dev', 'dev');
+# and export the resulting horo_<prefix>_<secret> key. Once Task 8 lands, this becomes
+# `horoctl admin keys issue --role reader --tenant "$HOROPTER_TENANT"`.
 #
 # It will not shed against a healthy local Postgres: shedding needs connection waits above
 # HOROPTER_EGRESS_DB_WAIT_THRESHOLD, and an idle database has none. To exercise the
@@ -19,6 +30,7 @@ set -euo pipefail
 
 url="${HOROPTER_EGRESS_URL:-http://localhost:8081}"
 tenant="${HOROPTER_TENANT:-acme}"
+key="${HOROPTER_EGRESS_READER_KEY:?set HOROPTER_EGRESS_READER_KEY to a credential that can read tenant \"$tenant\"}"
 concurrency="${1:-8}"
 iterations="${2:-50}"
 
@@ -51,11 +63,12 @@ paths=(
 one_worker() {
   local path
   for path in "$@"; do
-    curl -sS -o /dev/null -w '%{http_code}\n' "${url}${path}" || true
+    curl -sS -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer ${key}" \
+      "${url}${path}" || true
   done
 }
 export -f one_worker
-export url
+export url key
 
 echo "load: ${concurrency} workers x ${iterations} iterations over ${#paths[@]} renderings" \
   "(tenant=${tenant}, window ${from_rfc}..${to_rfc})"

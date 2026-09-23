@@ -13,9 +13,11 @@ import (
 	"horopter.dev/horopter/internal/core"
 )
 
-// ChangeQuery selects changes overlapping a time window, or by ref alone.
+// ChangeQuery selects changes overlapping a time window, or by ref alone. tenant is
+// unexported: NewChangeQuery is the only way to set it, so a query naming no tenant is a
+// compile error, not a struct literal that happens to select nothing.
 type ChangeQuery struct {
-	Tenant  string
+	tenant  string
 	From    time.Time
 	To      time.Time
 	Subject string
@@ -33,12 +35,12 @@ type ChangeQuery struct {
 	MaxRowTextBytes int64
 }
 
-// NewChangeQuery returns a ChangeQuery scoped to tenant over [from, to] — the constructor
-// through which a core.TenantID crosses into the store package, rather than a caller
-// setting ChangeQuery.Tenant from a bare string it read off a request itself. Subject,
-// Type, Status and Ref are optional filters, assigned on the result afterward.
+// NewChangeQuery returns a ChangeQuery scoped to tenant over [from, to] — the only
+// constructor for one, and so the only place a core.TenantID crosses into the store
+// package. Subject, Type, Status and Ref are optional filters, assigned on the result
+// afterward.
 func NewChangeQuery(tenant core.TenantID, from, to time.Time, limit int) ChangeQuery {
-	return ChangeQuery{Tenant: tenant.String(), From: from, To: to, Limit: limit}
+	return ChangeQuery{tenant: tenant.String(), From: from, To: to, Limit: limit}
 }
 
 // EventQuery selects raw events for audit, export, and debugging.
@@ -109,12 +111,12 @@ func changeSelection(q ChangeQuery) selection {
 	var args []any
 	if q.Ref != "" {
 		sb.WriteString(`SELECT c.* FROM change c WHERE c.tenant = $1 AND c.ref = $2`)
-		args = []any{q.Tenant, q.Ref}
+		args = []any{q.tenant, q.Ref}
 	} else {
 		sb.WriteString(`
 			SELECT c.* FROM change c
 			WHERE c.tenant = $1 AND c.start_at <= $2 AND c.end_effective >= $3`)
-		args = []any{q.Tenant, q.To.UTC(), q.From.UTC()}
+		args = []any{q.tenant, q.To.UTC(), q.From.UTC()}
 	}
 	args = appendChangeFilters(&sb, args, q)
 	sb.WriteString(" ORDER BY c.start_at ASC, c.ref ASC")
@@ -302,7 +304,7 @@ func (s *Store) QueryChanges(
 	// values this returns.
 	defer func() {
 		span.SetAttributes(
-			attribute.String("horopter.tenant", q.Tenant),
+			attribute.String("horopter.tenant", q.tenant),
 			attribute.Int("horopter.query.limit", q.Limit),
 			attribute.Int("horopter.query.rows", len(out)),
 			attribute.Bool("horopter.query.truncated", truncated),
@@ -321,7 +323,7 @@ func (s *Store) QueryChanges(
 	rows, err := s.pool.Query(ctx,
 		"SELECT "+changeColumns+" FROM ("+sel.sql+") l ORDER BY "+sel.order, sel.args...)
 	if err != nil {
-		return nil, false, fmt.Errorf("query changes for tenant %q: %w", q.Tenant, err)
+		return nil, false, fmt.Errorf("query changes for tenant %q: %w", q.tenant, err)
 	}
 	defer rows.Close()
 
@@ -341,7 +343,7 @@ func (s *Store) queryChangesWithinBytes(
 	rows, err := s.pool.Query(ctx, byteCutSQL(changeColumns, sel, len(args)), args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("query changes within %d bytes for tenant %q: %w",
-			q.MaxRowTextBytes, q.Tenant, err)
+			q.MaxRowTextBytes, q.tenant, err)
 	}
 	defer rows.Close()
 
@@ -423,7 +425,7 @@ func (s *Store) TenantExists(ctx context.Context, id string) (bool, error) {
 // same tenant, window, filters, order and over-fetch limit. q.MaxRowTextBytes is ignored; an
 // estimate is what decides whether to set it.
 func (s *Store) EstimateChanges(ctx context.Context, q ChangeQuery) (ReadEstimate, error) {
-	return s.estimate(ctx, "EstimateChanges", q.Tenant, changeSelection(q))
+	return s.estimate(ctx, "EstimateChanges", q.tenant, changeSelection(q))
 }
 
 // EstimateEvents measures the rows ListEvents would fetch for q, as EstimateChanges does.

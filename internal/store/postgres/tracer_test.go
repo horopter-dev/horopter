@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"horopter.dev/horopter/internal/core"
 	"horopter.dev/horopter/internal/store/postgres"
 )
 
@@ -101,8 +102,8 @@ func TestPoolTracerKeepsOtelpgxSpans(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
 
-	_, _, err := s.QueryChanges(ctx, postgres.ChangeQuery{
-		Tenant: tn, From: at, To: at.Add(time.Hour), Limit: 1})
+	_, _, err := s.QueryChanges(ctx,
+		postgres.NewChangeQuery(core.TenantIDFromRow(tn), at, at.Add(time.Hour), 1))
 	require.NoError(t, err)
 
 	names := map[string]bool{}

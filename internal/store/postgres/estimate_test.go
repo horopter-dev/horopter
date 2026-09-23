@@ -56,9 +56,8 @@ func eventRowBytes(t *testing.T, s *postgres.Store, tn string) []int64 {
 }
 
 func sizedWindow(tn string, limit int) postgres.ChangeQuery {
-	return postgres.ChangeQuery{
-		Tenant: tn, From: sizedBase.Add(-time.Hour), To: sizedBase.Add(time.Hour), Limit: limit,
-	}
+	return postgres.NewChangeQuery(
+		core.TenantIDFromRow(tn), sizedBase.Add(-time.Hour), sizedBase.Add(time.Hour), limit)
 }
 
 func changeRefs(changes []core.Change) []string {

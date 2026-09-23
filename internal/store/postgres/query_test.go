@@ -40,9 +40,8 @@ func TestOverlapPredicate(t *testing.T) {
 	seed("onendboundary", base.Add(-2*time.Hour), at(0))
 	// at(0) == winFrom exactly, so end_effective == From exactly.
 
-	got, _, err := s.QueryChanges(ctx, postgres.ChangeQuery{
-		Tenant: tn, From: winFrom, To: winTo,
-	})
+	got, _, err := s.QueryChanges(ctx,
+		postgres.NewChangeQuery(core.TenantIDFromRow(tn), winFrom, winTo, 0))
 	require.NoError(t, err)
 
 	refs := map[string]bool{}
@@ -84,23 +83,26 @@ func TestQueryChangesFiltersBySubjectTypeAndStatus(t *testing.T) {
 		mkEvent(tn, eventID(t, "d2-started"), "k3", "d2", "deployment.started", at))
 	require.NoError(t, err)
 
-	byStatus, _, err := s.QueryChanges(ctx, postgres.ChangeQuery{
-		Tenant: tn, From: at.Add(-time.Hour), To: at.Add(time.Hour), Status: "failed",
-	})
+	statusQuery := postgres.NewChangeQuery(
+		core.TenantIDFromRow(tn), at.Add(-time.Hour), at.Add(time.Hour), 0)
+	statusQuery.Status = "failed"
+	byStatus, _, err := s.QueryChanges(ctx, statusQuery)
 	require.NoError(t, err)
 	require.Len(t, byStatus, 1, "the in_progress d2 must be excluded by the status filter")
 	assert.Equal(t, "d1", byStatus[0].Ref)
 
-	byType, _, err := s.QueryChanges(ctx, postgres.ChangeQuery{
-		Tenant: tn, From: at.Add(-time.Hour), To: at.Add(time.Hour), Type: "deployment.started",
-	})
+	typeQuery := postgres.NewChangeQuery(
+		core.TenantIDFromRow(tn), at.Add(-time.Hour), at.Add(time.Hour), 0)
+	typeQuery.Type = "deployment.started"
+	byType, _, err := s.QueryChanges(ctx, typeQuery)
 	require.NoError(t, err)
 	require.Len(t, byType, 1, "d1's type moved on to deployment.failed; only d2 must match")
 	assert.Equal(t, "d2", byType[0].Ref)
 
-	none, _, err := s.QueryChanges(ctx, postgres.ChangeQuery{
-		Tenant: tn, From: at.Add(-time.Hour), To: at.Add(time.Hour), Subject: "other/stack",
-	})
+	subjectQuery := postgres.NewChangeQuery(
+		core.TenantIDFromRow(tn), at.Add(-time.Hour), at.Add(time.Hour), 0)
+	subjectQuery.Subject = "other/stack"
+	none, _, err := s.QueryChanges(ctx, subjectQuery)
 	require.NoError(t, err)
 	assert.Empty(t, none)
 }
@@ -132,10 +134,11 @@ func TestQueryChangesCombinesFiltersAndLimit(t *testing.T) {
 			"deployment.started", at.Add(20*time.Minute)))
 	require.NoError(t, err)
 
-	combined, _, err := s.QueryChanges(ctx, postgres.ChangeQuery{
-		Tenant: tn, From: at.Add(-time.Hour), To: at.Add(time.Hour),
-		Subject: "acme/prod", Type: "deployment.completed", Status: "completed",
-	})
+	combinedQuery := postgres.NewChangeQuery(
+		core.TenantIDFromRow(tn), at.Add(-time.Hour), at.Add(time.Hour), 0)
+	combinedQuery.Subject, combinedQuery.Type, combinedQuery.Status =
+		"acme/prod", "deployment.completed", "completed"
+	combined, _, err := s.QueryChanges(ctx, combinedQuery)
 	require.NoError(t, err)
 	require.Len(t, combined, 2,
 		"three filters combined must keep both completed changes and drop multi-c")
@@ -143,10 +146,11 @@ func TestQueryChangesCombinesFiltersAndLimit(t *testing.T) {
 		"ORDER BY start_at ASC must list the earlier row first")
 	assert.Equal(t, "multi-b", combined[1].Ref)
 
-	limited, _, err := s.QueryChanges(ctx, postgres.ChangeQuery{
-		Tenant: tn, From: at.Add(-time.Hour), To: at.Add(time.Hour),
-		Subject: "acme/prod", Type: "deployment.completed", Status: "completed", Limit: 1,
-	})
+	limitedQuery := postgres.NewChangeQuery(
+		core.TenantIDFromRow(tn), at.Add(-time.Hour), at.Add(time.Hour), 1)
+	limitedQuery.Subject, limitedQuery.Type, limitedQuery.Status =
+		"acme/prod", "deployment.completed", "completed"
+	limited, _, err := s.QueryChanges(ctx, limitedQuery)
 	require.NoError(t, err)
 	require.Len(t, limited, 1, "limit must cap the combined-filter result set")
 	assert.Equal(t, "multi-a", limited[0].Ref, "the earliest row by start_at must be the one kept")
@@ -161,9 +165,8 @@ func TestQueryChangesIsTenantScoped(t *testing.T) {
 		"deployment.started", at))
 	require.NoError(t, err)
 
-	got, _, err := s.QueryChanges(ctx, postgres.ChangeQuery{
-		Tenant: tn, From: at.Add(-time.Hour), To: at.Add(time.Hour),
-	})
+	got, _, err := s.QueryChanges(ctx, postgres.NewChangeQuery(
+		core.TenantIDFromRow(tn), at.Add(-time.Hour), at.Add(time.Hour), 0))
 	require.NoError(t, err)
 	assert.Empty(t, got, "queries must never cross tenants")
 }
@@ -381,9 +384,8 @@ func TestFailedQueryChangesStillRecordsItsAttributes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, _, err := s.QueryChanges(ctx, postgres.ChangeQuery{
-		Tenant: tn, From: from, To: to, Limit: 25,
-	})
+	_, _, err := s.QueryChanges(ctx,
+		postgres.NewChangeQuery(core.TenantIDFromRow(tn), from, to, 25))
 	require.Error(t, err, "a cancelled context must fail the query, not return an empty result")
 
 	assert.Equal(t, []string{tn},
