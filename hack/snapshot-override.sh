@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Writes docker-compose.snapshot.yml from the images `goreleaser release --snapshot` just
+# Writes docker-compose.snapshot.yaml from the images `goreleaser release --snapshot` just
 # built, so `task up:local` runs working-tree code.
 #
 # It reads dist/artifacts.json rather than `docker images`, because a snapshot loads all
@@ -36,4 +36,4 @@ command -v jq > /dev/null || {
     }
     printf '  %s:\n    image: %s\n' "$service" "$ref"
   done
-} > docker-compose.snapshot.yml
+} > docker-compose.snapshot.yaml

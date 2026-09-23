@@ -128,4 +128,4 @@ release:
   # as a GitHub prerelease and never becomes "Latest" — the whole point of the dev-tag scheme.
   prerelease: auto
   extra_files:
-    - glob: .render/docker-compose.yml
+    - glob: .render/docker-compose.yaml

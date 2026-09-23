@@ -8,7 +8,7 @@
 set -euo pipefail
 
 url="${HOROPTER_INGRESS_URL:-http://localhost:8080}"
-# Defaults to the compose stack's own fixed dev producer key (docker-compose.yml's
+# Defaults to the compose stack's own fixed dev producer key (docker-compose.yaml's
 # bootstrap service); set HOROPTER_DEV_PRODUCER_KEY to override it, e.g. after issuing your
 # own credential with `horoctl admin keys issue --role producer`.
 token="${HOROPTER_DEV_PRODUCER_KEY:-horo_dead00000001_00000000000000000000000000000000000000000000000000000000000000}"

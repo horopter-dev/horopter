@@ -23,9 +23,9 @@ either daemon anywhere its port can be reached.
 
 Horopter is published as four container images — `horopter-ingress`, `horopter-egress`,
 `horoctl-migrate` and `horoctl` — and a compose file that runs them. A release carries a
-`docker-compose.yml` release asset with that release's image tags already rendered in:
+`docker-compose.yaml` release asset with that release's image tags already rendered in:
 
-    curl -O https://github.com/horopter-dev/horopter/releases/download/v0.1.0/docker-compose.yml
+    curl -O https://github.com/horopter-dev/horopter/releases/download/v0.1.0/docker-compose.yaml
     docker compose up -d
 
 **Packages stay private while the repository is**, so pulling needs a `docker login` first
@@ -37,7 +37,7 @@ To work on Horopter today, clone it and run the development stack:
     task up:local    # builds images from the working tree with goreleaser release --snapshot
     task seed        # fills the running stack with changes in all three shapes
 
-`task up:local` builds from the working tree; `task up` pulls the tag `docker-compose.yml`
+`task up:local` builds from the working tree; `task up` pulls the tag `docker-compose.yaml`
 names instead of building locally:
 
     gh auth refresh -s read:packages
@@ -56,7 +56,7 @@ grants `issue` and would otherwise put a non-expiring, credential-minting key in
 than skipping: a dev key left bound to an earlier tenant or role is rebound, and the line it
 prints on stderr names what moved. The one thing it will not undo is a revocation — it stops
 and names the credential instead. Export the two dev keys
-to follow along below (they are also `docker-compose.yml`'s and `hack/seed.sh`'s own
+to follow along below (they are also `docker-compose.yaml`'s and `hack/seed.sh`'s own
 defaults, so `task seed` needs neither set):
 
     export HOROPTER_DEV_PRODUCER_KEY=horo_dead00000001_00000000000000000000000000000000000000000000000000000000000000
@@ -78,7 +78,7 @@ port 8080 and `horopter-egress` on port 8081.
 
 Each service is configured with environment variables:
 
-- `HOROPTER_IMAGE_TAG` — the published tag the repository's `docker-compose.yml` runs;
+- `HOROPTER_IMAGE_TAG` — the published tag the repository's `docker-compose.yaml` runs;
   defaults to the version committed in that file. `task up:local` ignores it, since it builds
   images from the working tree instead of pulling one.
 - `DATABASE_URL` — PostgreSQL connection string, required by all four binaries.
@@ -113,8 +113,8 @@ comes from database access, not from a presented key:
       --source github --locus github
 
 `--dsn` defaults to `DATABASE_URL` from the environment, so it can be omitted when that is
-already set — for the repository's own `docker-compose.yml`,
-`postgres://horopter:horopter@localhost:5432/horopter?sslmode=disable`, since `docker-compose.yml`
+already set — for the repository's own `docker-compose.yaml`,
+`postgres://horopter:horopter@localhost:5432/horopter?sslmode=disable`, since `docker-compose.yaml`
 publishes Postgres on that port.
 `admin tenant create` prints the new tenant's opaque id to stdout; `admin keys issue` prints
 the full key to stdout **once** — it cannot be recovered afterwards — and everything else
@@ -181,7 +181,7 @@ memory limit. That admission control limits what egress spends on reads — data
 and memory. It is not protection against a flood of requests, which belongs in front of the
 port, in a WAF or equivalent.
 
-**`docker-compose.yml` publishes both API ports (8080, 8081) and Postgres itself (5432) on
+**`docker-compose.yaml` publishes both API ports (8080, 8081) and Postgres itself (5432) on
 the host, with the username and password both `horopter`.** The API ports being reachable is
 no longer an exposure by itself — every route still needs a credential — but direct Postgres
 access is direct read and write access to the event log and the credential table, past every
@@ -327,10 +327,10 @@ The host and port defaults are the OpenTelemetry specification's, which has two 
   collector sidecar in the same pod can scrape it as shipped; anything scraping over the
   network needs `OTEL_EXPORTER_PROMETHEUS_HOST=0.0.0.0`. The images have no shell or `curl`,
   so `docker exec` cannot reach it either. This applies to the **repository's**
-  `docker-compose.yml` (`task up`/`task up:local`): it sets the host and publishes the ports
+  `docker-compose.yaml` (`task up`/`task up:local`): it sets the host and publishes the ports
   on the host's loopback — `curl localhost:9464/metrics` for ingress, `curl
-  localhost:9465/metrics` for egress. The released standalone `docker-compose.yml`
-  (`deploy/docker-compose.yml`) publishes neither the Postgres port nor these metrics ports.
+  localhost:9465/metrics` for egress. The released standalone `docker-compose.yaml`
+  (`deploy/docker-compose.yaml`) publishes neither the Postgres port nor these metrics ports.
 - **Both daemons default to port 9464.** In separate containers or pods that does not matter.
   Running both binaries on one host, or in one pod, needs a different port on one of them.
 
@@ -491,9 +491,9 @@ already stored are not re-checked.
 The repository moved from `yo61` to `horopter-dev`, and the images moved with it — to
 `ghcr.io/horopter-dev/horopter-{ingress,egress,migrate}`. GitHub does not move GHCR packages
 with a repository, so **v0.1.0-dev.1's images stay at `ghcr.io/yo61/horopter-*`**, and the
-`docker-compose.yml` asset that release carries names an address this project no longer
+`docker-compose.yaml` asset that release carries names an address this project no longer
 controls. That asset cannot be rewritten, only superseded: take v0.1.0-dev.2's instead, or
-re-pull this repository's `docker-compose.yml`.
+re-pull this repository's `docker-compose.yaml`.
 
 Nothing in the database changes. An operator on v0.1.0-dev.1 needs new image references and
 a `docker login` that can read the new organisation's packages; the schema version is
