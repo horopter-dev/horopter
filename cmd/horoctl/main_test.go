@@ -165,6 +165,27 @@ func TestAnUnknownVerbIsDelegatedToPATH(t *testing.T) {
 	assert.Contains(t, runHoroctl(t, "weather"), "sunny")
 }
 
+// TestDelegatedPluginExitCodeIsPreserved pins exit-code fidelity through delegation: a
+// caller scripting `horoctl weather; case $? in 3) ... esac` must see the plugin's own
+// exit code, not a fixed 1, and must not see horoctl's own wrapper text on top of
+// whatever the plugin already wrote to stderr.
+func TestDelegatedPluginExitCodeIsPreserved(t *testing.T) {
+	dir := t.TempDir()
+	writeExecutable(t, filepath.Join(dir, "horoctl-flaky"),
+		"#!/bin/sh\necho plugin reported this on stderr >&2\nexit 3\n")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, stderr, err := execHoroctl(t, "flaky")
+	require.Error(t, err)
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	assert.Equal(t, 3, exitErr.ExitCode())
+	assert.Contains(t, stderr, "plugin reported this on stderr",
+		"the plugin's own stderr must still pass through")
+	assert.NotContains(t, stderr, "exit status",
+		"the plugin already reported; horoctl must not add its own wrapper line on top")
+}
+
 func TestAnUnknownVerbWithNoPluginFails(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	out, err := runHoroctlErr(t, "nosuchverb")
@@ -180,13 +201,19 @@ func TestIssueRejectsALocusContainingASlash(t *testing.T) {
 	assert.Contains(t, out, "unsplittable")
 }
 
+// devExplicitKeyPrefix is a valid-hex, 12-character prefix: parseExplicitKey validates an
+// explicit key against the identical rule auth.SplitKey enforces on a presented
+// credential, so a fixture prefix has to satisfy that rule to ever be usable, the same as
+// one auth.NewKey would generate.
+const devExplicitKeyPrefix = "deaddeaddead"
+
 func TestIssueWithAnExplicitKeyWarns(t *testing.T) {
-	// The key's prefix ("devdevdevdev") is fixed by the test, not generated, so a second
-	// run in the same shared database must not collide with the first run's row.
-	resetCredential(t, "devdevdevdev")
+	// The key's prefix is fixed by the test, not generated, so a second run in the same
+	// shared database must not collide with the first run's row.
+	resetCredential(t, devExplicitKeyPrefix)
 	_, stderr := runHoroctlSplit(t, "admin", "keys", "issue",
 		"--tenant", tenantID, "--role", "producer", "--source", "dev",
-		"--key", "horo_devdevdevdev_"+strings.Repeat("a", 64))
+		"--key", "horo_"+devExplicitKeyPrefix+"_"+strings.Repeat("a", 64))
 	assert.Contains(t, stderr, "development only")
 }
 
@@ -196,6 +223,19 @@ func TestIssueRejectsAShortExplicitKey(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestIssueRejectsANonHexExplicitKeyPrefix pins the fix for a credential that would
+// otherwise insert cleanly and then never authenticate: auth.SplitKey requires a 12-
+// character hex prefix, and a --key that does not match it must be refused at issue time
+// with a message naming the requirement, not stored as a credential nothing can present.
+func TestIssueRejectsANonHexExplicitKeyPrefix(t *testing.T) {
+	out, err := runHoroctlErr(t, "admin", "keys", "issue",
+		"--tenant", tenantID, "--role", "producer", "--source", "dev",
+		"--key", "horo_devdevdevdev_"+strings.Repeat("a", 64))
+	require.Error(t, err)
+	assert.Contains(t, out, "auth.SplitKey",
+		"the error must name the requirement an operator has to satisfy")
+}
+
 func TestTenantCreateMintsAnOpaqueID(t *testing.T) {
 	stdout, _ := runHoroctlSplit(t, "admin", "tenant", "create", "--display-name", "acme")
 	id := strings.TrimSpace(stdout)
@@ -203,11 +243,14 @@ func TestTenantCreateMintsAnOpaqueID(t *testing.T) {
 	assert.NotContains(t, id, "acme", "the id is opaque; the display name is not the id")
 }
 
+// devProducerPrefix and devReaderPrefix are valid-hex, 12-character prefixes — the shape
+// auth.SplitKey requires of any credential that is to authenticate a real request, dev
+// convenience or not.
 const (
-	devProducerPrefix = "dev-producer-key"
+	devProducerPrefix = "dead00000001"
 	devProducerKey    = "horo_" + devProducerPrefix + "_" +
 		"00000000000000000000000000000000000000000000000000000000000000"
-	devReaderPrefix = "dev-reader-key"
+	devReaderPrefix = "dead00000002"
 	devReaderKey    = "horo_" + devReaderPrefix + "_" +
 		"11111111111111111111111111111111111111111111111111111111111111"
 )

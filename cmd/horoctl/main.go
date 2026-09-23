@@ -11,6 +11,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -41,9 +42,24 @@ func main() {
 		return
 	}
 	if err := delegate(verb, os.Args[2:]); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		exitDelegated(err)
 	}
+}
+
+// exitDelegated exits with the delegated plugin's own exit code when err reports one, so
+// a caller scripting `horoctl weather; case $? in 3) ...` sees exactly what the plugin
+// returned. The plugin's stdout and stderr were already connected straight through in
+// delegate, so nothing more is printed here — a wrapper message on top of what the plugin
+// already reported would be a second, redundant account of the same failure. Only an error
+// delegate raised itself (an unknown verb, a plugin that could not be started at all) is
+// horoctl's own to report, and gets the generic exit 1.
+func exitDelegated(err error) {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		os.Exit(exitErr.ExitCode())
+	}
+	fmt.Fprintln(os.Stderr, err)
+	os.Exit(1)
 }
 
 // delegate runs horoctl-<verb> from PATH. Schema-touching verbs are in compiledIn and are
