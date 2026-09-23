@@ -77,18 +77,8 @@ func (e Event) Validate() error {
 			"%w %q: tenant is required; it comes from the appending credential, so this "+
 				"credential is not bound to one", ErrInvalidEvent, e.ID)
 	}
-	if e.Source == "" {
-		return fmt.Errorf("%w %q: source is required, e.g. \"buildkite/pipelines/api\"",
-			ErrInvalidEvent, e.ID)
-	}
-	if e.Type == "" {
-		return fmt.Errorf("%w %q: type is required, e.g. \"deployment.started\"",
-			ErrInvalidEvent, e.ID)
-	}
-	if e.Subject == "" {
-		return fmt.Errorf(
-			"%w %q: subject is required — the entity the change "+
-				"happened to, e.g. \"acme/prod\"", ErrInvalidEvent, e.ID)
+	if err := e.validateRequiredText(); err != nil {
+		return err
 	}
 	if e.OccurredAt.IsZero() {
 		return fmt.Errorf("%w %q: occurred_at is required and must be an RFC3339 timestamp",
@@ -99,6 +89,32 @@ func (e Event) Validate() error {
 			"%w %q: schema_version %d is not supported; this build "+
 				"understands version %d",
 			ErrInvalidEvent, e.ID, e.SchemaVersion, CurrentSchemaVersion)
+	}
+	// Checked here so it is the caller's fault, not the store's. event_origin_vocabulary
+	// rejects an empty origin, and a constraint violation reaches ingress as a store failure
+	// — a 503 telling the producer to retry a request that can never succeed.
+	if err := e.Origin.Validate(); err != nil {
+		return fmt.Errorf("%w %q: %w; origin is derived from the appending credential",
+			ErrInvalidEvent, e.ID, err)
+	}
+	return nil
+}
+
+// validateRequiredText reports the first required text field the event leaves empty, naming
+// an example of what it should carry. Split out of Validate to keep its branching within the
+// complexity limit.
+func (e Event) validateRequiredText() error {
+	switch {
+	case e.Source == "":
+		return fmt.Errorf("%w %q: source is required, e.g. \"buildkite/pipelines/api\"",
+			ErrInvalidEvent, e.ID)
+	case e.Type == "":
+		return fmt.Errorf("%w %q: type is required, e.g. \"deployment.started\"",
+			ErrInvalidEvent, e.ID)
+	case e.Subject == "":
+		return fmt.Errorf(
+			"%w %q: subject is required — the entity the change "+
+				"happened to, e.g. \"acme/prod\"", ErrInvalidEvent, e.ID)
 	}
 	return nil
 }

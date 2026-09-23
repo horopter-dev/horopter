@@ -1227,3 +1227,40 @@ func TestTheAnnotationPOSTRoutesAreGone(t *testing.T) {
 		postTo(t, h, key, "/adapters/grafana/acme/annotations").Code,
 		"no {tenant} pattern survives, so this path matches nothing at all")
 }
+
+// TestGrafanaAnnotationsRejectsARef pins the route's shape. The ref filter belongs to
+// GET /v1/changes: it takes the full stored <locus>/<ref>, which no Grafana dashboard
+// variable can produce, and it makes the window meaningless — this route answered "what
+// overlapped from/to" while demanding a window changeSelection then discarded. Refusing it
+// names the route that does the lookup instead of quietly offering a second spelling.
+func TestGrafanaAnnotationsRejectsARef(t *testing.T) {
+	srv, s, tn := newServerWith(t, 0, egress.DefaultLimits())
+	h := srv.Routes()
+	key := readerKey(t, s, tn)
+	seed(t, s, tn, "github/deploy-1", "deployment.started", fixed)
+
+	rec := get(t, h, key, "/adapters/grafana/annotations?tenant="+tn+
+		"&from=1789376400000&to=1789383600000&ref="+url.QueryEscape("github/deploy-1"))
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "/v1/changes?ref=",
+		"the refusal must name the route that does support a ref lookup")
+}
+
+// TestListEventsReturnsOriginAndEdited pins the two server-set columns on the audit route.
+// Both are stored and neither was readable: origin is the only record of whether a human or
+// a process appended the event, which is exactly what an export exists to carry.
+func TestListEventsReturnsOriginAndEdited(t *testing.T) {
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	seed(t, s, tn, "dep-origin", "deployment.started", fixed)
+
+	rec := get(t, h, key, "/v1/events?tenant="+tn+"&ref=dep-origin")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var events []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &events))
+	require.Len(t, events, 1)
+	assert.Equal(t, string(core.OriginProcess), events[0]["origin"],
+		"every Tier 0 credential is a machine key, so every event is origin=process")
+	assert.Equal(t, false, events[0]["edited"])
+}

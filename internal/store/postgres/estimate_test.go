@@ -55,9 +55,9 @@ func eventRowBytes(t *testing.T, s *postgres.Store, tn string) []int64 {
 	return sizes
 }
 
-func sizedWindow(tn string, limit int) postgres.ChangeQuery {
-	return postgres.NewChangeQuery(
-		core.TenantIDFromRow(tn), sizedBase.Add(-time.Hour), sizedBase.Add(time.Hour), limit)
+func sizedWindow(t *testing.T, tn string, limit int) postgres.ChangeQuery {
+	t.Helper()
+	return changeQuery(t, tn, sizedBase.Add(-time.Hour), sizedBase.Add(time.Hour), limit)
 }
 
 func changeRefs(changes []core.Change) []string {
@@ -74,7 +74,7 @@ func TestEstimateChangesMeasuresTheRowsQueryChangesReads(t *testing.T) {
 	require.Equal(t, int64(10), sizes[1]-sizes[0],
 		"a value 10 bytes longer makes a row 10 bytes longer; if not, the oracle is wrong")
 
-	est, err := s.EstimateChanges(ctx, sizedWindow(tn, 10))
+	est, err := s.EstimateChanges(ctx, sizedWindow(t, tn, 10))
 
 	require.NoError(t, err)
 	assert.Equal(t, postgres.ReadEstimate{
@@ -91,7 +91,7 @@ func TestEstimateChangesAppliesTheQuerysFiltersAndLimit(t *testing.T) {
 	_, _, err := s.AppendEvent(ctx, other)
 	require.NoError(t, err)
 
-	filtered := sizedWindow(tn, 10)
+	filtered := sizedWindow(t, tn, 10)
 	filtered.Subject = "acme/prod"
 	est, err := s.EstimateChanges(ctx, filtered)
 	require.NoError(t, err)
@@ -99,7 +99,7 @@ func TestEstimateChangesAppliesTheQuerysFiltersAndLimit(t *testing.T) {
 		Rows: 3, TotalBytes: sizes[0] + sizes[1] + sizes[2], FirstRowBytes: sizes[0],
 	}, est, "the subject filter must exclude the other change")
 
-	limited := sizedWindow(tn, 1)
+	limited := sizedWindow(t, tn, 1)
 	limited.Subject = "acme/prod"
 	est, err = s.EstimateChanges(ctx, limited)
 	require.NoError(t, err)
@@ -115,9 +115,9 @@ func TestEstimateChangesAppliesTheQuerysFiltersAndLimit(t *testing.T) {
 func TestEstimateOfAnEmptyReadIsZero(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 
-	changes, err := s.EstimateChanges(ctx, sizedWindow(tn, 10))
+	changes, err := s.EstimateChanges(ctx, sizedWindow(t, tn, 10))
 	require.NoError(t, err)
-	events, err := s.EstimateEvents(ctx, postgres.EventQuery{Tenant: tn, Limit: 10})
+	events, err := s.EstimateEvents(ctx, eventQuery(t, tn, 10))
 	require.NoError(t, err)
 
 	assert.Equal(t, postgres.ReadEstimate{}, changes)
@@ -130,9 +130,9 @@ func TestEstimateEventsMeasuresTheRowsListEventsReads(t *testing.T) {
 	sizes := eventRowBytes(t, s, tn)
 	require.Len(t, sizes, 3)
 
-	all, err := s.EstimateEvents(ctx, postgres.EventQuery{Tenant: tn, Limit: 10})
+	all, err := s.EstimateEvents(ctx, eventQuery(t, tn, 10))
 	require.NoError(t, err)
-	one, err := s.EstimateEvents(ctx, postgres.EventQuery{Tenant: tn, Ref: refs[1], Limit: 10})
+	one, err := s.EstimateEvents(ctx, refQuery(t, tn, refs[1]))
 	require.NoError(t, err)
 
 	assert.Equal(t, postgres.ReadEstimate{
@@ -161,7 +161,7 @@ func TestQueryChangesCutsAtTheByteBudget(t *testing.T) {
 		{"within budget but over the limit", every, 2, refs[:2], true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			q := sizedWindow(tn, tc.limit)
+			q := sizedWindow(t, tn, tc.limit)
 			q.MaxRowTextBytes = tc.budget
 
 			got, truncated, err := s.QueryChanges(ctx, q)
@@ -191,7 +191,7 @@ func TestListEventsCutsAtTheByteBudget(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, truncated, err := s.ListEvents(ctx,
-				postgres.EventQuery{Tenant: tn, Limit: 10, MaxRowTextBytes: tc.budget})
+				cutEventQuery(t, tn, 10, tc.budget))
 
 			require.NoError(t, err)
 			assert.Len(t, got, tc.rows)
@@ -204,7 +204,7 @@ func TestListEventsCutsAtTheByteBudget(t *testing.T) {
 // that returns nothing because there was nothing must not claim rows were discarded.
 func TestAByteCutOfAnEmptyReadIsNotTruncated(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
-	q := sizedWindow(tn, 10)
+	q := sizedWindow(t, tn, 10)
 	q.MaxRowTextBytes = 1
 
 	got, truncated, err := s.QueryChanges(ctx, q)

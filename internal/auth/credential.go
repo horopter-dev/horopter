@@ -18,6 +18,18 @@ const (
 	secretBytes = 32
 )
 
+// MaxHeaderBytes is what both daemons set on http.Server.MaxHeaderBytes: it bounds the
+// request line plus headers, Authorization included.
+//
+// It lives here rather than in either main because what it bounds is this package's hot path.
+// Go's 1 MiB default is what made an oversized Authorization header worth sending: SplitKey
+// bounds the lookup prefix, but the secret half is only length-checked by a constant-time
+// compare, so a large header still costs one SHA-256 before rejection. 16 KiB comfortably fits
+// a real request's headers — the Authorization header itself is under 100 bytes — with
+// headroom for whatever a proxy in front of a daemon adds. Two copies of this number could
+// drift so that one daemon's bound quietly stopped matching the other's.
+const MaxHeaderBytes = 16 << 10
+
 // hashSecret uses SHA-256 rather than a memory-hard hash: the secret is 32 bytes of
 // server-generated randomness, and this runs on every request.
 func hashSecret(secret string) string {

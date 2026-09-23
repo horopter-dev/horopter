@@ -467,3 +467,136 @@ func TestAGlobalProducerCredentialIsIssuable(t *testing.T) {
 		`SELECT tenant_id FROM credential WHERE key_prefix = $1`, prefix).Scan(&storedTenant))
 	assert.Nil(t, storedTenant, "a global credential's tenant_id must be NULL")
 }
+
+// execDB runs one statement against the shared development database, for a test that has to
+// put the database into a state horoctl itself will not create — residue an earlier run left.
+func execDB(t *testing.T, sql string, args ...any) {
+	t.Helper()
+	pool, err := testdb.Pool()
+	require.NoError(t, err)
+	_, err = pool.Exec(context.Background(), sql, args...)
+	require.NoError(t, err)
+}
+
+// credentialBinding reads back what a credential is bound to.
+func credentialBinding(t *testing.T, prefix string) (tenantID, role string) {
+	t.Helper()
+	pool, err := testdb.Pool()
+	require.NoError(t, err)
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT COALESCE(tenant_id, ''), role FROM credential WHERE key_prefix = $1`,
+		prefix).Scan(&tenantID, &role))
+	return tenantID, role
+}
+
+// seedRole adds a role to the table and removes it afterwards. The name is unique per run
+// because the shared development database is never truncated, and the capabilities are what
+// the test is about — the name is not.
+func seedRole(t *testing.T, capabilities []string) string {
+	t.Helper()
+	name := "auditor-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	execDB(t, `INSERT INTO role (name, capabilities) VALUES ($1, $2)`, name, capabilities)
+	t.Cleanup(func() { execDB(t, `DELETE FROM role WHERE name = $1`, name) })
+	return name
+}
+
+// TestIssueRefusesASubjectPatternOnEveryAdminCapableRole is the composition the whole-branch
+// review found: role is a table precisely so the vocabulary can grow, so an issue-time check
+// that enumerates tenant_admin and superuser goes stale the moment a role is added. Such a
+// credential inserted cleanly, printed a key, and then answered 401 on every request it ever
+// made, because internal/auth refuses an admin-capable credential carrying a subject pattern.
+// The check reads role.capabilities now, which is the same fact the middleware tests.
+func TestIssueRefusesASubjectPatternOnEveryAdminCapableRole(t *testing.T) {
+	role := seedRole(t, []string{"read", "admin"})
+	out, err := runHoroctlErr(t, "admin", "keys", "issue", "--tenant", tenantID,
+		"--role", role, "--source", "github", "--subject-pattern", "x/*")
+	require.Error(t, err)
+	assert.Contains(t, out, "grants admin")
+	assert.NotContains(t, out, "horo_",
+		"a credential that can never authenticate must not be minted, let alone printed")
+}
+
+// TestIssueAllowsASubjectPatternOnANewNonAdminRole is the other half: the check must follow
+// the capabilities rather than refuse every unfamiliar name.
+func TestIssueAllowsASubjectPatternOnANewNonAdminRole(t *testing.T) {
+	role := seedRole(t, []string{"read"})
+	stdout, _ := runHoroctlSplit(t, "admin", "keys", "issue", "--tenant", tenantID,
+		"--role", role, "--source", "github", "--subject-pattern", "x/*")
+
+	prefix, _, ok := auth.SplitKey(strings.TrimSpace(stdout))
+	require.True(t, ok)
+	cleanupCredential(t, prefix)
+}
+
+func TestIssueRejectsAnUnknownRole(t *testing.T) {
+	out, err := runHoroctlErr(t, "admin", "keys", "issue", "--tenant", tenantID,
+		"--role", "not-a-role", "--source", "github")
+	require.Error(t, err)
+	assert.Contains(t, out, "unknown role")
+	assert.NotContains(t, out, "horo_", "an unknown role must fail before a key is minted")
+}
+
+// bootstrapFixture is one bootstrap invocation over prefixes and a tenant no other test
+// shares, so a test may leave the credential in a state the dev stack's own keys must not be
+// left in. Cleanup order is deliberate: the tenant row is registered for deletion first so it
+// runs last, after the credentials whose foreign keys point at it.
+type bootstrapFixture struct {
+	args                         []string
+	displayName                  string
+	producerPrefix, readerPrefix string
+}
+
+func newBootstrapFixture(t *testing.T, producerPrefix, readerPrefix string) bootstrapFixture {
+	t.Helper()
+	name := "horoctl-bootstrap-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	t.Cleanup(func() { execDB(t, `DELETE FROM tenant WHERE display_name = $1`, name) })
+	resetCredential(t, producerPrefix)
+	resetCredential(t, readerPrefix)
+
+	key := func(prefix string) string { return "horo_" + prefix + "_" + strings.Repeat("a", 62) }
+	return bootstrapFixture{
+		args: []string{"admin", "bootstrap", "--display-name", name, "--source", "dev",
+			"--locus", "dev", "--producer-key", key(producerPrefix),
+			"--reader-key", key(readerPrefix)},
+		displayName:    name,
+		producerPrefix: producerPrefix,
+		readerPrefix:   readerPrefix,
+	}
+}
+
+// TestBootstrapReconcilesACredentialBoundElsewhere pins what "idempotent by design" has to
+// mean. Treating "a credential with this prefix exists" as done left a key bound to whatever
+// tenant and role an earlier run gave it: both daemons then authenticated against the stale
+// row while bootstrap reported success, and because bootstrap runs on every container start
+// nothing ever corrected it.
+func TestBootstrapReconcilesACredentialBoundElsewhere(t *testing.T) {
+	f := newBootstrapFixture(t, "beef00000001", "beef00000002")
+	require.NoError(t, runHoroctlOK(t, f.args...))
+	wantTenant, _ := credentialBinding(t, f.producerPrefix)
+
+	execDB(t, `UPDATE credential SET tenant_id = $1, role = 'reader' WHERE key_prefix = $2`,
+		tenantID, f.producerPrefix)
+
+	_, stderr := runHoroctlSplit(t, f.args...)
+
+	gotTenant, gotRole := credentialBinding(t, f.producerPrefix)
+	assert.Equal(t, wantTenant, gotTenant, "a key left bound to another tenant must be rebound")
+	assert.Equal(t, "producer", gotRole, "and to the role bootstrap issues it as")
+	assert.Contains(t, stderr, "reconciled credential "+f.producerPrefix,
+		"the correction must be visible, not silent")
+	assert.Contains(t, stderr, "tenant ")
+}
+
+// TestBootstrapRefusesToUnRevokeACredential is the one mismatch bootstrap does not own.
+// Clearing revoked_at on the next container start would undo an operator's deliberate act
+// with nothing said, so it fails loudly and names the credential instead.
+func TestBootstrapRefusesToUnRevokeACredential(t *testing.T) {
+	f := newBootstrapFixture(t, "beef00000003", "beef00000004")
+	require.NoError(t, runHoroctlOK(t, f.args...))
+	execDB(t, `UPDATE credential SET revoked_at = now() WHERE key_prefix = $1`, f.producerPrefix)
+
+	out, err := runHoroctlErr(t, f.args...)
+	require.Error(t, err)
+	assert.Contains(t, out, f.producerPrefix)
+	assert.Contains(t, out, "revoked")
+}

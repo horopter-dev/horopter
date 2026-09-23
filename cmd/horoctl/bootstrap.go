@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -126,10 +127,32 @@ func resolveTenant(ctx context.Context, pool *pgxpool.Pool, displayName string) 
 	return id, nil
 }
 
-// ensureCredential issues role's credential under explicitKey's prefix unless a credential
-// with that prefix already exists, which is what makes bootstrap idempotent: `keys issue`
-// always mints a fresh credential, but bootstrap's whole purpose is being safe to run on
-// every container start.
+// bootstrapBinding is everything bootstrap owns about one credential: what the daemons
+// authenticate it as, and the secret they authenticate it by. Revocation is deliberately not
+// in it — see ensureCredential.
+type bootstrapBinding struct {
+	tenantID, role, source, locus, hash string
+}
+
+// storedCredential is an existing credential row as ensureCredential reads it.
+type storedCredential struct {
+	binding bootstrapBinding
+	revoked bool
+}
+
+// ensureCredential makes the credential behind explicitKey exist, bound to this bootstrap's
+// tenant, role, source and locus, and carrying explicitKey's own secret.
+//
+// It RECONCILES an existing row rather than skipping it. "A credential with this prefix
+// exists" is not the fact bootstrap needs — "the stack authenticates as this tenant with this
+// key" is — and the two come apart whenever a development database carries residue: a key
+// bound to an earlier tenant or role stays bound to it, both daemons authenticate against the
+// stale row, and bootstrap reports success. Because bootstrap runs on every container start,
+// skipping makes that permanent rather than transient.
+//
+// The one mismatch it will not reconcile is a revoked row. Revocation is an operator's
+// deliberate act and bootstrap does not own it; clearing it on the next container start would
+// undo that decision with nothing said. That fails loudly instead, naming the prefix.
 func ensureCredential(
 	ctx context.Context, pool *pgxpool.Pool, bctx bootstrapContext, role, explicitKey string,
 ) error {
@@ -137,22 +160,86 @@ func ensureCredential(
 	if err != nil {
 		return err
 	}
-
-	var exists bool
-	err = pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM credential WHERE key_prefix = $1)`, prefix).Scan(&exists)
-	if err != nil {
-		return fmt.Errorf("check existing credential: %w", err)
+	want := bootstrapBinding{
+		tenantID: bctx.tenantID, role: role, source: bctx.source, locus: bctx.locus,
+		hash: auth.HashSecret(secret),
 	}
-	if exists {
+
+	got, found, err := loadCredential(ctx, pool, prefix)
+	if err != nil {
+		return err
+	}
+	if !found {
+		fmt.Fprintf(os.Stderr,
+			"warning: %s credential uses an explicit key; development only — never use it "+
+				"in production\n", role)
+		return issueCredential(ctx, pool, issueParams{
+			tenant: want.tenantID, role: want.role, source: want.source, locus: want.locus,
+			prefix: prefix, hash: want.hash,
+		})
+	}
+	if got.revoked {
+		return fmt.Errorf(
+			"credential %s is revoked; bootstrap will not un-revoke one — issue a fresh key, "+
+				"or clear revoked_at deliberately if the revocation was a mistake", prefix)
+	}
+	return reconcileCredential(ctx, pool, prefix, got.binding, want)
+}
+
+// loadCredential reads the credential stored under prefix, reporting false when there is none.
+func loadCredential(
+	ctx context.Context, pool *pgxpool.Pool, prefix string,
+) (storedCredential, bool, error) {
+	var c storedCredential
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(tenant_id, ''), role, source, locus, key_hash, revoked_at IS NOT NULL
+		FROM credential WHERE key_prefix = $1`, prefix).Scan(
+		&c.binding.tenantID, &c.binding.role, &c.binding.source, &c.binding.locus,
+		&c.binding.hash, &c.revoked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return storedCredential{}, false, nil
+	}
+	if err != nil {
+		return storedCredential{}, false, fmt.Errorf("read credential %s: %w", prefix, err)
+	}
+	return c, true, nil
+}
+
+// reconcileCredential rewrites the stored row to want when it differs, naming on stderr which
+// fields moved so the correction is visible rather than silent.
+func reconcileCredential(
+	ctx context.Context, pool *pgxpool.Pool, prefix string, got, want bootstrapBinding,
+) error {
+	if got == want {
 		return nil
 	}
+	_, err := pool.Exec(ctx, `
+		UPDATE credential SET tenant_id = $1, role = $2, source = $3, locus = $4, key_hash = $5
+		WHERE key_prefix = $6`,
+		want.tenantID, want.role, want.source, want.locus, want.hash, prefix)
+	if err != nil {
+		return fmt.Errorf("reconcile credential %s: %w", prefix, err)
+	}
+	fmt.Fprintf(os.Stderr, "reconciled credential %s: %s\n", prefix, describeDrift(got, want))
+	return nil
+}
 
-	fmt.Fprintf(os.Stderr,
-		"warning: %s credential uses an explicit key; development only — never use it in "+
-			"production\n", role)
-	return issueCredential(ctx, pool, issueParams{
-		tenant: bctx.tenantID, role: role, source: bctx.source, locus: bctx.locus,
-		prefix: prefix, hash: auth.HashSecret(secret),
-	})
+// describeDrift names the fields that differ. The secret is reported as replaced and never
+// printed, so a reconciliation line is safe in a container log.
+func describeDrift(got, want bootstrapBinding) string {
+	var moved []string
+	for _, f := range []struct{ name, from, to string }{
+		{"tenant", got.tenantID, want.tenantID},
+		{"role", got.role, want.role},
+		{"source", got.source, want.source},
+		{"locus", got.locus, want.locus},
+	} {
+		if f.from != f.to {
+			moved = append(moved, fmt.Sprintf("%s %s -> %s", f.name, f.from, f.to))
+		}
+	}
+	if got.hash != want.hash {
+		moved = append(moved, "key secret replaced")
+	}
+	return strings.Join(moved, ", ")
 }

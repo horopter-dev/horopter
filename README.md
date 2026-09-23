@@ -52,7 +52,10 @@ a `bootstrap` service runs `horoctl admin bootstrap`, which creates a `default` 
 absent and issues two fixed development credentials if their key prefixes are absent — one
 `producer` (`append` only) and one `reader` (`read` only), never a `superuser`, which also
 grants `issue` and would otherwise put a non-expiring, credential-minting key in `.env`.
-`bootstrap` is idempotent, so running `task up` twice does not error. Export the two dev keys
+`bootstrap` is idempotent, so running `task up` twice does not error. It reconciles rather
+than skipping: a dev key left bound to an earlier tenant or role is rebound, and the line it
+prints on stderr names what moved. The one thing it will not undo is a revocation — it stops
+and names the credential instead. Export the two dev keys
 to follow along below (they are also `docker-compose.yml`'s and `hack/seed.sh`'s own
 defaults, so `task seed` needs neither set):
 
@@ -117,9 +120,12 @@ publishes Postgres on that port.
 the full key to stdout **once** — it cannot be recovered afterwards — and everything else
 (the prefix, role, tenant and locus it issued) to stderr.
 
-Four roles exist, each a fixed set of capabilities: `producer` (`append`), `reader`
-(`read`), `tenant_admin` (`read`, `admin`) and `superuser` (`append`, `read`, `admin`,
-`issue`) — see [Security](#security) for what each capability gates. `--tenant` scopes a
+Four roles are seeded: `producer` (`append`), `reader` (`read`), `tenant_admin` (`read`,
+`admin`) and `superuser` (`append`, `read`, `admin`, `issue`) — see
+[Security](#security) for what each capability gates. They are rows in a `role` table rather
+than a list in code, so the vocabulary can grow without a migration; `keys issue` reads a
+role's capabilities from that table, which is the same fact the daemons check at request
+time, so a role added later is refused or allowed identically at both ends. `--tenant` scopes a
 credential to one tenant; omit it for a global credential valid for any tenant named with
 `?tenant=`. `admin keys list [--tenant <id>]` and `admin keys revoke --prefix <prefix>`
 manage what already exists.
@@ -135,7 +141,10 @@ authenticate.
 **Every non-probe route on both daemons now requires an issued credential.** `horopter-ingress`
 gates `POST /v1/events` and `POST /v1/events/cloudevents` on the `append` capability;
 `horopter-egress` gates its four routes — `GET /v1/changes`, `GET /v1/events`,
-`GET /adapters/grafana/annotations` and `GET /adapters/otlp/spans` — on `read`. `/healthz`
+`GET /adapters/grafana/annotations` and `GET /adapters/otlp/spans` — on `read`. One change is
+fetched by its stored ref with `GET /v1/changes?ref=<locus>/<ref>`, for which `from` and `to`
+are not required; `GET /adapters/grafana/annotations` answers `400` to a `ref`, since it
+renders what overlaps a window and a primary-key lookup ignores one. `/healthz`
 and `/readyz` stay open on both, so an orchestrator's probes need no credential. A request
 with no credential, or one that is malformed, unknown, revoked or expired, is answered `401`
 with an identical body regardless of which — telling those apart would let a caller probe
@@ -147,9 +156,12 @@ all — a producer's writes land in its own credential's tenant, and a request b
 is answered `400` — while every `horopter-egress` route reads `?tenant=` as a selector: a
 tenant-scoped credential may name only its own tenant there (`403` for any other), and a
 global credential must name one that exists (`400` naming none, `404` naming one that does
-not exist). Four roles, each a fixed set of capabilities, are what a credential is issued as:
-`producer` (`append`), `reader` (`read`), `tenant_admin` (`read`, `admin`) and `superuser`
-(`append`, `read`, `admin`, `issue` — the only role that can mint further credentials). See
+not exist). A credential is issued as a role, and a role is a stored set of capabilities: the
+four seeded are `producer` (`append`), `reader` (`read`), `tenant_admin` (`read`, `admin`) and
+`superuser` (`append`, `read`, `admin`, `issue` — the only role that can mint further
+credentials). An `admin` grant cannot be narrowed by `--subject-pattern`, because a rebuild is
+whole-tenant by construction; that is refused at issue time against the role's stored
+capabilities, so it holds for a role added after this list was written. See
 [Issuing credentials](#issuing-credentials).
 
 **No compose file in this repository ever issues a `superuser` credential.** `bootstrap`
@@ -398,8 +410,11 @@ does not understand, so a skewed rollout fails loudly rather than corrupting dat
 
     horoctl-migrate --rebuild-tenant=<tenant-id>
 
-The `change` table is a derived view of the immutable `event` log, so it can always be
-discarded and replayed. This runs only after the schema-version assertion passes.
+The `change` table is a derived view of the immutable `event` log, so it can be discarded and
+replayed. This runs only after the schema-version assertion passes. What makes that true is
+that a change's ref is derived from its events — `correlation_ref` for a correlated change,
+the event's own id for a point — so any migration that rewrites one half has to rewrite the
+other; `0004` does, which is why refs that predate it carry `legacy/` on **both** sides.
 
 **It blocks every append for that tenant for the whole of its run.** Blocked appends fail
 after a few seconds with a retryable `503`, so producers retry rather than losing events,
@@ -427,7 +442,24 @@ that has already closed. `start`,
 `started_at` and `first_seen_at` cannot: they are minima, so replay order does not reach
 them. Rebuilding twice gives the same answer both times — it is the live projection the
 replay may disagree with, not itself. If a change's outcome matters to you, read `GET
-/v1/events?ref=<ref>` (the log is immutable and is never reordered) before and after.
+/v1/events?ref=<stored-ref>` (the log is immutable and is never reordered) before and after.
+`<stored-ref>` is the ref as stored, which is what `GET /v1/changes` returns — `<locus>/<ref>`
+for anything appended since `0004`, and `legacy/<ref>` for anything that predates it.
+
+### Refs written before migration `0004` carry a `legacy/` prefix
+
+Every ref is stored as `<locus>/<ref>` within a tenant, where the locus comes from the
+appending credential. Refs that existed before `0004` were appended without one, so the
+migration gives them the locus `legacy`: a `deploy-42` posted under the old model reads back
+as `legacy/deploy-42`, in `GET /v1/changes` and in `GET /v1/events?ref=`. Point changes — an
+event with no `correlation_ref`, whose ref is its own event id — are not prefixed, because
+their ref never came from a producer.
+
+The prefix is permanent and is not cosmetic damage: those refs genuinely predate the locus
+model, and a bare `github/deploy-1` written before `0004` would otherwise be
+indistinguishable from one a `github` credential wrote after it. Queries by ref need the
+stored form, so a dashboard or script carrying a pre-`0004` ref has to be updated to the
+prefixed one.
 
 ### v0.1 pre-release: the CloudEvents idempotency key format changed
 

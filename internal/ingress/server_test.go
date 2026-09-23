@@ -529,8 +529,9 @@ func TestCloudEventsFromDifferentSourcesSharingAnIDAreDistinct(t *testing.T) {
 		"two sources sharing a CloudEvents id are two distinct events; keying on the id "+
 			"alone swallows the second and reports it as a retry")
 
-	evs, _, err := f.store.ListEvents(context.Background(),
-		postgres.EventQuery{Tenant: f.producerTenant.String()})
+	q, err := postgres.NewEventQuery(f.producerTenant, 0)
+	require.NoError(t, err)
+	evs, _, err := f.store.ListEvents(context.Background(), q)
 	require.NoError(t, err)
 	assert.Len(t, evs, 2, "both events must be in the log, not one")
 }

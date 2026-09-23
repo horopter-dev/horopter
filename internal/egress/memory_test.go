@@ -12,7 +12,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"horopter.dev/horopter/internal/auth"
-	"horopter.dev/horopter/internal/core"
 	"horopter.dev/horopter/internal/egress"
 	"horopter.dev/horopter/internal/store/postgres"
 )
@@ -37,7 +36,7 @@ func newMemoryFixture(t *testing.T) memoryFixture {
 	for i, ref := range []string{"mem-a", "mem-b", "mem-c"} {
 		seed(t, s, tn, ref, "deployment.started", base.Add(time.Duration(i)*10*time.Minute))
 	}
-	q := postgres.NewChangeQuery(core.TenantIDFromRow(tn),
+	q := changeQuery(t, tn,
 		time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC),
 		time.Date(2026, 9, 14, 11, 0, 0, 0, time.UTC), 1)
 	firstTwo, err := s.EstimateChanges(context.Background(), q)
@@ -47,7 +46,7 @@ func newMemoryFixture(t *testing.T) memoryFixture {
 	require.NoError(t, err)
 	require.Equal(t, 3, all.Rows)
 
-	eq := postgres.EventQuery{Tenant: tn, Limit: 1}
+	eq := eventQuery(t, tn, 1)
 	eventsFirstTwo, err := s.EstimateEvents(context.Background(), eq)
 	require.NoError(t, err)
 	eq.Limit = egress.MaxLimit

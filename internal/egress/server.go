@@ -396,7 +396,11 @@ func (s *Server) changesFor(
 	tenantID := tenantFromContext(r.Context())
 	trace.SpanFromContext(r.Context()).SetAttributes(
 		attribute.String("horopter.tenant", tenantID.String()))
-	q := postgres.NewChangeQuery(tenantID, win.from, win.to, win.limit)
+	q, err := postgres.NewChangeQuery(tenantID, win.from, win.to, win.limit)
+	if err != nil {
+		s.readFailed(w, r, adapter, err)
+		return nil, false, false
+	}
 	q.Subject = r.URL.Query().Get("subject")
 	q.Type = r.URL.Query().Get("type")
 	q.Status = r.URL.Query().Get("status")
@@ -452,9 +456,12 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		attribute.String("horopter.adapter", "neutral"),
 		attribute.String("horopter.tenant", tenantID.String()),
 	)
-	q := postgres.EventQuery{
-		Tenant: tenantID.String(), Ref: r.URL.Query().Get("ref"), Limit: limit,
+	q, err := postgres.NewEventQuery(tenantID, limit)
+	if err != nil {
+		s.readFailed(w, r, "neutral", err)
+		return
 	}
+	q.Ref = r.URL.Query().Get("ref")
 	est, err := s.store.EstimateEvents(r.Context(), q)
 	if err != nil {
 		s.readFailed(w, r, "neutral", err)
@@ -474,7 +481,21 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, eventsToJSON(events))
 }
 
+// grafanaAnnotations renders the changes overlapping a window as Grafana annotations.
+//
+// It refuses "ref" rather than honouring it. The spec adds fetch-by-ref to GET /v1/changes
+// alone and leaves this adapter's shape unchanged; the filter takes the full stored
+// <locus>/<ref>, which no Grafana dashboard variable can produce; and this route's whole
+// contract is "what overlapped this window", which a primary-key lookup ignoring the window
+// has no reading for. Accepting it while still demanding from/to — which changeSelection then
+// discards — was a second, undocumented spelling of a route that already exists.
 func (s *Server) grafanaAnnotations(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("ref") != "" {
+		writeError(w, http.StatusBadRequest,
+			`query parameter "ref" is not supported here; this route renders what overlaps `+
+				`from/to. Fetch one change by ref with GET /v1/changes?ref=<locus>/<ref>`)
+		return
+	}
 	win, err := windowFromEpochMillis(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -564,6 +585,11 @@ func changesToJSON(changes []core.Change) []map[string]any {
 }
 
 // eventsToJSON renders the raw event log in neutral terms, for audit and export.
+//
+// origin and edited are emitted like every other stored column. Both are server-set and
+// unreadable from a request body, which is what makes them worth reading back: origin is the
+// only record of whether a human or a process appended the event, and audit is this route's
+// whole purpose.
 func eventsToJSON(events []core.Event) []map[string]any {
 	out := make([]map[string]any, 0, len(events))
 	for _, e := range events {
@@ -574,6 +600,7 @@ func eventsToJSON(events []core.Event) []map[string]any {
 			"occurred_at":     e.OccurredAt.UTC().Format(time.RFC3339Nano),
 			"received_at":     e.ReceivedAt.UTC().Format(time.RFC3339Nano),
 			"correlation_ref": e.CorrelationRef, "attributes": e.Attributes,
+			"origin": string(e.Origin), "edited": e.Edited,
 		})
 	}
 	return out

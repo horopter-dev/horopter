@@ -28,8 +28,7 @@ import (
 func TestRebuildReproducesProjectionForIDOrderedEvents(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
-	win := postgres.NewChangeQuery(
-		core.TenantIDFromRow(tn), at.Add(-24*time.Hour), at.Add(24*time.Hour), 0)
+	win := changeQuery(t, tn, at.Add(-24*time.Hour), at.Add(24*time.Hour), 0)
 
 	events := []struct {
 		suffix, idem, ref, typ string
@@ -95,8 +94,8 @@ func TestRebuildIsTenantScoped(t *testing.T) {
 
 	require.NoError(t, s.RebuildProjection(ctx, tn))
 
-	got, _, err := s.QueryChanges(ctx, postgres.NewChangeQuery(
-		core.TenantIDFromRow(other), at.Add(-time.Hour), at.Add(time.Hour), 0))
+	got, _, err := s.QueryChanges(ctx,
+		changeQuery(t, other, at.Add(-time.Hour), at.Add(time.Hour), 0))
 	require.NoError(t, err)
 	require.Len(t, got, 1, "rebuilding one tenant must not touch another")
 	assert.True(t, got[0].Start.Equal(at),

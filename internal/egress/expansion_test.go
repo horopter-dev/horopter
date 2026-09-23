@@ -15,7 +15,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"horopter.dev/horopter/internal/core"
 	"horopter.dev/horopter/internal/egress"
 	"horopter.dev/horopter/internal/store/postgres"
 	"horopter.dev/horopter/internal/testdb"
@@ -110,10 +109,10 @@ func expansionReads(t *testing.T, s *postgres.Store, tn string) []expansionRead 
 	t.Helper()
 	ctx := context.Background()
 	from := time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC)
-	changes, err := s.EstimateChanges(ctx, postgres.NewChangeQuery(
-		core.TenantIDFromRow(tn), from, from.Add(2*time.Hour), egress.MaxLimit))
+	changes, err := s.EstimateChanges(ctx,
+		changeQuery(t, tn, from, from.Add(2*time.Hour), egress.MaxLimit))
 	require.NoError(t, err)
-	events, err := s.EstimateEvents(ctx, postgres.EventQuery{Tenant: tn, Limit: egress.MaxLimit})
+	events, err := s.EstimateEvents(ctx, eventQuery(t, tn, egress.MaxLimit))
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, min(changes.TotalBytes, events.TotalBytes), int64(2<<20),
 		"each shape needs megabytes of row text, or background allocation stops being noise")

@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"horopter.dev/horopter/internal/auth"
 )
 
 // dsnFlag registers the --dsn flag every DB-touching admin subcommand exposes, defaulting
@@ -60,11 +62,25 @@ func tenantLabel(tenant string) string {
 	return tenant
 }
 
-// isAdminRole matches migration 0004's credential_admin_has_no_subject_pattern CHECK, so
-// keys issue can refuse the combination with a readable error at issue time rather than a
-// constraint violation. The middleware in internal/auth is the authority at request time.
-func isAdminRole(role string) bool {
-	return role == "tenant_admin" || role == "superuser"
+// roleGrantsAdmin reads role's stored capabilities and reports whether they include admin.
+//
+// It queries the row rather than enumerating role names, so issue time and request time agree
+// by construction: internal/auth's middleware refuses an admin-capable credential carrying a
+// subject pattern by testing the same capability list. Enumerating names instead let a role
+// added to the table — one granting admin under a name nothing here knew — be issued with a
+// subject pattern, print a key, and then 401 on every request it ever made.
+func roleGrantsAdmin(ctx context.Context, pool *pgxpool.Pool, role string) (bool, error) {
+	var grants bool
+	err := pool.QueryRow(ctx, `SELECT $1 = ANY (capabilities) FROM role WHERE name = $2`,
+		string(auth.CapAdmin), role).Scan(&grants)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, fmt.Errorf(
+			"unknown role %q; the role table is what names the roles this database has", role)
+	}
+	if err != nil {
+		return false, fmt.Errorf("read the capabilities of role %q: %w", role, err)
+	}
+	return grants, nil
 }
 
 // newTenantID mints an opaque, server-assigned tenant id. The display name is what an

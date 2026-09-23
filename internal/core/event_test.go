@@ -25,6 +25,7 @@ func validEvent() core.Event {
 		ReceivedAt:     time.Date(2026, 9, 14, 10, 0, 1, 0, time.UTC),
 		CorrelationRef: "dep-7",
 		Attributes:     map[string]any{"service.version": "2.5.0"},
+		Origin:         core.OriginProcess,
 	}
 }
 
@@ -52,6 +53,8 @@ func TestValidateRejectsMissingFields(t *testing.T) {
 		{"no source", func(e *core.Event) { e.Source = "" }, "source"},
 		{"zero occurred_at", func(e *core.Event) { e.OccurredAt = time.Time{} }, "occurred_at"},
 		{"unknown schema", func(e *core.Event) { e.SchemaVersion = 99 }, "schema_version"},
+		{"no origin", func(e *core.Event) { e.Origin = "" }, "origin"},
+		{"unknown origin", func(e *core.Event) { e.Origin = "robot" }, "origin"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := validEvent()
@@ -91,6 +94,7 @@ func TestValidateFailuresAreInvalidEvent(t *testing.T) {
 		Tenant: "default", SchemaVersion: core.CurrentSchemaVersion,
 		Source: "ci", Type: "deployment.started", Subject: "acme/prod",
 		OccurredAt: time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC),
+		Origin:     core.OriginProcess,
 	}
 	require.NoError(t, valid.Validate(), "precondition: the base event is acceptable")
 
@@ -105,6 +109,7 @@ func TestValidateFailuresAreInvalidEvent(t *testing.T) {
 		"subject":        {func(e *core.Event) { e.Subject = "" }, "subject"},
 		"occurred_at":    {func(e *core.Event) { e.OccurredAt = time.Time{} }, "occurred_at"},
 		"schema_version": {func(e *core.Event) { e.SchemaVersion = 99 }, "schema_version"},
+		"origin":         {func(e *core.Event) { e.Origin = "" }, "origin"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			bad := valid

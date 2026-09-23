@@ -21,14 +21,6 @@ import (
 	"horopter.dev/horopter/internal/telemetry"
 )
 
-// MaxHeaderBytes bounds the request line plus headers, Authorization included. Go's 1 MiB
-// default is what made an oversized Authorization header worth sending: SplitKey bounds
-// the key prefix, but the secret half is only length-checked by a constant-time compare,
-// so a large header still costs one SHA-256 before rejection. 16 KiB comfortably fits a
-// real request's headers — the Authorization header itself is under 100 bytes — with
-// headroom for whatever a proxy in front of this daemon adds.
-const MaxHeaderBytes = 16 << 10
-
 func main() {
 	if err := run(); err != nil {
 		slog.Error("horopter-ingress failed", "error", err)
@@ -112,9 +104,10 @@ func run() error {
 	return serve(ctx, &http.Server{
 		Addr:    cfg.addr,
 		Handler: api.Routes(),
-		// MaxHeaderBytes bounds the request line plus headers, Authorization included —
-		// see its own doc comment for why Go's 1 MiB default is worth tightening.
-		MaxHeaderBytes: MaxHeaderBytes,
+		// auth.MaxHeaderBytes bounds the request line plus headers, Authorization
+		// included — see its own doc comment for why Go's 1 MiB default is worth
+		// tightening, and why one constant serves both daemons.
+		MaxHeaderBytes: auth.MaxHeaderBytes,
 		// ReadHeaderTimeout bounds a slowloris header dribble. ReadTimeout bounds the
 		// whole request including the body, so a client sending one byte a minute cannot
 		// hold a connection open indefinitely; 15s is far longer than a few-kilobyte

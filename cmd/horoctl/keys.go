@@ -37,7 +37,7 @@ type issueParams struct {
 }
 
 // runKeysIssue validates the locus itself, so an operator gets ValidateLocus's readable
-// error rather than the credential_locus_no_slash constraint violation the insert below
+// error rather than the credential_locus_shape constraint violation the insert below
 // would otherwise surface — the two enforcement points are deliberate, and both are
 // tested.
 func runKeysIssue(args []string) error {
@@ -45,7 +45,9 @@ func runKeysIssue(args []string) error {
 	dsn := dsnFlag(fs)
 	tenant := fs.String("tenant", "",
 		"opaque tenant id this credential is scoped to (omit for a global credential)")
-	role := fs.String("role", "", "role name: producer, reader, tenant_admin or superuser")
+	role := fs.String("role", "",
+		"role name as the role table stores it; producer, reader, tenant_admin and "+
+			"superuser are seeded")
 	source := fs.String("source", "", `credential source, e.g. "github"`)
 	locus := fs.String("locus", "", "ref namespace prefix; defaults to --source")
 	subjectPattern := fs.String("subject-pattern", "",
@@ -55,12 +57,7 @@ func runKeysIssue(args []string) error {
 		return helpOrErr(err)
 	}
 
-	effectiveLocus, err := resolveAndValidateIssue(*role, *source, *locus, *subjectPattern)
-	if err != nil {
-		return err
-	}
-
-	fullKey, prefix, hash, err := deriveKey(*key)
+	effectiveLocus, err := resolveAndValidateIssue(*role, *source, *locus)
 	if err != nil {
 		return err
 	}
@@ -71,6 +68,15 @@ func runKeysIssue(args []string) error {
 		return err
 	}
 	defer pool.Close()
+
+	if err := checkRoleAllowsSubjectPattern(ctx, pool, *role, *subjectPattern); err != nil {
+		return err
+	}
+
+	fullKey, prefix, hash, err := deriveKey(*key)
+	if err != nil {
+		return err
+	}
 
 	if err := issueCredential(ctx, pool, issueParams{
 		tenant: *tenant, role: *role, source: *source, locus: effectiveLocus,
@@ -98,12 +104,11 @@ func validateIssueFlags(role, source string) error {
 	return nil
 }
 
-// resolveAndValidateIssue runs every issue-time check that does not touch the database:
-// the required flags, the locus (ValidateLocus's readable error rather than the
-// credential_locus_no_slash constraint violation), and the subject-pattern-on-an-admin-
-// role refusal. Split out of runKeysIssue to keep that function's own branching within
-// the complexity limit.
-func resolveAndValidateIssue(role, source, locus, subjectPattern string) (string, error) {
+// resolveAndValidateIssue runs the issue-time checks that need no database: the required
+// flags and the locus, for which ValidateLocus gives a readable error rather than the
+// credential_locus_shape constraint violation the insert would surface. Split out of
+// runKeysIssue to keep that function's own branching within the complexity limit.
+func resolveAndValidateIssue(role, source, locus string) (string, error) {
 	if err := validateIssueFlags(role, source); err != nil {
 		return "", err
 	}
@@ -111,12 +116,26 @@ func resolveAndValidateIssue(role, source, locus, subjectPattern string) (string
 	if err := auth.ValidateLocus(effectiveLocus); err != nil {
 		return "", err
 	}
-	if subjectPattern != "" && isAdminRole(role) {
-		return "", fmt.Errorf(
+	return effectiveLocus, nil
+}
+
+// checkRoleAllowsSubjectPattern reads the role's stored capabilities and refuses a subject
+// pattern on one granting admin — Constraint 5: a rebuild is whole-tenant by construction, so
+// an admin grant cannot be narrowed by subject. The role is read whatever the pattern, so an
+// unknown role also fails here rather than as a foreign-key violation after a key is minted.
+func checkRoleAllowsSubjectPattern(
+	ctx context.Context, pool *pgxpool.Pool, role, subjectPattern string,
+) error {
+	grants, err := roleGrantsAdmin(ctx, pool, role)
+	if err != nil {
+		return err
+	}
+	if grants && subjectPattern != "" {
+		return fmt.Errorf(
 			"role %q grants admin, and an admin grant cannot be narrowed by a subject "+
 				"pattern", role)
 	}
-	return effectiveLocus, nil
+	return nil
 }
 
 // deriveKey returns the full key to print, its lookup prefix and its stored hash. An
