@@ -220,9 +220,9 @@ func TestMigration0004AcceptsALocusWithAnInteriorNewline(t *testing.T) {
 		"git\nhub")
 }
 
-// legacySeed is the two change shapes 0004 must treat differently, seeded in the pre-0004
-// shape. The change rows are exactly what folding these events produces, so the only thing a
-// rebuild can disagree with them about is what 0004 did to the refs.
+// legacySeed is the two change shapes the migrations must treat differently, seeded in the
+// pre-0004 shape. The change rows are exactly what folding these events produces, so the only
+// thing a rebuild can disagree with them about is what 0004 and 0006 did to the refs.
 type legacySeed struct {
 	correlatedRef  string
 	pointEventID   string
@@ -234,10 +234,16 @@ var legacyAt = time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
 // seedLegacyProjection writes one correlated change and one point change under the old
 // tenant string, each with the event log that implies it.
 //
-// Both shapes are seeded deliberately. A correlated change's ref comes from
-// event.correlation_ref, so prefixing change.ref alone is invisible until a rebuild; a point
-// change's ref is its own event id and its correlation_ref stays empty forever, so it must NOT be
-// prefixed. A fixture carrying only correlated events passes with either bug present.
+// Both shapes are seeded deliberately, and each is prefixed from a different source. A
+// correlated change's ref comes from event.correlation_ref, which 0004 prefixes alongside it,
+// so prefixing change.ref alone is invisible until a rebuild. A point change's correlation_ref
+// stays empty forever, so there is nothing alongside to prefix: 0006 prefixes its ref from the
+// locus it backfilled onto the event, which is the same value core.RefFor composes a point ref
+// from. Both end up <locus>/<something>.
+//
+// A fixture carrying only correlated events cannot tell any of that apart. It passes with 0004's
+// bug present, and with either of 0006's two failure modes — an unbackfilled event.locus, and a
+// foldEventLog that does not select it.
 func seedLegacyProjection(t *testing.T, pool *pgxpool.Pool) legacySeed {
 	t.Helper()
 	seed := legacySeed{

@@ -265,7 +265,12 @@ func TestListEventsFindsAPointChangesEvents(t *testing.T) {
 	assert.Equal(t, "ci/dep-9", correlated[0].CorrelationRef)
 }
 
-// TestListEventsIdArmIgnoresCorrelatedEvents pins this qualifier in ListEvents' id arm:
+// TestListEventsIdArmIgnoresCorrelatedEvents pins that listing a ref returns only the
+// events belonging to it, and not a second change's event whose own id equals the ref.
+//
+// INERT AS OF 0006, AND DELIBERATELY LEFT SO — see the paragraph below before trusting it.
+//
+// What it was written to pin is this qualifier in ListEvents' id arm:
 //
 //	correlation_ref = ''
 //
@@ -279,9 +284,17 @@ func TestListEventsFindsAPointChangesEvents(t *testing.T) {
 // using event ids as correlation refs makes exactly that collision. The two events below
 // belong to different changes and the audit log for one must not show the other's.
 //
-// The qualifier is load-bearing and nothing else covers it: loosening the predicate breaks
-// no other test in this package, so the id arm could quietly widen and the projection's
-// audit trail would start leaking between changes.
+// 0006 put that qualifier out of this test's reach. A ref is now <locus>/<something>, the
+// id arm still compares the WHOLE ref against e.id, and no event id contains a '/' — so
+// the decoy event below is excluded by "id <> ref" alone and deleting the qualifier from
+// eventSelection leaves this test green. Nothing else covers it either: the point-ref test
+// queries a bare event id, where the decoy fails on id as well. So the leak guard is
+// UNCOVERED by the whole suite at this commit.
+//
+// Task 3 restores reachability by splitting the ref with strings.Cut and comparing e.id to
+// the id half, at which point the decoy reaches arm 2 on id and only the qualifier excludes
+// it. The guard must be re-verified by mutation then — not accepted for staying green,
+// which is exactly what it does today while proving nothing.
 func TestListEventsIdArmIgnoresCorrelatedEvents(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
