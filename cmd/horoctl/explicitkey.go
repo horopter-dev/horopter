@@ -35,9 +35,9 @@ func parseExplicitKey(key string) (prefix, secret string, err error) {
 	prefix, secret, ok := auth.SplitKey(key)
 	if !ok {
 		return "", "", fmt.Errorf(
-			"--key %q does not match horo_<12-char-hex-prefix>_<secret>, the shape "+
-				"auth.SplitKey requires of a presented credential; anything else would "+
-				"store a credential that can never authenticate", key)
+			"--key does not match horo_<12-char-hex-prefix>_<secret>, the shape " +
+				"auth.SplitKey requires of a presented credential; anything else would " +
+				"store a credential that can never authenticate")
 	}
 	return prefix, secret, nil
 }

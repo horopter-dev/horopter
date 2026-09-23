@@ -236,6 +236,21 @@ func TestIssueRejectsANonHexExplicitKeyPrefix(t *testing.T) {
 		"the error must name the requirement an operator has to satisfy")
 }
 
+// TestIssueRejectsAMalformedExplicitKeyWithoutEchoingIt pins the fix for a malformed --key
+// being embedded verbatim in the rejection error: that error reaches stderr unmodified from
+// every caller (horoctl's own dispatch, bootstrap's ensureCredential run on every compose
+// stack start, and keys issue's deriveKey), so a mistyped or truncated secret must never
+// travel into a log stream through it.
+func TestIssueRejectsAMalformedExplicitKeyWithoutEchoingIt(t *testing.T) {
+	const secretMarker = "shouldneverbeloggedmarker"
+	out, err := runHoroctlErr(t, "admin", "keys", "issue",
+		"--tenant", tenantID, "--role", "producer", "--source", "dev",
+		"--key", "horo_devdevdevdev_"+secretMarker+strings.Repeat("a", 64))
+	require.Error(t, err)
+	assert.NotContains(t, out, secretMarker,
+		"the rejected key must not be echoed back into the error")
+}
+
 func TestTenantCreateMintsAnOpaqueID(t *testing.T) {
 	stdout, _ := runHoroctlSplit(t, "admin", "tenant", "create", "--display-name", "acme")
 	id := strings.TrimSpace(stdout)
