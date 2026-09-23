@@ -25,6 +25,17 @@ const DefaultNegativeTTL = 5 * time.Second
 const unauthorizedMessage = "missing or invalid credential; send it as " +
 	"Authorization: Bearer <key>"
 
+// storeUnavailableMessage is the 503 body, for the failure that is not the caller's.
+// Telling the two classes apart leaks nothing an unauthenticated /readyz does not
+// already report, and a 401 during an outage reads as "your key broke", which invites an
+// operator to re-issue keys in the middle of an incident.
+const storeUnavailableMessage = "could not check the credential; the credential store " +
+	"is temporarily unavailable — this request may be retried"
+
+// errStoreUnavailable separates an unreachable credential store from a credential that
+// was read and refused. Only the latter is the caller's problem.
+var errStoreUnavailable = errors.New("the credential store is unavailable")
+
 // dummyHash is compared against on the miss path. It is a real hash so the constant-time
 // compare runs to full length rather than returning early on a length mismatch.
 var dummyHash = hashSecret("no credential carries the presented prefix")
@@ -36,6 +47,13 @@ type Options struct {
 	NegativeTTL time.Duration
 	// Header names a second header a key may arrive in; Authorization still wins.
 	Header string
+}
+
+// DefaultOptions returns the TTLs a daemon runs with. Options{} disables the cache, and
+// an uncached authenticator defeats read admission by querying ahead of it, so turning
+// the cache off has to be typed deliberately rather than arrived at by omission.
+func DefaultOptions() Options {
+	return Options{PositiveTTL: DefaultPositiveTTL, NegativeTTL: DefaultNegativeTTL}
 }
 
 // Option adjusts Options, for a caller assembling them piecewise.
@@ -74,9 +92,7 @@ func (a *Authenticator) Require(c Capability) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			p, err := a.resolve(r)
 			if err != nil {
-				slog.DebugContext(r.Context(), "credential rejected",
-					"error", err, "route", r.Pattern)
-				writeError(w, http.StatusUnauthorized, unauthorizedMessage)
+				reject(w, r, err)
 				return
 			}
 			if !p.Can(c) {
@@ -87,6 +103,17 @@ func (a *Authenticator) Require(c Capability) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(withPrincipal(r.Context(), p)))
 		})
 	}
+}
+
+// reject answers a failed resolve. An unreachable store is infrastructure and says so;
+// every credential that was read and refused gets the one uniform 401.
+func reject(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, errStoreUnavailable) {
+		writeError(w, http.StatusServiceUnavailable, storeUnavailableMessage)
+		return
+	}
+	slog.DebugContext(r.Context(), "credential rejected", "error", err, "route", r.Pattern)
+	writeError(w, http.StatusUnauthorized, unauthorizedMessage)
 }
 
 func (a *Authenticator) resolve(r *http.Request) (Principal, error) {
@@ -132,7 +159,7 @@ func (a *Authenticator) credential(
 	cred, err := a.lookup.CredentialByPrefix(ctx, prefix)
 	if err != nil && !errors.Is(err, ErrNoCredential) {
 		slog.ErrorContext(ctx, "credential lookup failed", "error", err)
-		return Credential{}, false, err
+		return Credential{}, false, fmt.Errorf("%w: %w", errStoreUnavailable, err)
 	}
 	found := err == nil
 	a.cache.put(prefix, entry{cred: cred, found: found}, now)

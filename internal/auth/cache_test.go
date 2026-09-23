@@ -38,6 +38,19 @@ func TestNegativeCacheStopsRepeatedLookups(t *testing.T) {
 		"an unknown prefix must not reach the store once per request")
 }
 
+func TestDefaultOptionsCacheBothOutcomes(t *testing.T) {
+	assert.Equal(t, 30*time.Second, auth.DefaultOptions().PositiveTTL)
+	assert.Equal(t, 5*time.Second, auth.DefaultOptions().NegativeTTL)
+
+	lookup := &fakeLookup{cred: validCredential()}
+	a := auth.New(lookup, time.Now, auth.DefaultOptions())
+	for range 4 {
+		serve(t, a, auth.CapRead, validKey)
+		serve(t, a, auth.CapRead, "horo_ffffffffffff_x")
+	}
+	assert.Equal(t, 2, lookup.callCount(), "one lookup for the credential, one for the miss")
+}
+
 func TestPositiveCacheStopsRepeatedLookups(t *testing.T) {
 	lookup := &fakeLookup{cred: validCredential()}
 	a := auth.New(lookup, time.Now, auth.Options{PositiveTTL: 30 * time.Second})

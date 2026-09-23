@@ -3,6 +3,7 @@ package auth_test
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -47,10 +48,11 @@ func (c *fakeClock) advance(d time.Duration) {
 }
 
 // fakeLookup answers for knownPrefix only, and counts what reached it so a test can tell
-// a cache hit from a lookup.
+// a cache hit from a lookup. A non-nil fails stands in for an unreachable store.
 type fakeLookup struct {
 	mu    sync.Mutex
 	cred  auth.Credential
+	fails error
 	calls int
 }
 
@@ -60,10 +62,19 @@ func (f *fakeLookup) CredentialByPrefix(
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
+	if f.fails != nil {
+		return auth.Credential{}, f.fails
+	}
 	if f.cred.ID == "" || prefix != knownPrefix {
 		return auth.Credential{}, auth.ErrNoCredential
 	}
 	return f.cred, nil
+}
+
+func (f *fakeLookup) recover() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fails = nil
 }
 
 func (f *fakeLookup) revoke() {
@@ -101,10 +112,7 @@ func testAuthenticator(
 	t *testing.T, cred auth.Credential, opts ...auth.Option,
 ) *auth.Authenticator {
 	t.Helper()
-	o := auth.Options{
-		PositiveTTL: auth.DefaultPositiveTTL,
-		NegativeTTL: auth.DefaultNegativeTTL,
-	}
+	o := auth.DefaultOptions()
 	for _, apply := range opts {
 		apply(&o)
 	}
@@ -211,6 +219,33 @@ func TestInsufficientCapabilityIs403(t *testing.T) {
 	rec := serve(t, a, auth.CapAdmin, "Bearer "+validKey)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	assert.Contains(t, rec.Body.String(), "producer")
+}
+
+func TestAnUnreachableStoreIs503AndNotA401(t *testing.T) {
+	lookup := &fakeLookup{cred: validCredential(), fails: errors.New("dial tcp: refused")}
+	a := auth.New(lookup, time.Now, auth.DefaultOptions())
+
+	rec := serve(t, a, auth.CapRead, validKey)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code,
+		"an outage is not the caller's credential being wrong")
+	assert.Contains(t, rec.Body.String(), "retried")
+	assert.NotContains(t, rec.Body.String(), "dial tcp",
+		"the cause goes to the log, not to an unauthenticated caller")
+}
+
+func TestAnUnreachableStoreIsNotCached(t *testing.T) {
+	lookup := &fakeLookup{cred: validCredential(), fails: errors.New("dial tcp: refused")}
+	a := auth.New(lookup, time.Now, auth.DefaultOptions())
+
+	for range 3 {
+		require.Equal(t, http.StatusServiceUnavailable, serve(t, a, auth.CapRead, validKey).Code)
+	}
+	require.Equal(t, 3, lookup.callCount(),
+		"caching a failure would extend the outage by the TTL")
+
+	lookup.recover()
+	assert.Equal(t, http.StatusOK, serve(t, a, auth.CapRead, validKey).Code,
+		"the credential works the moment the store does")
 }
 
 func TestRequireRejectsBeforeReachingTheHandler(t *testing.T) {
