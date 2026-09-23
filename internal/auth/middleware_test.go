@@ -60,7 +60,7 @@ type fakeLookup struct {
 }
 
 func (f *fakeLookup) CredentialByPrefix(
-	_ context.Context, prefix string,
+	ctx context.Context, prefix string,
 ) (auth.Credential, error) {
 	f.mu.Lock()
 	f.calls++
@@ -68,7 +68,11 @@ func (f *fakeLookup) CredentialByPrefix(
 	f.mu.Unlock()
 
 	if gate != nil {
-		<-gate
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return auth.Credential{}, ctx.Err()
+		}
 	}
 	if fails != nil {
 		return auth.Credential{}, fails

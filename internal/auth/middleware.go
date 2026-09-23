@@ -21,6 +21,11 @@ const DefaultPositiveTTL = 30 * time.Second
 // flood of unknown prefixes off the database.
 const DefaultNegativeTTL = 5 * time.Second
 
+// DefaultLookupTimeout bounds one credential lookup. A measured lookup is around 200µs,
+// so this is four orders of magnitude of headroom — it exists to stop a wedged store
+// holding requests open, not to police a slow one.
+const DefaultLookupTimeout = 2 * time.Second
+
 // unauthorizedMessage is the whole 401 body, identical for an absent, malformed,
 // unknown, wrong, revoked or expired credential: a message that varied with any of them
 // would answer the question "does this prefix exist".
@@ -47,6 +52,10 @@ var dummyHash = hashSecret("no credential carries the presented prefix")
 type Options struct {
 	PositiveTTL time.Duration
 	NegativeTTL time.Duration
+	// LookupTimeout bounds one store call. Zero means DefaultLookupTimeout, not
+	// "unbounded": a TTL of zero has a use — no caching — but an unbounded lookup has
+	// none, and it would be reached by omitting a field rather than by asking for it.
+	LookupTimeout time.Duration
 	// Header names a second header a key may arrive in; Authorization still wins.
 	Header string
 }
@@ -55,7 +64,11 @@ type Options struct {
 // an uncached authenticator defeats read admission by querying ahead of it, so turning
 // the cache off has to be typed deliberately rather than arrived at by omission.
 func DefaultOptions() Options {
-	return Options{PositiveTTL: DefaultPositiveTTL, NegativeTTL: DefaultNegativeTTL}
+	return Options{
+		PositiveTTL:   DefaultPositiveTTL,
+		NegativeTTL:   DefaultNegativeTTL,
+		LookupTimeout: DefaultLookupTimeout,
+	}
 }
 
 // Option adjusts Options, for a caller assembling them piecewise.
@@ -75,23 +88,29 @@ const wwwAuthenticate = `Bearer realm="horopter"`
 // Authenticator resolves a presented machine key into a Principal and gates routes on
 // what that principal's role can do.
 type Authenticator struct {
-	lookup Lookup
-	clock  func() time.Time
-	cache  *cache
-	group  singleflight.Group
-	header string
-	vary   string
+	lookup  Lookup
+	clock   func() time.Time
+	cache   *cache
+	group   singleflight.Group
+	timeout time.Duration
+	header  string
+	vary    string
 }
 
 // New returns an Authenticator reading credentials through lookup. clock is injected so
 // a test advances the TTL rather than sleeping through it.
 func New(lookup Lookup, clock func() time.Time, opts Options) *Authenticator {
+	timeout := opts.LookupTimeout
+	if timeout <= 0 {
+		timeout = DefaultLookupTimeout
+	}
 	return &Authenticator{
-		lookup: lookup,
-		clock:  clock,
-		cache:  newCache(opts.PositiveTTL, opts.NegativeTTL),
-		header: opts.Header,
-		vary:   varyValue(opts.Header),
+		lookup:  lookup,
+		clock:   clock,
+		cache:   newCache(opts.PositiveTTL, opts.NegativeTTL),
+		timeout: timeout,
+		header:  opts.Header,
+		vary:    varyValue(opts.Header),
 	}
 }
 
@@ -181,10 +200,14 @@ func (a *Authenticator) credential(
 	if e, ok := a.cache.get(prefix, now); ok {
 		return e.cred, e.found, nil
 	}
-	// The shared call outlives its leader's request: a client that disconnects mid-flight
-	// must not cancel the lookup every other waiter is blocked on.
-	shared := context.WithoutCancel(ctx)
-	got, err, _ := a.group.Do(prefix, func() (any, error) { return a.fetch(shared, prefix, now) })
+	got, err, _ := a.group.Do(prefix, func() (any, error) {
+		// The shared call outlives its leader's request, so a client that disconnects
+		// mid-flight cannot cancel the lookup every other waiter is blocked on — and it
+		// carries its own deadline, because dropping the caller's also drops theirs.
+		shared, cancel := context.WithTimeout(context.WithoutCancel(ctx), a.timeout)
+		defer cancel()
+		return a.fetch(shared, prefix, now)
+	})
 	if err != nil {
 		return Credential{}, false, err
 	}

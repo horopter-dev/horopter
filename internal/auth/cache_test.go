@@ -163,6 +163,64 @@ func TestAColdBurstOnOnePrefixCostsOneStoreCall(t *testing.T) {
 	}
 }
 
+// TestAWedgedStoreTimesOutAsInfrastructure covers the bound on the shared call. The
+// waiters must be released by the timeout rather than held for as long as the store is
+// wedged, and a timeout is the store's failure, not the credential's: classifying it as a
+// credential failure would answer 401 here and 503 for a store that refused the
+// connection, which is the oracle from the other direction.
+func TestAWedgedStoreTimesOutAsInfrastructure(t *testing.T) {
+	gate := make(chan struct{})
+	lookup := &fakeLookup{cred: validCredential(), gate: gate}
+	a := auth.New(lookup, time.Now, auth.Options{
+		PositiveTTL:   auth.DefaultPositiveTTL,
+		LookupTimeout: 20 * time.Millisecond,
+	})
+	handler := a.Require(auth.CapRead)(okHandler())
+
+	recs := make([]*httptest.ResponseRecorder, 8)
+	var wg sync.WaitGroup
+	for i := range recs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("Authorization", "Bearer "+validKey)
+			recs[i] = httptest.NewRecorder()
+			handler.ServeHTTP(recs[i], req)
+		}()
+	}
+
+	finished := make(chan struct{})
+	go func() { wg.Wait(); close(finished) }()
+	select {
+	case <-finished:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the waiters outlived the lookup timeout; the shared call is unbounded")
+	}
+
+	for i, rec := range recs {
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code, "request %d", i)
+		assert.Empty(t, rec.Header().Get("WWW-Authenticate"),
+			"a timeout is not a credential the caller can fix")
+	}
+	assert.Equal(t, 1, lookup.callCount(), "the burst still costs one store call")
+
+	close(gate)
+	assert.Equal(t, http.StatusOK, serve(t, a, auth.CapRead, validKey).Code,
+		"a timeout is a store failure, so it is not cached")
+	assert.Equal(t, 2, lookup.callCount())
+}
+
+func TestAZeroLookupTimeoutMeansTheDefaultNotUnbounded(t *testing.T) {
+	assert.Equal(t, 2*time.Second, auth.DefaultLookupTimeout)
+	assert.Equal(t, auth.DefaultLookupTimeout, auth.DefaultOptions().LookupTimeout)
+	assert.Equal(t, auth.DefaultLookupTimeout,
+		auth.LookupTimeoutOf(auth.New(&fakeLookup{}, time.Now, auth.Options{})),
+		"an omitted timeout must not leave the store call unbounded")
+	assert.Equal(t, 50*time.Millisecond, auth.LookupTimeoutOf(
+		auth.New(&fakeLookup{}, time.Now, auth.Options{LookupTimeout: 50 * time.Millisecond})))
+}
+
 func TestConcurrentResolvesOfManyPrefixesAreSafe(t *testing.T) {
 	lookup := &fakeLookup{cred: validCredential()}
 	a := auth.New(lookup, time.Now, auth.DefaultOptions())
