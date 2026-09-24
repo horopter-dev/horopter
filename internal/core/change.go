@@ -82,9 +82,12 @@ type Change struct {
 	Attributes  map[string]any
 	LastEventID string
 	// Source is the system that reported the change, taken from the last event folded
-	// into it. Descriptive rather than identifying: a ref's events can carry different
-	// sources, because source still comes from the request body rather than the
-	// credential (#23). Filtering finds a change under its latest source only.
+	// into it. Descriptive rather than identifying, and PERMANENTLY so: a ref's events
+	// can carry different sources by design, because correlation is scoped by locus and
+	// a locus deliberately spans credentials with different sources — a change CI starts
+	// and a cluster controller completes must land on one change (#10), which is the
+	// reason decisions/2026-09-22 rejected scoping refs by source. Filtering finds a
+	// change under its latest source only, and #23 does not change that.
 	Source string
 }
 

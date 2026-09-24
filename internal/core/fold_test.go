@@ -505,8 +505,9 @@ func TestFoldLaterNonEmptyTitleWins(t *testing.T) {
 }
 
 // TestFoldTakesTheLastEventsSource pins source to the same last-wins rule as subject and
-// type. A ref's events can legitimately carry different sources today, because source comes
-// from the request body rather than the credential (#23) — so first-wins and last-wins are
+// type. A ref's events can legitimately carry different sources — permanently, since a
+// locus spans credentials with different sources so that a change CI starts and a cluster
+// controller completes lands on one change (#10) — so first-wins and last-wins are
 // distinguishable, and the migration's backfill has to agree with whichever this is.
 func TestFoldTakesTheLastEventsSource(t *testing.T) {
 	at := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
