@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -122,17 +121,17 @@ func (e Event) Validate() error {
 	return nil
 }
 
-// validateLocus reports whether the event's locus is well-formed: non-empty, and free of
-// "/", which RefFor uses as the separator when composing a point's ref from it. The full
-// rule (the reserved "legacy", the length cap, edge whitespace) lives in
-// auth.ValidateLocus, which core cannot call: internal/auth imports internal/core, not the
-// other way round. Split out of Validate to keep its branching within the complexity
-// limit, same as validateRequiredText below.
+// validateLocus reports whether the event's locus is well-formed. The rule lives in
+// NewLocus, which is the single statement of what the ref encoding requires; this wraps it
+// so the error names the event, as every other Validate failure does.
+//
+// The fuller rule an operator is held to — the reserved "legacy", a length cap, edge
+// whitespace — is auth.ValidateLocus's, and is checked when a credential is issued rather
+// than when an event is appended.
 func (e Event) validateLocus() error {
-	if e.Locus == "" || strings.Contains(e.Locus, "/") {
-		return fmt.Errorf(
-			"%w %q: locus %q must be non-empty and must not contain /; it is derived "+
-				"from the appending credential", ErrInvalidEvent, e.ID, e.Locus)
+	if _, err := NewLocus(e.Locus); err != nil {
+		return fmt.Errorf("%w %q: %w; it is derived from the appending credential",
+			ErrInvalidEvent, e.ID, err)
 	}
 	return nil
 }
