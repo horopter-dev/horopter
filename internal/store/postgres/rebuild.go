@@ -225,7 +225,7 @@ func foldEventLog(
 ) (map[core.Ref]core.Change, int, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT id, tenant, schema_version, source, type, subject, actor, title,
-		       occurred_at, received_at, correlation_ref, attributes, locus
+		       occurred_at, received_at, correlation_ref, attributes, locus, lifecycle
 		FROM event WHERE tenant = $1 ORDER BY id ASC`, tenantID)
 	if err != nil {
 		return nil, 0, fmt.Errorf("read event log for tenant %q: %w", tenantID, err)
@@ -242,7 +242,7 @@ func foldEventLog(
 		)
 		if err := rows.Scan(&ev.ID, &ev.Tenant, &ev.SchemaVersion, &ev.Source, &ev.Type,
 			&ev.Subject, &ev.Actor, &ev.Title, &ev.OccurredAt, &ev.ReceivedAt,
-			&corr, &ev.Attributes, &locus); err != nil {
+			&corr, &ev.Attributes, &locus, &ev.Lifecycle); err != nil {
 			return nil, 0, fmt.Errorf("scan event row for tenant %q: %w", tenantID, err)
 		}
 		ev.CorrelationRef = core.RefFromRow(corr)
