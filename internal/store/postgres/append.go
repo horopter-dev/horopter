@@ -478,7 +478,9 @@ func lockAndLoadChange(
 // list, because Postgres generates them and rejects any value an INSERT supplies for one:
 // end_effective from end_at (migration 0002), start_at from
 // COALESCE(started_at, first_seen_at) (migration 0003), and locus from the ref's first
-// segment (migration 0007).
+// segment (migration 0007). What this writes is the facts the domain owns — started_at,
+// first_seen_at, end_at — so there is exactly one writer of each derived value and no second
+// writer to drift from.
 //
 // None of the three timestamps is normalised to UTC on the way in. TIMESTAMPTZ stores an
 // absolute instant, so a Go value's location never reaches the column and a .UTC() here

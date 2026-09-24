@@ -374,10 +374,13 @@ func TestMigration0007BackfillsSourceFromTheLastEvent(t *testing.T) {
 	require.NoError(t, pool.QueryRow(ctx,
 		`SELECT id FROM tenant WHERE display_name = 'acme'`).Scan(&tenantID))
 
-	var source string
+	var source, locus string
 	require.NoError(t, pool.QueryRow(ctx,
-		`SELECT source FROM change WHERE tenant = $1`, tenantID).Scan(&source))
+		`SELECT source, locus FROM change WHERE tenant = $1`, tenantID).Scan(&source, &locus))
 	assert.Equal(t, "github", source,
 		"the backfill takes the event named by last_event_id, which is the one core.Fold's "+
 			"last-wins rule left the change carrying")
+	assert.Equal(t, "legacy", locus,
+		"locus is split_part(ref, '/', 1): migration 0004 prefixes this ref to "+
+			"'legacy/dep-1', so the first segment is 'legacy'")
 }
