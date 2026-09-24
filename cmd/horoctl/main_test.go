@@ -755,3 +755,24 @@ func TestBootstrapRefusesToUnRevokeACredential(t *testing.T) {
 	assert.Contains(t, out, f.producerPrefix)
 	assert.Contains(t, out, "revoked")
 }
+
+// TestResolveLocusDefaultsToSourceOnlyWhenLocusIsEmpty pins the asymmetry that made
+// resolveLocus's two bare string parameters worth removing: the arguments are not
+// interchangeable, and a caller that swapped them used to compile.
+//
+// The old signature was resolveLocus(source, locus string). Passing them the other way
+// round returned the locus when the SOURCE was empty, which is a different rule — and
+// nothing in the suite would have noticed, because no test called this function at all.
+// issueFlags makes the swap unwriteable rather than merely untested; this pins the
+// behaviour the swap would have changed.
+func TestResolveLocusDefaultsToSourceOnlyWhenLocusIsEmpty(t *testing.T) {
+	assert.Equal(t, "github", resolveLocus(issueFlags{source: "github"}),
+		"an absent locus defaults to the source")
+	assert.Equal(t, "prod", resolveLocus(issueFlags{source: "github", locus: "prod"}),
+		"an explicit locus wins over the source")
+	assert.Equal(t, "prod", resolveLocus(issueFlags{locus: "prod"}),
+		"an explicit locus does not need a source; swapping the two would return the "+
+			"source here instead")
+	assert.Empty(t, resolveLocus(issueFlags{}),
+		"neither given resolves to empty, which ValidateLocus then refuses")
+}

@@ -56,11 +56,15 @@ func helpOrErr(err error) error {
 
 // resolveLocus applies the design's default: locus is admin-chosen and required, and
 // defaults to source when the operator does not name one separately.
-func resolveLocus(source, locus string) string {
-	if locus == "" {
-		return source
+//
+// It takes issueFlags rather than two strings because the rule is asymmetric — swap the
+// arguments and an absent SOURCE would take the locus instead, which is a different rule
+// that used to compile.
+func resolveLocus(f issueFlags) string {
+	if f.locus == "" {
+		return f.source
 	}
-	return locus
+	return f.locus
 }
 
 // tenantLabel renders an empty tenant id (a global credential) readably in operator

@@ -50,7 +50,7 @@ func runAdminBootstrap(args []string) error {
 	if err := validateBootstrapFlags(*displayName, *producerKey, *readerKey); err != nil {
 		return err
 	}
-	effectiveLocus := resolveLocus(*source, *locus)
+	effectiveLocus := resolveLocus(issueFlags{source: *source, locus: *locus})
 	if err := auth.ValidateLocus(effectiveLocus); err != nil {
 		return err
 	}
