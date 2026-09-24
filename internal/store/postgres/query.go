@@ -26,7 +26,9 @@ type ChangeQuery struct {
 	Type    string
 	Status  string
 	Locus   string
-	Source  string
+	// Source filters for one system among a change's Sources: a change HAS several,
+	// a caller FILTERS for one. Matches when Source is any member of the set.
+	Source string
 	// attributes filters on exact attribute values, by key. Only keys in
 	// FilterableAttributeKeys are accepted; NewChangeQuery refuses any other rather than
 	// ignoring it, because a filter that silently matches everything answers the caller's
@@ -167,7 +169,7 @@ type selection struct {
 
 // changeColumns are the columns scanChanges reads, in its order.
 const changeColumns = `tenant, ref, subject, type, title, actor, start_at, started_at,
-	first_seen_at, end_at, status, attributes, last_event_id, source`
+	first_seen_at, end_at, status, attributes, last_event_id, sources`
 
 // eventColumns are the columns scanEvents reads, in its order.
 const eventColumns = `id, tenant, idempotency_key, schema_version, source, type, subject,
@@ -490,7 +492,7 @@ func appendChangeFilters(sb *strings.Builder, args []any, q ChangeQuery) []any {
 	}
 	if q.Source != "" {
 		args = append(args, q.Source)
-		fmt.Fprintf(sb, " AND source = $%d", len(args))
+		fmt.Fprintf(sb, " AND sources @> ARRAY[$%d]", len(args))
 	}
 	for _, k := range slices.Sorted(maps.Keys(FilterableAttributeKeys)) {
 		v := q.attributes[k]
@@ -518,7 +520,7 @@ func scanChanges(rows pgx.Rows, extra ...any) ([]core.Change, error) {
 		)
 		dest := []any{&c.Tenant, &ref, &c.Subject, &c.Type, &c.Title,
 			&c.Actor, &c.Start, &startedAt, &c.FirstSeenAt, &endAt, &st,
-			&c.Attributes, &c.LastEventID, &c.Source}
+			&c.Attributes, &c.LastEventID, &c.Sources}
 		if err := rows.Scan(append(dest, extra...)...); err != nil {
 			return nil, fmt.Errorf("scan change row: %w", err)
 		}

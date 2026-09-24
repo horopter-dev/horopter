@@ -1229,10 +1229,10 @@ func TestQueryChangesRefusesAnUnfilterableAttributeKey(t *testing.T) {
 	}
 }
 
-// TestChangesRenderTheirSource pins the field to the response. A filter on a value the
+// TestChangesRenderTheirSources pins the field to the response. A filter on a value the
 // caller cannot read back is half a feature: #5 asked for source to be returned AND
 // filtered.
-func TestChangesRenderTheirSource(t *testing.T) {
+func TestChangesRenderTheirSources(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
@@ -1245,7 +1245,7 @@ func TestChangesRenderTheirSource(t *testing.T) {
 	var changes []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &changes))
 	require.Len(t, changes, 1)
-	assert.Equal(t, "github", changes[0]["source"])
+	assert.Equal(t, []any{"github"}, changes[0]["sources"])
 	assert.NotContains(t, changes[0], "locus",
 		"ref already carries the locus; a second copy is a second thing to keep in agreement")
 }

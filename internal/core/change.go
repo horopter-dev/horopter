@@ -81,14 +81,13 @@ type Change struct {
 	Status      Status
 	Attributes  map[string]any
 	LastEventID string
-	// Source is the system that reported the change, taken from the last event folded
-	// into it. Descriptive rather than identifying, and PERMANENTLY so: a ref's events
-	// can carry different sources by design, because correlation is scoped by locus and
-	// a locus deliberately spans credentials with different sources — a change CI starts
-	// and a cluster controller completes must land on one change (#10), which is the
-	// reason decisions/2026-09-22 rejected scoping refs by source. Filtering finds a
-	// change under its latest source only, and #23 does not change that.
-	Source string
+	// Sources are every system that reported this change, deduplicated and sorted. A SET
+	// rather than one value because a source is a property of an event and one ref
+	// legitimately spans several: decisions/2026-09-22 keeps locus and source independent
+	// precisely so a change CI starts and a cluster controller completes lands on one
+	// change. The union is commutative, so a rebuild reproduces it whatever order the log
+	// replays in.
+	Sources []string
 }
 
 // IsOpen reports whether the change is still in flight. An open change renders

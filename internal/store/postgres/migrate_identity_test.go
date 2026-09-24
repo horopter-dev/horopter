@@ -336,30 +336,37 @@ func TestMigrationsLeaveTheProjectionRebuildable(t *testing.T) {
 			"same rows, same contents — or change has stopped being a function of event")
 }
 
-// TestMigration0007BackfillsSourceFromTheLastEvent pins the backfill to the same rule
+// TestMigration0007BackfillsTheUnionOfAReferencesSources pins the backfill to the same rule
 // core.Fold applies, which is what makes a rebuild straight after the migration a no-op.
 //
-// Two events on one ref with different sources is the only fixture that can tell
-// first-by-id from last-by-id apart: seedLegacyProjection has one event per change, so it
-// would pass under a backfill that took the FIRST event's source, the earliest, or an
-// arbitrary one. It does not, on its own, kill the `e.correlation_ref = c.ref` mutant —
-// under that mutation a point change's correlation_ref stays empty, matching no ref, so its
-// source stays at the column's empty-string default while a rebuild fills it in, whereas a
-// correlated change can come out right by luck (`UPDATE ... FROM` with several matching
-// rows picks one arbitrarily). That mutant is what seedLegacyProjection's point-change
-// fixture kills, in TestMigrationsLeaveTheProjectionRebuildable — the two fixtures are not
-// redundant.
-func TestMigration0007BackfillsSourceFromTheLastEvent(t *testing.T) {
+// Two events on one ref with different sources is exactly the fixture a union backfill
+// needs: seedLegacyProjection has one event per change, so it would pass under a backfill
+// that took any ONE event's source. It does not, on its own, kill the
+// `e.correlation_ref = c.ref` mutant — under that mutation a point change's
+// correlation_ref stays empty, matching no ref, so its sources stay at the column's empty
+// default while a rebuild fills it in, whereas a correlated change can come out right by
+// luck (`UPDATE ... FROM` with several matching rows picks one arbitrarily). That mutant is
+// what seedLegacyProjection's point-change fixture kills, in
+// TestMigrationsLeaveTheProjectionRebuildable — the two fixtures are not redundant.
+//
+// The third source, "GitHub", is what tells COLLATE "C" apart from this database's default
+// collation: en_US.utf8 sorts "GitHub" after "buildkite", but byte order — what
+// core.Fold's slices.Sort uses, and what the migration must match — sorts capital letters
+// before lowercase ones, putting it first. A fixture of all-lowercase sources cannot
+// distinguish the two orderings.
+func TestMigration0007BackfillsTheUnionOfAReferencesSources(t *testing.T) {
 	ctx := context.Background()
 	pool, _ := freshDatabase(t)
 
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
 	first := core.NewULID(at, rand.Reader)
-	last := core.NewULID(at.Add(time.Minute), rand.Reader)
+	second := core.NewULID(at.Add(time.Minute), rand.Reader)
+	third := core.NewULID(at.Add(2*time.Minute), rand.Reader)
 
 	for _, e := range []struct{ id, source string }{
 		{first, "buildkite"},
-		{last, "github"},
+		{second, "github"},
+		{third, "GitHub"},
 	} {
 		mustExec(t, pool, `INSERT INTO event
 			(id, tenant, schema_version, source, type, subject, occurred_at, received_at,
@@ -372,7 +379,7 @@ func TestMigration0007BackfillsSourceFromTheLastEvent(t *testing.T) {
 		 status, attributes, last_event_id)
 		VALUES ('acme', 'dep-1', 'acme/prod', 'deployment.started', 'deployment.started',
 		        '', $1, $1, NULL, 'in_progress', '{}'::jsonb, $2)`,
-		at, last)
+		at, third)
 
 	_, err := postgres.Migrate(ctx, pool)
 	require.NoError(t, err)
@@ -381,12 +388,14 @@ func TestMigration0007BackfillsSourceFromTheLastEvent(t *testing.T) {
 	require.NoError(t, pool.QueryRow(ctx,
 		`SELECT id FROM tenant WHERE display_name = 'acme'`).Scan(&tenantID))
 
-	var source, locus string
+	var sources []string
+	var locus string
 	require.NoError(t, pool.QueryRow(ctx,
-		`SELECT source, locus FROM change WHERE tenant = $1`, tenantID).Scan(&source, &locus))
-	assert.Equal(t, "github", source,
-		"the backfill takes the event named by last_event_id, which is the one core.Fold's "+
-			"last-wins rule left the change carrying")
+		`SELECT sources, locus FROM change WHERE tenant = $1`, tenantID).Scan(&sources, &locus))
+	assert.Equal(t, []string{"GitHub", "buildkite", "github"}, sources,
+		"the backfill unions every event on the ref, ordered by byte value to match "+
+			"core.Fold — under this database's default collation \"GitHub\" would sort "+
+			"after \"buildkite\" instead of before it")
 	assert.Equal(t, "legacy", locus,
 		"locus is split_part(ref, '/', 1): migration 0004 prefixes this ref to "+
 			"'legacy/dep-1', so the first segment is 'legacy'")

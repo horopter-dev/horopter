@@ -170,6 +170,15 @@ cannot be satisfied by whatever happens to be in your shell.
 When you fix a bug, write the test first and watch it fail. A regression test
 that has never been red proves nothing.
 
+## Amending an unreleased migration
+
+`applied_migration` tracks migrations by filename, not content, so editing an
+already-applied file leaves `Migrate` reporting the schema current when it is
+not. Drop what the old version created and delete its row from
+`applied_migration` before a test run will pick up the edit. This only
+applies to a migration that is unmerged and unreleased — once released, write
+a new migration instead.
+
 ## Reporting security issues
 
 Please do not open a public issue for a security problem. Check the README's

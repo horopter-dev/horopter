@@ -10,24 +10,47 @@
 ALTER TABLE change ADD COLUMN locus TEXT NOT NULL
     GENERATED ALWAYS AS (split_part(ref, '/', 1)) STORED;
 
--- Source is descriptive and follows core.Fold's last-wins rule, as subject and type do, so
--- it is a real column rather than a derived one. The DEFAULT exists so a change row whose
--- last_event_id resolves to no event is left alone rather than failing the migration — the
--- safer behaviour if something that should be impossible happens.
-ALTER TABLE change ADD COLUMN source TEXT NOT NULL DEFAULT '';
+-- A source is a property of an EVENT, and decisions/2026-09-22 mandates that one ref spans
+-- credentials with different sources, so a change has a SET of them. Union rather than
+-- last-wins: a union is commutative, so a rebuild in any order reproduces it exactly, and
+-- core.Fold's other aggregate fields (first_seen_at's min, the attribute merge) already work
+-- this way. capabilities TEXT[] in 0004 is the array precedent.
+ALTER TABLE change ADD COLUMN sources TEXT[] NOT NULL DEFAULT '{}';
 
--- Backfilled from each ref's LAST event by id, which is what the fold rule produces:
--- core.Fold sets out.LastEventID = ev.ID on every event, so last_event_id already names the
--- event whose values won. Joining on correlation_ref instead would populate a
--- reasonable-looking column that only a rebuild disagrees with — 0004's defect exactly, and
--- the reason 0006 was needed.
-UPDATE change c SET source = e.source
-  FROM event e
- WHERE e.tenant = c.tenant
-   AND e.id = c.last_event_id;
+-- The ref an event folds onto is core.RefFor's rule: its correlation_ref, or its locus and
+-- its own id when it has none. This CASE is that rule in SQL, so the backfill covers BOTH
+-- change shapes. Joining on correlation_ref alone would leave every POINT change empty while
+-- a rebuild filled it -- 0004's defect exactly, and the reason 0006 was needed.
+--
+-- DISTINCT and ORDER BY are both load-bearing: core.Fold produces a sorted, deduplicated
+-- slice, and TestMigrationsLeaveTheProjectionRebuildable compares whole rows as JSON, so an
+-- array in a different order is a different value.
+--
+-- COLLATE "C" on both, because DISTINCT and ORDER BY must agree on collation and slices.Sort
+-- orders by byte value, not by this database's default collation (en_US.utf8, which sorts
+-- "GitHub" after "buildkite" and "github"; "C" sorts it first, matching Go's byte order,
+-- where uppercase letters precede lowercase ones). Without it, a ref whose sources differ in
+-- case or punctuation position backfills in one order and rebuilds in another -- the same
+-- set, a different array, which is a different row to
+-- TestMigrationsLeaveTheProjectionRebuildable's to_jsonb comparison.
+UPDATE change c SET sources = s.sources
+  FROM (
+    SELECT tenant,
+           CASE WHEN correlation_ref <> '' THEN correlation_ref
+                ELSE locus || '/' || id END AS ref,
+           array_agg(DISTINCT source COLLATE "C" ORDER BY source COLLATE "C") AS sources
+      FROM event
+     GROUP BY 1, 2
+  ) s
+ WHERE s.tenant = c.tenant
+   AND s.ref = c.ref;
 
-CREATE INDEX ix_change_locus  ON change (tenant, locus);
-CREATE INDEX ix_change_source ON change (tenant, source);
+CREATE INDEX ix_change_locus ON change (tenant, locus);
+
+-- GIN, because the query is containment (sources @> ARRAY[$n]) rather than equality. The
+-- tenant predicate is served separately; a composite (tenant, sources) would need btree_gin,
+-- an extension this schema does not otherwise require.
+CREATE INDEX ix_change_sources ON change USING GIN (sources);
 
 -- One expression index per allowlisted attribute key. postgres.FilterableAttributeKeys is
 -- the Go half of this pair; adding a key means adding both, which is the point.

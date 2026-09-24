@@ -638,8 +638,10 @@ func TestQueryChangesFiltersByLocus(t *testing.T) {
 	assert.Equal(t, "gha/dep-gha", got[0].Ref.String())
 }
 
-// TestQueryChangesFiltersBySource pins the column Task 1 added, end to end: the event's
-// source reaches the change through the fold and comes back out as a filter.
+// TestQueryChangesFiltersBySource pins the column end to end: an event's source reaches the
+// change through the fold, comes back out as a member of Sources, and the filter matches by
+// containment rather than equality — which is what lets a change with two sources be found
+// under either.
 func TestQueryChangesFiltersBySource(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -654,7 +656,33 @@ func TestQueryChangesFiltersBySource(t *testing.T) {
 
 	require.Len(t, got, 1)
 	assert.Equal(t, "ci/dep-gh", got[0].Ref.String())
-	assert.Equal(t, "github", got[0].Source, "and the value must come back on the change")
+	assert.Equal(t, []string{"github"}, got[0].Sources, "and the value must come back on the change")
+
+	// A change both systems reported is found under either, which is the whole reason
+	// sources is a set: under last-wins it was findable only under whichever reported last.
+	// argo and flux are new names, not reused from the fixtures above, so the two source
+	// filters below cannot accidentally also match dep-gh or dep-bk.
+	argoEvent := mkEvent(tn, eventID(t, "dep-both-1"), "k-dep-both-1", "dep-both",
+		"deployment.started", at)
+	argoEvent.Source = "argo"
+	_, _, err = s.AppendEvent(ctx, argoEvent)
+	require.NoError(t, err)
+	fluxEvent := mkEvent(tn, eventID(t, "dep-both-2"), "k-dep-both-2", "dep-both",
+		"deployment.completed", at.Add(time.Minute))
+	fluxEvent.Source = "flux"
+	_, _, err = s.AppendEvent(ctx, fluxEvent)
+	require.NoError(t, err)
+
+	for _, src := range []string{"argo", "flux"} {
+		bothQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0, nil)
+		bothQuery.Source = src
+		got, _, err := s.QueryChanges(ctx, bothQuery)
+		require.NoError(t, err)
+		require.Len(t, got, 1, "source %q must find the two-source change", src)
+		assert.Equal(t, "ci/dep-both", got[0].Ref.String())
+		assert.ElementsMatch(t, []string{"argo", "flux"}, got[0].Sources,
+			"the change genuinely carries both sources, not just the one filtered on")
+	}
 }
 
 // TestQueryChangesFiltersByAttribute covers the allowlisted key, and with it the two SQL

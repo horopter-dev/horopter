@@ -604,7 +604,7 @@ func changesToJSON(changes []core.Change) []map[string]any {
 			"actor": c.Actor, "start": c.Start.UTC().Format(time.RFC3339Nano),
 			"first_seen_at": c.FirstSeenAt.UTC().Format(time.RFC3339Nano),
 			"status":        string(c.Status), "attributes": c.Attributes,
-			"last_event_id": c.LastEventID, "source": c.Source,
+			"last_event_id": c.LastEventID, "sources": c.Sources,
 		}
 		if c.StartedAt != nil {
 			m["started_at"] = c.StartedAt.UTC().Format(time.RFC3339Nano)
