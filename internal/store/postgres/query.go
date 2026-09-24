@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -24,6 +25,17 @@ type ChangeQuery struct {
 	Subject string
 	Type    string
 	Status  string
+	Locus   string
+	// Source filters for one system among a change's Sources: a change HAS several,
+	// a caller FILTERS for one. Matches when Source is any member of the set.
+	Source string
+	// attributes filters on exact attribute values, by key. Only keys in
+	// FilterableAttributeKeys are accepted; NewChangeQuery refuses any other rather than
+	// ignoring it, because a filter that silently matches everything answers the caller's
+	// question wrongly. An empty value is no filter, as an empty Subject is. It is
+	// unexported so NewChangeQuery's allowlist check is the only way to set it — a field a
+	// caller could assign after construction would let that check be bypassed entirely.
+	attributes map[string]string
 	// Ref selects a single change by its (tenant, ref) primary key. When set, the window
 	// predicate is omitted entirely: From and To are ignored, since a ref lookup is already
 	// exact and a window could only narrow it redundantly.
@@ -47,17 +59,50 @@ type ChangeQuery struct {
 var ErrUnscopedQuery = errors.New(
 	"query is not scoped to a tenant; a tenant comes from the authenticated principal")
 
+// FilterableAttributeKeys are the attribute keys a change query may filter on. Each one has
+// an expression index in the migration that added it; adding a key means adding both, and
+// the cost is the point. The list is a compatibility contract — an attribute key that
+// becomes filterable is one callers may depend on — and attributes are otherwise free-form
+// and producer-chosen, so without an allowlist every key a producer invents becomes a query
+// surface nobody designed and nobody can withdraw.
+var FilterableAttributeKeys = map[string]struct{}{
+	"deployment.environment.name": {},
+}
+
+// ErrUnfilterableAttribute reports a change query naming an attribute key outside
+// FilterableAttributeKeys. It is always wrapped with the offending key and the permitted
+// list, so egress can answer 400 with the error's own text.
+var ErrUnfilterableAttribute = errors.New("attribute key is not filterable")
+
+// filterableKeys renders the allowlist for an error message, sorted so the text is stable.
+func filterableKeys() string {
+	return strings.Join(slices.Sorted(maps.Keys(FilterableAttributeKeys)), ", ")
+}
+
 // NewChangeQuery returns a ChangeQuery scoped to tenant over [from, to] — the only
 // constructor for one, and so the only place a core.TenantID crosses into the store
-// package. Subject, Type, Status and Ref are optional filters, assigned on the result
-// afterward.
+// package. Subject, Type, Status, Locus, Source and Ref are optional filters, assigned on
+// the result afterward.
+//
+// attrs is a parameter rather than a field set afterward because it is the only filter that
+// can be invalid: an unallowlisted key must never reach the store, and a constructor is the
+// one place that can be guaranteed. Pass nil for no attribute filter.
 func NewChangeQuery(
-	tenant core.TenantID, from, to time.Time, limit int,
+	tenant core.TenantID, from, to time.Time, limit int, attrs map[string]string,
 ) (ChangeQuery, error) {
 	if tenant.IsZero() {
 		return ChangeQuery{}, ErrUnscopedQuery
 	}
-	return ChangeQuery{tenant: tenant.String(), From: from, To: to, Limit: limit}, nil
+	// Sorted so that a query naming several bad keys always reports the same one.
+	for _, k := range slices.Sorted(maps.Keys(attrs)) {
+		if _, ok := FilterableAttributeKeys[k]; !ok {
+			return ChangeQuery{}, fmt.Errorf("%w: %q; filterable keys are %s",
+				ErrUnfilterableAttribute, k, filterableKeys())
+		}
+	}
+	return ChangeQuery{
+		tenant: tenant.String(), From: from, To: to, Limit: limit, attributes: attrs,
+	}, nil
 }
 
 // EventQuery selects raw events for audit, export, and debugging. tenant is unexported for
@@ -124,7 +169,7 @@ type selection struct {
 
 // changeColumns are the columns scanChanges reads, in its order.
 const changeColumns = `tenant, ref, subject, type, title, actor, start_at, started_at,
-	first_seen_at, end_at, status, attributes, last_event_id`
+	first_seen_at, end_at, status, attributes, last_event_id, sources`
 
 // eventColumns are the columns scanEvents reads, in its order.
 const eventColumns = `id, tenant, idempotency_key, schema_version, source, type, subject,
@@ -417,6 +462,17 @@ func (s *Store) queryChangesWithinBytes(
 // appendChangeFilters adds the optional equality filters to the query and returns the
 // extended argument list. The placeholders are numbered from the argument list's own
 // length, so the two must grow together — which is why they are built in one place.
+//
+// The attribute loop ranges over FilterableAttributeKeys rather than over q.attributes, and
+// that is not a stylistic choice. The key is written into the SQL text rather than bound,
+// because ix_change_attr_environment indexes the expression
+// (attributes ->> 'deployment.environment.name') and Postgres matches an expression index by
+// comparing expressions: under a generic plan a bound $n is not folded to a constant, the
+// expressions stop matching, and the index is silently skipped — which would leave the
+// allowlist buying nothing. Ranging over the allowlist means the only strings that ever reach
+// the SQL are the literals declared in this file, whatever a caller supplied. The values stay
+// bound parameters. Sorting the allowlist also makes the generated SQL deterministic, which
+// Go's map iteration order is not.
 func appendChangeFilters(sb *strings.Builder, args []any, q ChangeQuery) []any {
 	if q.Subject != "" {
 		args = append(args, q.Subject)
@@ -429,6 +485,22 @@ func appendChangeFilters(sb *strings.Builder, args []any, q ChangeQuery) []any {
 	if q.Status != "" {
 		args = append(args, q.Status)
 		fmt.Fprintf(sb, " AND status = $%d", len(args))
+	}
+	if q.Locus != "" {
+		args = append(args, q.Locus)
+		fmt.Fprintf(sb, " AND locus = $%d", len(args))
+	}
+	if q.Source != "" {
+		args = append(args, q.Source)
+		fmt.Fprintf(sb, " AND sources @> ARRAY[$%d]", len(args))
+	}
+	for _, k := range slices.Sorted(maps.Keys(FilterableAttributeKeys)) {
+		v := q.attributes[k]
+		if v == "" {
+			continue
+		}
+		args = append(args, v)
+		fmt.Fprintf(sb, " AND attributes ->> '%s' = $%d", k, len(args))
 	}
 	return args
 }
@@ -448,7 +520,7 @@ func scanChanges(rows pgx.Rows, extra ...any) ([]core.Change, error) {
 		)
 		dest := []any{&c.Tenant, &ref, &c.Subject, &c.Type, &c.Title,
 			&c.Actor, &c.Start, &startedAt, &c.FirstSeenAt, &endAt, &st,
-			&c.Attributes, &c.LastEventID}
+			&c.Attributes, &c.LastEventID, &c.Sources}
 		if err := rows.Scan(append(dest, extra...)...); err != nil {
 			return nil, fmt.Errorf("scan change row: %w", err)
 		}

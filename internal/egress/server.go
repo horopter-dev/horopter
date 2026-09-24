@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -383,6 +384,28 @@ func windowFromEpochMillis(r *http.Request) (window, error) {
 	return newWindow(from, to, limit)
 }
 
+// attributeFilters collects the ?attr.<key>=<value> parameters into the map NewChangeQuery
+// validates. Everything after the prefix is the key, dots included: attribute keys are
+// dotted by convention — deployment.environment.name — so a parser that split on "." would
+// truncate every real one.
+//
+// An empty key survives here rather than being dropped, so that ?attr.= is refused by the
+// allowlist like any other unknown key instead of being silently ignored.
+func attributeFilters(r *http.Request) map[string]string {
+	var out map[string]string
+	for name, values := range r.URL.Query() {
+		key, ok := strings.CutPrefix(name, "attr.")
+		if !ok {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[key] = values[0]
+	}
+	return out
+}
+
 // changesFor reads the changes win selects: it estimates their size, has admission reserve
 // their memory, then queries them. It answers the request itself on any failure, and then
 // reports ok false.
@@ -396,8 +419,16 @@ func (s *Server) changesFor(
 	tenantID := tenantFromContext(r.Context())
 	trace.SpanFromContext(r.Context()).SetAttributes(
 		attribute.String("horopter.tenant", tenantID.String()))
-	q, err := postgres.NewChangeQuery(tenantID, win.from, win.to, win.limit)
+	q, err := postgres.NewChangeQuery(
+		tenantID, win.from, win.to, win.limit, attributeFilters(r))
 	if err != nil {
+		// An unfilterable attribute key is the caller's mistake, not a failed read, so it
+		// answers 400 with the store's own message — which names the key and lists what is
+		// filterable. readFailed's 500 would report the server broken instead.
+		if errors.Is(err, postgres.ErrUnfilterableAttribute) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return nil, false, false
+		}
 		s.readFailed(w, r, adapter, err)
 		return nil, false, false
 	}
@@ -405,6 +436,8 @@ func (s *Server) changesFor(
 	q.Type = r.URL.Query().Get("type")
 	q.Status = r.URL.Query().Get("status")
 	q.Ref = r.URL.Query().Get("ref")
+	q.Locus = r.URL.Query().Get("locus")
+	q.Source = r.URL.Query().Get("source")
 	est, err := s.store.EstimateChanges(r.Context(), q)
 	if err != nil {
 		s.readFailed(w, r, adapter, err)
@@ -571,7 +604,7 @@ func changesToJSON(changes []core.Change) []map[string]any {
 			"actor": c.Actor, "start": c.Start.UTC().Format(time.RFC3339Nano),
 			"first_seen_at": c.FirstSeenAt.UTC().Format(time.RFC3339Nano),
 			"status":        string(c.Status), "attributes": c.Attributes,
-			"last_event_id": c.LastEventID,
+			"last_event_id": c.LastEventID, "sources": c.Sources,
 		}
 		if c.StartedAt != nil {
 			m["started_at"] = c.StartedAt.UTC().Format(time.RFC3339Nano)

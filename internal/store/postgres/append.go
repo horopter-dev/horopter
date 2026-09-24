@@ -455,11 +455,12 @@ func lockAndLoadChange(
 	)
 	err := tx.QueryRow(ctx, `
 		SELECT tenant, ref, subject, type, title, actor, start_at, started_at,
-		       first_seen_at, end_at, status, attributes, last_event_id
+		       first_seen_at, end_at, status, attributes, last_event_id, sources
 		FROM change WHERE tenant = $1 AND ref = $2 FOR UPDATE`,
 		tenantID, ref,
 	).Scan(&c.Tenant, &storedRef, &c.Subject, &c.Type, &c.Title, &c.Actor,
-		&c.Start, &startedAt, &c.FirstSeenAt, &endAt, &st, &c.Attributes, &c.LastEventID)
+		&c.Start, &startedAt, &c.FirstSeenAt, &endAt, &st, &c.Attributes,
+		&c.LastEventID, &c.Sources)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return core.Change{}, false, nil
 	}
@@ -473,12 +474,13 @@ func lockAndLoadChange(
 	return c, true, nil
 }
 
-// upsertChange writes a folded change. Both derived columns are absent from the column
+// upsertChange writes a folded change. All three derived columns are absent from the column
 // list, because Postgres generates them and rejects any value an INSERT supplies for one:
-// end_effective from end_at (migration 0002), and start_at from
-// COALESCE(started_at, first_seen_at) (migration 0003). What this writes is the facts the
-// domain owns — started_at, first_seen_at, end_at — so there is exactly one writer of each
-// derived value and no second writer to drift from.
+// end_effective from end_at (migration 0002), start_at from
+// COALESCE(started_at, first_seen_at) (migration 0003), and locus from the ref's first
+// segment (migration 0007). What this writes is the facts the domain owns — started_at,
+// first_seen_at, end_at — so there is exactly one writer of each derived value and no second
+// writer to drift from.
 //
 // None of the three timestamps is normalised to UTC on the way in. TIMESTAMPTZ stores an
 // absolute instant, so a Go value's location never reaches the column and a .UTC() here
@@ -487,16 +489,17 @@ func lockAndLoadChange(
 func upsertChange(ctx context.Context, tx pgx.Tx, c core.Change) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO change (tenant, ref, subject, type, title, actor, started_at,
-		                    first_seen_at, end_at, status, attributes, last_event_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		                    first_seen_at, end_at, status, attributes, last_event_id, sources)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (tenant, ref) DO UPDATE SET
 		  subject=EXCLUDED.subject, type=EXCLUDED.type, title=EXCLUDED.title,
 		  actor=EXCLUDED.actor, started_at=EXCLUDED.started_at,
 		  first_seen_at=EXCLUDED.first_seen_at, end_at=EXCLUDED.end_at,
 		  status=EXCLUDED.status, attributes=EXCLUDED.attributes,
-		  last_event_id=EXCLUDED.last_event_id`,
+		  last_event_id=EXCLUDED.last_event_id, sources=EXCLUDED.sources`,
 		c.Tenant, c.Ref.String(), c.Subject, c.Type, c.Title, c.Actor,
 		c.StartedAt, c.FirstSeenAt, c.End, string(c.Status), c.Attributes, c.LastEventID,
+		c.Sources,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert change %q/%q: %w", c.Tenant, c.Ref, err)

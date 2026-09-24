@@ -80,3 +80,8 @@ func SetAfterIdemLookupHook(fn func()) { afterIdemLookupHook = fn }
 // rebuild open there is how a test puts an append into exactly the window the
 // tenant-scoped advisory lock exists to close.
 func SetAfterDeleteHook(fn func()) { afterDeleteHook = fn }
+
+// AttributesOf returns q's attribute filters. The field is unexported so that
+// NewChangeQuery's allowlist check cannot be bypassed by assigning it after
+// construction, which would silently return every row rather than refusing the key.
+func AttributesOf(q ChangeQuery) map[string]string { return q.attributes }

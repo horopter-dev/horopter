@@ -438,15 +438,21 @@ same-ref event committed before another that carries a lower id. That needs no u
 timing: an id is minted on the ingress replica that received the request, before its
 append starts, so with more than one replica the window is the clock skew between them,
 and even with one replica an append that minted a lower id can lose the race for the
-per-ref lock. Every field whose rule is "last event wins" — `last_event_id`, `type`,
-`title`, `actor`, `subject` and attributes — can come back different. `status` and `end`
-follow the narrower rule "last *terminal* event wins", so a `deployment.completed` and a
-`deployment.failed` on one ref can swap, but nothing that arrives later can reopen a change
-that has already closed. `start`,
+per-ref lock. Every field whose rule is "last event wins" — `last_event_id`, `type` and
+`subject` — can come back different. So can `title` and `actor`, which follow the slightly
+narrower "last *non-empty* event wins": a reorder still moves them between two events that
+both carry one, but an event carrying none cannot blank what an earlier event recorded.
+Attributes merge, so no reorder ever loses or gains a key — but where two events set the
+*same* key, the value follows last-wins, so a query filtering on `attr.<key>` can match a
+different set of changes afterwards. `status` and `end` follow the narrowest rule, "last
+*terminal* event wins", so a `deployment.completed` and a `deployment.failed` on one ref can
+swap, but nothing that arrives later can reopen a change that has already closed. `start`,
 `started_at` and `first_seen_at` cannot: they are minima, so replay order does not reach
-them. Rebuilding twice gives the same answer both times — it is the live projection the
-replay may disagree with, not itself. If a change's outcome matters to you, read `GET
-/v1/events?ref=<stored-ref>` (the log is immutable and is never reordered) before and after.
+them. `sources` cannot either: it is a union, so it survives a rebuild unchanged whatever
+order the log replays in. Rebuilding twice gives the same answer both times — it is the live
+projection the replay may disagree with, not itself. If a change's outcome matters to you,
+read `GET /v1/events?ref=<stored-ref>` (the log is immutable and is never reordered) before
+and after.
 `<stored-ref>` is the ref as stored, which is what `GET /v1/changes` returns — `<locus>/<ref>`,
 where the locus is `legacy` for anything the locus migrations could not recover (see "Refs
 written before the locus migrations", below) and the appending credential's locus otherwise.
@@ -524,12 +530,45 @@ oldest rows that fit; see Read admission. The same advice applies.
 Act on it. Changes are returned oldest first, so truncation discards the **most recent**
 rows — during an incident, exactly the ones being looked for — and a truncated response
 is otherwise indistinguishable from a complete one. Narrow the time window, or filter by
-`subject`, `type` or `status`, and repeat the query until the header is gone. A `limit`
-query parameter below 1000 asks for fewer rows; it cannot raise the cap.
+`subject`, `type`, `status`, `locus`, `source` or `attr.deployment.environment.name`, and
+repeat the query until the header is gone. A `limit` query parameter below 1000 asks for
+fewer rows; it cannot raise the cap.
 
 The signal is a header rather than a field in the body because two of these routes render
 vendor-owned shapes — Grafana annotations and OTLP spans — that cannot carry a Horopter
 envelope.
+
+## Filtering changes
+
+`GET /v1/changes` and both adapter routes take the same filters, all exact equality, all
+optional, all combining with AND:
+
+| parameter | matches |
+|---|---|
+| `subject` | the change's subject |
+| `type` | the change's type |
+| `status` | the change's status |
+| `locus` | the namespace the ref was issued under — the part of a stored ref before its `/` |
+| `source` | a system that reported the change — matches if it is any of them |
+| `attr.<key>` | an attribute's exact value |
+
+An empty value is no filter, so `?status=` and an omitted `status` mean the same thing. That
+holds for an allowlisted `attr.<key>` too. It does **not** make an unfilterable key
+acceptable: `?attr.service.version=` is refused exactly as `?attr.service.version=2.5.0` is,
+because what is wrong there is the key rather than the filter. Accepting the empty one and
+refusing the other would make a single mistake behave two ways depending on whether the
+caller filled the box in.
+
+**Attribute keys are allowlisted.** Only `deployment.environment.name` is filterable today.
+Any other `attr.` key is answered **400** naming the key and listing what is permitted,
+rather than being ignored — a filter that silently matches everything answers a narrowing
+question with the wrong result set. Each filterable key needs its own expression index, so
+adding one is a migration rather than a configuration change; that cost is deliberate,
+because a key that becomes filterable is one callers may depend on afterwards.
+
+`source` filters against **every** system that contributed to the change, not just the last
+one. A ref whose events come from two systems — a change CI starts and a cluster controller
+completes, say — is found by filtering on either.
 
 ## Read admission
 

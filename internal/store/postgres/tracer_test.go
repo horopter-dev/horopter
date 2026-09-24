@@ -102,7 +102,7 @@ func TestPoolTracerKeepsOtelpgxSpans(t *testing.T) {
 	at := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
 
 	_, _, err := s.QueryChanges(ctx,
-		changeQuery(t, tn, at, at.Add(time.Hour), 1))
+		changeQuery(t, tn, at, at.Add(time.Hour), 1, nil))
 	require.NoError(t, err)
 
 	names := map[string]bool{}

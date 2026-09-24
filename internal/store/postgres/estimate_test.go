@@ -62,7 +62,7 @@ func eventRowBytes(t *testing.T, s *postgres.Store, tn string) []int64 {
 
 func sizedWindow(t *testing.T, tn string, limit int) postgres.ChangeQuery {
 	t.Helper()
-	return changeQuery(t, tn, sizedBase.Add(-time.Hour), sizedBase.Add(time.Hour), limit)
+	return changeQuery(t, tn, sizedBase.Add(-time.Hour), sizedBase.Add(time.Hour), limit, nil)
 }
 
 func changeRefs(changes []core.Change) []string {

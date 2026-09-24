@@ -38,7 +38,7 @@ func newMemoryFixture(t *testing.T) memoryFixture {
 	}
 	q := changeQuery(t, tn,
 		time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC),
-		time.Date(2026, 9, 14, 11, 0, 0, 0, time.UTC), 1)
+		time.Date(2026, 9, 14, 11, 0, 0, 0, time.UTC), 1, nil)
 	firstTwo, err := s.EstimateChanges(context.Background(), q)
 	require.NoError(t, err)
 	q.Limit = egress.MaxLimit

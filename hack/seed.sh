@@ -44,19 +44,24 @@ post() {
   local source=$1 type=$2 subject=$3 ago=$4 ref=$5 title=$6
   local occurred body status
   occurred="$(minutes_ago "$ago")"
+  # deployment.environment.name is the one attribute key this branch makes filterable, so
+  # the seed data has to vary it. subject is already "<team>/<environment>", which gives
+  # prod and staging alternating across the seeded changes for free.
+  local env="${subject##*/}"
 
   body="$(jq -n \
     --arg source "$source" --arg type "$type" \
     --arg subject "$subject" --arg occurred "$occurred" --arg title "$title" \
     --arg key "${run}-${ref:-$type}-${ago}" --arg ref "$ref" --arg run "$run" \
-    --arg commit "$commit" \
+    --arg commit "$commit" --arg env "$env" \
     '{source: $source, type: $type, subject: $subject,
       occurred_at: $occurred, title: $title, actor: "seed.sh",
       idempotency_key: $key,
       attributes: {
         commit: $commit,
         version: "1.4.0",
-        "horopter.description": "seeded by hack/seed.sh run \($run)"
+        "horopter.description": "seeded by hack/seed.sh run \($run)",
+        "deployment.environment.name": $env
       }}
      + (if $ref == "" then {} else {correlation_ref: "\($run)-\($ref)"} end)')"
 

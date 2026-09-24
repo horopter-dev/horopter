@@ -1,6 +1,9 @@
 package core
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // StatusForType reports the terminal status implied by an event type, and
 // whether the type is terminal at all. The terminal vocabulary is the event
@@ -65,6 +68,39 @@ func mergedAttributes(cur *Change, ev Event) map[string]any {
 	return out
 }
 
+// mergedSources returns cur's sources with ev's added, deduplicated and sorted, in a fresh
+// slice. Fold's purity depends on that copy for the same reason mergedAttributes needs one:
+// the returned Change must never share a slice with cur.
+//
+// out starts as []string{}, not nil: pgx encodes a nil slice as SQL NULL, which the sources
+// column's NOT NULL rejects with an error naming neither Fold nor this function. Ingest's
+// Validate keeps ev.Source non-empty in production, so an empty result needs an empty
+// cur.Sources too, but Fold itself gives no such guarantee, and the failure it would
+// otherwise produce is worth avoiding regardless of how unreachable it is today.
+//
+// Sorted so the result is a function of the SET and not of arrival order, which is what
+// makes a rebuild reproduce it exactly and what migration 0007's
+// array_agg(DISTINCT ... ORDER BY source COLLATE "C") has to match byte-for-byte: this sort
+// is byte order, not the database's default collation.
+func mergedSources(cur *Change, ev Event) []string {
+	seen := make(map[string]struct{}, 2)
+	out := []string{}
+	if cur != nil {
+		for _, s := range cur.Sources {
+			if _, ok := seen[s]; !ok {
+				seen[s] = struct{}{}
+				out = append(out, s)
+			}
+		}
+	}
+	if _, ok := seen[ev.Source]; !ok && ev.Source != "" {
+		seen[ev.Source] = struct{}{}
+		out = append(out, ev.Source)
+	}
+	slices.Sort(out)
+	return out
+}
+
 // Fold applies one event to a change and returns the result. cur is nil for
 // the first event of a ref, but a zero-value *Change (as produced by, e.g.,
 // `c := m[ref]; m[ref] = Fold(&c, ev)` over a map[Ref]Change) must yield
@@ -89,6 +125,7 @@ func Fold(cur *Change, ev Event) Change {
 	out.Ref = RefFor(ev)
 	out.Subject = ev.Subject
 	out.Type = ev.Type
+	out.Sources = mergedSources(cur, ev)
 	// Last NON-EMPTY wins. Actor is optional on both ingest paths, so an event carrying
 	// none is ordinary traffic; an unconditional assignment let any such event blank the
 	// actor a previous event had recorded, and a rebuild reproduced the erasure rather

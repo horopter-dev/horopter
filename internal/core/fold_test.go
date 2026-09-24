@@ -109,11 +109,13 @@ func TestFoldIsPure(t *testing.T) {
 	a.Attributes = map[string]any{"service.version": "2.4.0"}
 	base := core.Fold(nil, a)
 	baseAttrsBefore := maps.Clone(base.Attributes)
+	baseSourcesBefore := append([]string{}, base.Sources...)
 	require.NotNil(t, base.StartedAt, "precondition: base carries an asserted start")
 	baseStartedBefore := *base.StartedAt
 
 	b := ev("01B", "dep-7", "deployment.started", t10)
 	b.Attributes = map[string]any{"service.version": "2.5.0"}
+	b.Source = "flux"
 
 	x := core.Fold(&base, b)
 	y := core.Fold(&base, b)
@@ -121,6 +123,9 @@ func TestFoldIsPure(t *testing.T) {
 	assert.Equal(t, x, y, "folding identical input twice must give identical output")
 	assert.Equal(t, baseAttrsBefore, base.Attributes,
 		"Fold must not mutate the input change's attribute map")
+	assert.Equal(t, baseSourcesBefore, base.Sources,
+		"Fold must not mutate the input change's sources slice; a's and b's sources "+
+			"differ, so an implementation that aliased cur.Sources would be caught here")
 	require.NotNil(t, base.StartedAt)
 	assert.Equal(t, baseStartedBefore, *base.StartedAt,
 		"Fold must not write through the StartedAt pointer it copied from cur; the "+
@@ -128,6 +133,9 @@ func TestFoldIsPure(t *testing.T) {
 	assert.Equal(t, t10, *x.StartedAt,
 		"precondition: the fold really did take the earlier assertion, so the branch "+
 			"that writes StartedAt was entered")
+	assert.Equal(t, []string{"ci", "flux"}, x.Sources,
+		"precondition: the fold merged two distinct sources, which is what makes the "+
+			"aliasing check above meaningful")
 }
 
 // A terminal event folded onto a change that already has a non-nil End
@@ -502,4 +510,47 @@ func TestFoldLaterNonEmptyTitleWins(t *testing.T) {
 	c := core.Fold(nil, first)
 	c = core.Fold(&c, second)
 	assert.Equal(t, "Deploy v2.5.1", c.Title)
+}
+
+// TestFoldUnionsSourcesWhateverTheOrder pins the rule that makes a source set safe to
+// project: it is a union, so folding a ref's events in either order gives the same answer.
+// Last-wins did not have this property, which is why source used to appear in rebuild.go's
+// list of fields a rebuild can move.
+func TestFoldUnionsSourcesWhateverTheOrder(t *testing.T) {
+	at := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+	ci := core.Event{
+		ID: "01K5A000000000000000000001", Tenant: "t", Type: "deployment.started",
+		Source: "github", Subject: "acme/prod", OccurredAt: at,
+		CorrelationRef: core.RefFromRow("ci/dep-1"),
+	}
+	flux := core.Event{
+		ID: "01K5A000000000000000000002", Tenant: "t", Type: "deployment.completed",
+		Source: "flux", Subject: "acme/prod", OccurredAt: at.Add(time.Minute),
+		CorrelationRef: core.RefFromRow("ci/dep-1"),
+	}
+
+	forward := core.Fold(nil, ci)
+	forward = core.Fold(&forward, flux)
+	backward := core.Fold(nil, flux)
+	backward = core.Fold(&backward, ci)
+
+	assert.Equal(t, []string{"flux", "github"}, forward.Sources,
+		"both systems that reported the change are kept, sorted")
+	assert.Equal(t, forward.Sources, backward.Sources,
+		"a union is commutative, so replay order cannot change the answer")
+}
+
+// TestFoldDoesNotRepeatASource keeps the set a set: the common case is many events from one
+// system, and an array that grew per event would be unbounded.
+func TestFoldDoesNotRepeatASource(t *testing.T) {
+	at := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+	ev := func(id string) core.Event {
+		return core.Event{
+			ID: id, Tenant: "t", Type: "deployment.started", Source: "github",
+			Subject: "acme/prod", OccurredAt: at, CorrelationRef: core.RefFromRow("ci/dep-1"),
+		}
+	}
+	c := core.Fold(nil, ev("01K5A000000000000000000001"))
+	c = core.Fold(&c, ev("01K5A000000000000000000002"))
+	assert.Equal(t, []string{"github"}, c.Sources)
 }

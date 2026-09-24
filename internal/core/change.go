@@ -81,6 +81,13 @@ type Change struct {
 	Status      Status
 	Attributes  map[string]any
 	LastEventID string
+	// Sources are every system that reported this change, deduplicated and sorted. A SET
+	// rather than one value because a source is a property of an event and one ref
+	// legitimately spans several: decisions/2026-09-22 keeps locus and source independent
+	// precisely so a change CI starts and a cluster controller completes lands on one
+	// change. The union is commutative, so a rebuild reproduces it whatever order the log
+	// replays in.
+	Sources []string
 }
 
 // IsOpen reports whether the change is still in flight. An open change renders

@@ -110,7 +110,7 @@ func expansionReads(t *testing.T, s *postgres.Store, tn string) []expansionRead 
 	ctx := context.Background()
 	from := time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC)
 	changes, err := s.EstimateChanges(ctx,
-		changeQuery(t, tn, from, from.Add(2*time.Hour), egress.MaxLimit))
+		changeQuery(t, tn, from, from.Add(2*time.Hour), egress.MaxLimit, nil))
 	require.NoError(t, err)
 	events, err := s.EstimateEvents(ctx, eventQuery(t, tn, egress.MaxLimit))
 	require.NoError(t, err)
