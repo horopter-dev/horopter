@@ -121,6 +121,7 @@ type eventRequest struct {
 	CorrelationRef string          `json:"correlation_ref"`
 	IdempotencyKey string          `json:"idempotency_key"`
 	Attributes     map[string]any  `json:"attributes"`
+	Lifecycle      string          `json:"lifecycle"`
 }
 
 // recordTenant puts the resolved tenant on the request's span. The tenant is the
@@ -237,6 +238,7 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		Attributes:     req.Attributes,
 		Origin:         p.Origin,
 		Locus:          core.LocusFromRow(p.Locus),
+		Lifecycle:      core.Lifecycle(req.Lifecycle),
 	}
 	s.append(w, r, ev)
 }

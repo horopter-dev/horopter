@@ -474,6 +474,55 @@ func TestPostEventCreatesChange(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"ref":"github/dep-7"`)
 }
 
+// TestPostEventAcceptsALifecycleAssertion pins the native route's new field end to end. The
+// type's suffix asserts NOTHING, so the change can only open because the explicit value was
+// read — asserting that the request is merely accepted would pass with the field dropped.
+func TestPostEventAcceptsALifecycleAssertion(t *testing.T) {
+	f := newIngressFixture(t)
+	body := fmt.Sprintf(`{"source":"ci","type":"deployment.initiated",
+		"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z",
+		"lifecycle":"started","idempotency_key":%q}`, idemKey(t, "1"))
+	rec := post(t, f.srv, f.producerKey, body)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	ref := got["ref"].(string)
+
+	var status string
+	require.NoError(t, f.store.Pool().QueryRow(context.Background(),
+		`SELECT status FROM change WHERE tenant = $1 AND ref = $2`,
+		f.producerTenant.String(), ref).Scan(&status))
+	assert.Equal(t, "in_progress", status,
+		"deployment.initiated asserts nothing by suffix, so in_progress can only come "+
+			"from the explicit lifecycle")
+
+	// The store's read path carries lifecycle too, and nothing else here asserts it: a
+	// coordinated removal from both eventColumns and scanEvents' dest would leave the
+	// column written but never read back, and no other test would notice.
+	q, err := postgres.NewEventQuery(f.producerTenant, 0)
+	require.NoError(t, err)
+	evs, _, err := f.store.ListEvents(context.Background(), q)
+	require.NoError(t, err)
+	require.Len(t, evs, 1)
+	assert.Equal(t, core.LifecycleStarted, evs[0].Lifecycle,
+		"the stored lifecycle must round-trip through the store's own read path")
+}
+
+// TestPostEventRefusesAnUnknownLifecycle keeps a wrong value a 400 with a useful message
+// rather than a 500 carrying a Postgres constraint name. "Started" is the Review Focus
+// case: right word, wrong case, and the vocabulary is exact.
+func TestPostEventRefusesAnUnknownLifecycle(t *testing.T) {
+	f := newIngressFixture(t)
+	body := fmt.Sprintf(`{"source":"ci","type":"deployment.initiated",
+		"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z",
+		"lifecycle":"Started","idempotency_key":%q}`, idemKey(t, "1"))
+	rec := post(t, f.srv, f.producerKey, body)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "Started", "the error must name the value")
+	assert.Contains(t, rec.Body.String(), "started", "and list what is permitted")
+}
+
 // TestPostEventRecordsTheTenantOnTheSpan pins horopter.tenant on the request's server
 // span. It must be set once per request, on the span that exists for every request,
 // rather than only on the ones that reach the store.
