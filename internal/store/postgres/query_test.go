@@ -615,7 +615,8 @@ func TestNewChangeQueryAcceptsAnAllowlistedAttributeKey(t *testing.T) {
 		map[string]string{"deployment.environment.name": "prod"})
 
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{"deployment.environment.name": "prod"}, q.Attributes)
+	assert.Equal(t, map[string]string{"deployment.environment.name": "prod"},
+		postgres.AttributesOf(q))
 }
 
 // TestQueryChangesFiltersByLocus pins the generated column through the only surface it is
@@ -688,9 +689,11 @@ func TestQueryChangesFiltersByAttribute(t *testing.T) {
 		"by SQL NULL semantics falling through")
 	assert.Equal(t, "ci/dep-prod", prod[0].Ref.String())
 
-	assert.Len(t, byEnv("5"), 1,
+	num := byEnv("5")
+	require.Len(t, num, 1,
 		"attributes is JSONB and ->> renders a number as text, so a numeric value is "+
 			"matchable and matches by its rendering")
+	assert.Equal(t, "ci/dep-num", num[0].Ref.String())
 }
 
 // TestQueryChangesTreatsAnEmptyAttributeValueAsNoFilter settles the one genuine ambiguity in

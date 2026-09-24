@@ -10,8 +10,9 @@ ALTER TABLE change ADD COLUMN locus TEXT NOT NULL
     GENERATED ALWAYS AS (split_part(ref, '/', 1)) STORED;
 
 -- Source is descriptive and follows core.Fold's last-wins rule, as subject and type do, so
--- it is a real column rather than a derived one. The DEFAULT exists because a column added
--- to a live table needs one; every write from here sets it explicitly.
+-- it is a real column rather than a derived one. The DEFAULT exists so a change row whose
+-- last_event_id resolves to no event is left alone rather than failing the migration — the
+-- safer behaviour if something that should be impossible happens.
 ALTER TABLE change ADD COLUMN source TEXT NOT NULL DEFAULT '';
 
 -- Backfilled from each ref's LAST event by id, which is what the fold rule produces:

@@ -339,9 +339,16 @@ func TestMigrationsLeaveTheProjectionRebuildable(t *testing.T) {
 // TestMigration0007BackfillsSourceFromTheLastEvent pins the backfill to the same rule
 // core.Fold applies, which is what makes a rebuild straight after the migration a no-op.
 //
-// Two events on one ref with different sources is the only fixture that can tell the rule
-// apart: seedLegacyProjection has one event per change, so it would pass under a backfill
-// that took the FIRST event's source, the earliest, or an arbitrary one.
+// Two events on one ref with different sources is the only fixture that can tell
+// first-by-id from last-by-id apart: seedLegacyProjection has one event per change, so it
+// would pass under a backfill that took the FIRST event's source, the earliest, or an
+// arbitrary one. It does not, on its own, kill the `e.correlation_ref = c.ref` mutant —
+// under that mutation a point change's correlation_ref stays empty, matching no ref, so its
+// source stays at the column's empty-string default while a rebuild fills it in, whereas a
+// correlated change can come out right by luck (`UPDATE ... FROM` with several matching
+// rows picks one arbitrarily). That mutant is what seedLegacyProjection's point-change
+// fixture kills, in TestMigrationsLeaveTheProjectionRebuildable — the two fixtures are not
+// redundant.
 func TestMigration0007BackfillsSourceFromTheLastEvent(t *testing.T) {
 	ctx := context.Background()
 	pool, _ := freshDatabase(t)

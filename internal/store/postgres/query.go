@@ -27,11 +27,13 @@ type ChangeQuery struct {
 	Status  string
 	Locus   string
 	Source  string
-	// Attributes filters on exact attribute values, by key. Only keys in
+	// attributes filters on exact attribute values, by key. Only keys in
 	// FilterableAttributeKeys are accepted; NewChangeQuery refuses any other rather than
 	// ignoring it, because a filter that silently matches everything answers the caller's
-	// question wrongly. An empty value is no filter, as an empty Subject is.
-	Attributes map[string]string
+	// question wrongly. An empty value is no filter, as an empty Subject is. It is
+	// unexported so NewChangeQuery's allowlist check is the only way to set it — a field a
+	// caller could assign after construction would let that check be bypassed entirely.
+	attributes map[string]string
 	// Ref selects a single change by its (tenant, ref) primary key. When set, the window
 	// predicate is omitted entirely: From and To are ignored, since a ref lookup is already
 	// exact and a window could only narrow it redundantly.
@@ -97,7 +99,7 @@ func NewChangeQuery(
 		}
 	}
 	return ChangeQuery{
-		tenant: tenant.String(), From: from, To: to, Limit: limit, Attributes: attrs,
+		tenant: tenant.String(), From: from, To: to, Limit: limit, attributes: attrs,
 	}, nil
 }
 
@@ -491,7 +493,7 @@ func appendChangeFilters(sb *strings.Builder, args []any, q ChangeQuery) []any {
 		fmt.Fprintf(sb, " AND source = $%d", len(args))
 	}
 	for _, k := range slices.Sorted(maps.Keys(FilterableAttributeKeys)) {
-		v := q.Attributes[k]
+		v := q.attributes[k]
 		if v == "" {
 			continue
 		}
