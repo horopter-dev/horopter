@@ -396,7 +396,7 @@ func (s *Server) changesFor(
 	tenantID := tenantFromContext(r.Context())
 	trace.SpanFromContext(r.Context()).SetAttributes(
 		attribute.String("horopter.tenant", tenantID.String()))
-	q, err := postgres.NewChangeQuery(tenantID, win.from, win.to, win.limit)
+	q, err := postgres.NewChangeQuery(tenantID, win.from, win.to, win.limit, nil)
 	if err != nil {
 		s.readFailed(w, r, adapter, err)
 		return nil, false, false

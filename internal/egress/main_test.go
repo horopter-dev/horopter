@@ -39,9 +39,11 @@ func TestMain(m *testing.M) {
 // changeQuery and eventQuery build tenant-scoped store queries. The constructors refuse the
 // zero core.TenantID, which no caller here passes, so the error is asserted once rather than
 // at every site.
-func changeQuery(t *testing.T, tn string, from, to time.Time, limit int) postgres.ChangeQuery {
+func changeQuery(
+	t *testing.T, tn string, from, to time.Time, limit int, attrs map[string]string,
+) postgres.ChangeQuery {
 	t.Helper()
-	q, err := postgres.NewChangeQuery(core.TenantIDFromRow(tn), from, to, limit)
+	q, err := postgres.NewChangeQuery(core.TenantIDFromRow(tn), from, to, limit, attrs)
 	require.NoError(t, err)
 	return q
 }

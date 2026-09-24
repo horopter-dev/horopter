@@ -41,7 +41,7 @@ func TestOverlapPredicate(t *testing.T) {
 	// at(0) == winFrom exactly, so end_effective == From exactly.
 
 	got, _, err := s.QueryChanges(ctx,
-		changeQuery(t, tn, winFrom, winTo, 0))
+		changeQuery(t, tn, winFrom, winTo, 0, nil))
 	require.NoError(t, err)
 
 	refs := map[string]bool{}
@@ -83,21 +83,21 @@ func TestQueryChangesFiltersBySubjectTypeAndStatus(t *testing.T) {
 		mkEvent(tn, eventID(t, "d2-started"), "k3", "d2", "deployment.started", at))
 	require.NoError(t, err)
 
-	statusQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0)
+	statusQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0, nil)
 	statusQuery.Status = "failed"
 	byStatus, _, err := s.QueryChanges(ctx, statusQuery)
 	require.NoError(t, err)
 	require.Len(t, byStatus, 1, "the in_progress d2 must be excluded by the status filter")
 	assert.Equal(t, "ci/d1", byStatus[0].Ref.String())
 
-	typeQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0)
+	typeQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0, nil)
 	typeQuery.Type = "deployment.started"
 	byType, _, err := s.QueryChanges(ctx, typeQuery)
 	require.NoError(t, err)
 	require.Len(t, byType, 1, "d1's type moved on to deployment.failed; only d2 must match")
 	assert.Equal(t, "ci/d2", byType[0].Ref.String())
 
-	subjectQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0)
+	subjectQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0, nil)
 	subjectQuery.Subject = "other/stack"
 	none, _, err := s.QueryChanges(ctx, subjectQuery)
 	require.NoError(t, err)
@@ -131,7 +131,7 @@ func TestQueryChangesCombinesFiltersAndLimit(t *testing.T) {
 			"deployment.started", at.Add(20*time.Minute)))
 	require.NoError(t, err)
 
-	combinedQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0)
+	combinedQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0, nil)
 	combinedQuery.Subject, combinedQuery.Type, combinedQuery.Status =
 		"acme/prod", "deployment.completed", "completed"
 	combined, _, err := s.QueryChanges(ctx, combinedQuery)
@@ -142,7 +142,7 @@ func TestQueryChangesCombinesFiltersAndLimit(t *testing.T) {
 		"ORDER BY start_at ASC must list the earlier row first")
 	assert.Equal(t, "ci/multi-b", combined[1].Ref.String())
 
-	limitedQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 1)
+	limitedQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 1, nil)
 	limitedQuery.Subject, limitedQuery.Type, limitedQuery.Status =
 		"acme/prod", "deployment.completed", "completed"
 	limited, _, err := s.QueryChanges(ctx, limitedQuery)
@@ -162,7 +162,7 @@ func TestQueryChangesIsTenantScoped(t *testing.T) {
 	require.NoError(t, err)
 
 	got, _, err := s.QueryChanges(ctx,
-		changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0))
+		changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0, nil))
 	require.NoError(t, err)
 	assert.Empty(t, got, "queries must never cross tenants")
 }
@@ -431,7 +431,7 @@ func TestQueryChangesFindsAPointChangeByItsPrefixedRef(t *testing.T) {
 	stored, _, err := s.AppendEvent(ctx, mkEvent(tn, pointID, "k1", "", "config.changed", at))
 	require.NoError(t, err)
 
-	q := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 10)
+	q := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 10, nil)
 	q.Ref = core.RefFor(stored).String()
 	changes, _, err := s.QueryChanges(ctx, q)
 	require.NoError(t, err)
@@ -510,7 +510,7 @@ func TestFailedQueryChangesStillRecordsItsAttributes(t *testing.T) {
 	cancel()
 
 	_, _, err := s.QueryChanges(ctx,
-		changeQuery(t, tn, from, to, 25))
+		changeQuery(t, tn, from, to, 25, nil))
 	require.Error(t, err, "a cancelled context must fail the query, not return an empty result")
 
 	assert.Equal(t, []string{tn},
@@ -555,7 +555,7 @@ func TestFailedListEventsStillRecordsItsAttributes(t *testing.T) {
 func TestQueryConstructorsRefuseTheZeroTenant(t *testing.T) {
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
 
-	_, err := postgres.NewChangeQuery(core.TenantID{}, at, at.Add(time.Hour), 10)
+	_, err := postgres.NewChangeQuery(core.TenantID{}, at, at.Add(time.Hour), 10, nil)
 	require.ErrorIs(t, err, postgres.ErrUnscopedQuery)
 
 	_, err = postgres.NewEventQuery(core.TenantID{}, 10)
@@ -578,9 +578,156 @@ func TestAStoredRefTheParserWouldRejectIsStillReadable(t *testing.T) {
 		        'in_progress', '{}'::jsonb, 'e0')`, tn, at)
 	require.NoError(t, err, "precondition: change_ref_has_locus accepts a ref like ci/")
 
-	q := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 10)
+	q := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 10, nil)
 	got, _, err := s.QueryChanges(ctx, q)
 	require.NoError(t, err)
 	require.Len(t, got, 1, "a legally stored ref must survive a read")
 	assert.Equal(t, "ci/", got[0].Ref.String(), "and must round-trip unchanged")
+}
+
+// TestNewChangeQueryRefusesAnUnfilterableAttributeKey is the discriminating assertion for
+// the allowlist. Asserting that an ALLOWLISTED key filters correctly passes whether or not
+// the allowlist is enforced at all; only a rejected key proves it exists.
+//
+// A caller filtering on an unindexed key and receiving every row has been told the wrong
+// answer, which is why this is a refusal rather than a silently dropped clause — the same
+// conclusion Area A reached for --subject-pattern.
+func TestNewChangeQueryRefusesAnUnfilterableAttributeKey(t *testing.T) {
+	at := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+
+	_, err := postgres.NewChangeQuery(core.TenantIDFromRow("tnt_x"), at, at.Add(time.Hour), 10,
+		map[string]string{"service.version": "2.5.0"})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, postgres.ErrUnfilterableAttribute)
+	assert.Contains(t, err.Error(), "service.version",
+		"the error must name the offending key, or a caller cannot act on it")
+	assert.Contains(t, err.Error(), "deployment.environment.name",
+		"and must list what IS filterable, or the caller has to guess")
+}
+
+// TestNewChangeQueryAcceptsAnAllowlistedAttributeKey is the other half: the allowlist must
+// not refuse everything.
+func TestNewChangeQueryAcceptsAnAllowlistedAttributeKey(t *testing.T) {
+	at := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+
+	q, err := postgres.NewChangeQuery(core.TenantIDFromRow("tnt_x"), at, at.Add(time.Hour), 10,
+		map[string]string{"deployment.environment.name": "prod"})
+
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"deployment.environment.name": "prod"}, q.Attributes)
+}
+
+// TestQueryChangesFiltersByLocus pins the generated column through the only surface it is
+// observable from. The locus is never rendered, so if split_part is wrong, or the column is
+// missing, or the filter names the wrong column, this query is what says so.
+func TestQueryChangesFiltersByLocus(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	appendUnder(t, s, tn, seeded{locus: "ci", source: "github", ref: "dep-ci"}, at)
+	appendUnder(t, s, tn, seeded{locus: "gha", source: "github", ref: "dep-gha"}, at)
+
+	q := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0, nil)
+	q.Locus = "gha"
+	got, _, err := s.QueryChanges(ctx, q)
+	require.NoError(t, err)
+
+	require.Len(t, got, 1)
+	assert.Equal(t, "gha/dep-gha", got[0].Ref.String())
+}
+
+// TestQueryChangesFiltersBySource pins the column Task 1 added, end to end: the event's
+// source reaches the change through the fold and comes back out as a filter.
+func TestQueryChangesFiltersBySource(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	appendUnder(t, s, tn, seeded{locus: "ci", source: "buildkite", ref: "dep-bk"}, at)
+	appendUnder(t, s, tn, seeded{locus: "ci", source: "github", ref: "dep-gh"}, at)
+
+	q := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0, nil)
+	q.Source = "github"
+	got, _, err := s.QueryChanges(ctx, q)
+	require.NoError(t, err)
+
+	require.Len(t, got, 1)
+	assert.Equal(t, "ci/dep-gh", got[0].Ref.String())
+	assert.Equal(t, "github", got[0].Source, "and the value must come back on the change")
+}
+
+// TestQueryChangesFiltersByAttribute covers the allowlisted key, and with it the two SQL
+// behaviours the spec leans on without naming: a change that lacks the key entirely is
+// excluded (attributes ->> 'k' is NULL, and NULL = 'prod' is NULL rather than false), and a
+// non-string JSON value is compared as the text ->> renders it.
+func TestQueryChangesFiltersByAttribute(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	withAttrs := func(ref string, attrs map[string]any) {
+		ev := mkEvent(tn, eventID(t, ref), "k-"+ref, ref, "deployment.started", at)
+		ev.Attributes = attrs
+		_, _, err := s.AppendEvent(ctx, ev)
+		require.NoError(t, err)
+	}
+	withAttrs("dep-prod", map[string]any{"deployment.environment.name": "prod"})
+	withAttrs("dep-stg", map[string]any{"deployment.environment.name": "staging"})
+	withAttrs("dep-none", map[string]any{"service.version": "2.5.0"})
+	withAttrs("dep-num", map[string]any{"deployment.environment.name": 5})
+
+	byEnv := func(v string) []core.Change {
+		q := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0,
+			map[string]string{"deployment.environment.name": v})
+		got, _, err := s.QueryChanges(ctx, q)
+		require.NoError(t, err)
+		return got
+	}
+
+	prod := byEnv("prod")
+	require.Len(t, prod, 1, "a change without the key at all must be excluded, not matched "+
+		"by SQL NULL semantics falling through")
+	assert.Equal(t, "ci/dep-prod", prod[0].Ref.String())
+
+	assert.Len(t, byEnv("5"), 1,
+		"attributes is JSONB and ->> renders a number as text, so a numeric value is "+
+			"matchable and matches by its rendering")
+}
+
+// TestQueryChangesTreatsAnEmptyAttributeValueAsNoFilter settles the one genuine ambiguity in
+// the design: ?attr.deployment.environment.name= could mean "where the value is the empty
+// string" or "no filter". It means no filter, because subject, type and status all already
+// mean that, and a caller who omits a value has not asked a narrower question.
+func TestQueryChangesTreatsAnEmptyAttributeValueAsNoFilter(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	appendUnder(t, s, tn, seeded{locus: "ci", source: "github", ref: "dep-a"}, at)
+	appendUnder(t, s, tn, seeded{locus: "ci", source: "github", ref: "dep-b"}, at)
+
+	q := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0,
+		map[string]string{"deployment.environment.name": ""})
+	got, _, err := s.QueryChanges(ctx, q)
+	require.NoError(t, err)
+
+	assert.Len(t, got, 2, "an empty value must not filter, and must not filter for \"\"")
+}
+
+// seeded is one event to append, named rather than positional: locus, source and ref are
+// three adjacent strings, and a transposition between them is exactly what issueFlags made
+// a compile error elsewhere in this tree.
+type seeded struct{ locus, source, ref string }
+
+// appendUnder appends one event under a chosen locus and source, which mkEvent hardcodes
+// both to "ci". The correlation ref is composed through core.NewRef so the fixture depends
+// on the one statement of the encoding, as production does.
+func appendUnder(t *testing.T, s *postgres.Store, tn string, sd seeded, at time.Time) {
+	t.Helper()
+	ev := mkEvent(tn, eventID(t, sd.ref), "k-"+sd.ref, sd.ref, "deployment.started", at)
+	ev.Locus = core.LocusFromRow(sd.locus)
+	corr, err := core.NewRef(ev.Locus, sd.ref)
+	require.NoError(t, err)
+	ev.CorrelationRef = corr
+	ev.Source = sd.source
+	_, _, err = s.AppendEvent(context.Background(), ev)
+	require.NoError(t, err)
 }
