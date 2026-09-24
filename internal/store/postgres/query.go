@@ -461,7 +461,7 @@ func (s *Store) queryChangesWithinBytes(
 // extended argument list. The placeholders are numbered from the argument list's own
 // length, so the two must grow together — which is why they are built in one place.
 //
-// The attribute loop ranges over FilterableAttributeKeys rather than over q.Attributes, and
+// The attribute loop ranges over FilterableAttributeKeys rather than over q.attributes, and
 // that is not a stylistic choice. The key is written into the SQL text rather than bound,
 // because ix_change_attr_environment indexes the expression
 // (attributes ->> 'deployment.environment.name') and Postgres matches an expression index by
