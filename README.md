@@ -439,8 +439,11 @@ timing: an id is minted on the ingress replica that received the request, before
 append starts, so with more than one replica the window is the clock skew between them,
 and even with one replica an append that minted a lower id can lose the race for the
 per-ref lock. Every field whose rule is "last event wins" — `last_event_id`, `type`,
-`title`, `actor`, `subject`, `source` and attributes — can come back different. `status`
-and `end` follow the narrower rule "last *terminal* event wins", so a
+`subject`, `source` and attributes — can come back different. So can `title` and `actor`,
+which follow the slightly narrower "last *non-empty* event wins": a reorder still moves them
+between two events that both carry one, but an event carrying none cannot blank what an
+earlier event recorded. `status` and `end` follow the narrowest rule, "last *terminal* event
+wins", so a
 `deployment.completed` and a `deployment.failed` on one ref can swap, but nothing that
 arrives later can reopen a change that has already closed. `start`,
 `started_at` and `first_seen_at` cannot: they are minima, so replay order does not reach

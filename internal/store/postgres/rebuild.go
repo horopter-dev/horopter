@@ -82,10 +82,14 @@ func lockRebuildWrite(ctx context.Context, tx pgx.Tx, tenantID string) error {
 //     millisecond do not even tie-break by generation order.
 //
 // A rebuild can therefore produce a different Subject, Type, Title, Actor, attribute set,
-// LastEventID, Source, End or Status than the one live folding produced. The first seven
-// are assigned unconditionally, so their rule is "the last event folded wins". End and Status
-// follow a narrower one — core.Fold guards both on End being nil, so once a change has
-// closed only a terminal event moves them: "the last TERMINAL event folded wins".
+// LastEventID, Source, End or Status than the one live folding produced, under three
+// different rules. Subject, Type, LastEventID and Source are assigned unconditionally:
+// "the last event folded wins". Title and Actor are guarded non-empty, so their rule is
+// "the last NON-EMPTY event folded wins" — a reorder still moves them between two events
+// that both carry one, but an event carrying none cannot blank what a previous event
+// recorded, which is why the guard exists. End and Status follow a third — core.Fold
+// guards both on End being nil, so once a change has closed only a terminal event moves
+// them: "the last TERMINAL event folded wins".
 // Reordering two terminal events swaps the recorded outcome; a late annotation cannot
 // reopen a change that already closed. Start, StartedAt and FirstSeenAt are NOT in that set:
 // both start facts are minima (migration 0003, core.Fold), so they are commutative and the
