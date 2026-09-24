@@ -1202,6 +1202,13 @@ func TestQueryChangesFiltersByAllowlistedAttribute(t *testing.T) {
 // tell them the server is broken when their query is. And 400 rather than an unfiltered
 // 200, because a caller handed every row in answer to a narrowing question has been told
 // something false.
+//
+// The empty-value case is the interesting one, and it is deliberately NOT treated as "no
+// filter" the way an empty subject= is. What is wrong is the KEY, not the filter: accepting
+// ?attr.typo.key= and then refusing ?attr.typo.key=prod would make one mistake behave two
+// ways depending on whether the caller filled the box in, which is a worse answer than
+// either. An allowlisted key with an empty value IS no filter — that is
+// TestQueryChangesFiltersByAllowlistedAttribute's second assertion.
 func TestQueryChangesRefusesAnUnfilterableAttributeKey(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
@@ -1209,8 +1216,9 @@ func TestQueryChangesRefusesAnUnfilterableAttributeKey(t *testing.T) {
 	base := "/v1/changes?tenant=" + tn + window
 
 	for name, url := range map[string]string{
-		"unknown key": base + "&attr.service.version=2.5.0",
-		"empty key":   base + "&attr.=prod",
+		"unknown key":              base + "&attr.service.version=2.5.0",
+		"empty key":                base + "&attr.=prod",
+		"unknown key, empty value": base + "&attr.service.version=",
 	} {
 		t.Run(name, func(t *testing.T) {
 			rec := get(t, h, key, url)

@@ -546,7 +546,12 @@ optional, all combining with AND:
 | `source` | the system that reported the change, from the last event folded into it |
 | `attr.<key>` | an attribute's exact value |
 
-An empty value is no filter, so `?status=` and an omitted `status` mean the same thing.
+An empty value is no filter, so `?status=` and an omitted `status` mean the same thing. That
+holds for an allowlisted `attr.<key>` too. It does **not** make an unfilterable key
+acceptable: `?attr.service.version=` is refused exactly as `?attr.service.version=2.5.0` is,
+because what is wrong there is the key rather than the filter. Accepting the empty one and
+refusing the other would make a single mistake behave two ways depending on whether the
+caller filled the box in.
 
 **Attribute keys are allowlisted.** Only `deployment.environment.name` is filterable today.
 Any other `attr.` key is answered **400** naming the key and listing what is permitted,
