@@ -34,6 +34,20 @@ func TestValidateAcceptsValidEvent(t *testing.T) {
 	require.NoError(t, validEvent().Validate())
 }
 
+// TestValidateAcceptsEveryLifecycle is the other half of the refusal rows: it pins
+// core.Lifecycles to what Validate admits, so a value added to the slice without being
+// admitted — or admitted without being in the slice — fails here rather than at the first
+// insert.
+func TestValidateAcceptsEveryLifecycle(t *testing.T) {
+	for _, lc := range core.Lifecycles {
+		t.Run(string(lc), func(t *testing.T) {
+			e := validEvent()
+			e.Lifecycle = lc
+			require.NoError(t, e.Validate())
+		})
+	}
+}
+
 // TestValidateRejectsMissingFields checks that each required field's failure names that
 // field back to the caller.
 //
@@ -56,6 +70,12 @@ func TestValidateRejectsMissingFields(t *testing.T) {
 		{"unknown schema", func(e *core.Event) { e.SchemaVersion = 99 }, "schema_version"},
 		{"no origin", func(e *core.Event) { e.Origin = "" }, "origin"},
 		{"unknown origin", func(e *core.Event) { e.Origin = "robot" }, "origin"},
+		{"wrong-case lifecycle", func(e *core.Event) { e.Lifecycle = "Started" }, "Started"},
+		{"abbreviated lifecycle", func(e *core.Event) { e.Lifecycle = "start" }, "start"},
+		{"lifecycle from the wrong vocabulary",
+			func(e *core.Event) { e.Lifecycle = "occurred" }, "occurred"},
+		{"synonym the type suffix accepts",
+			func(e *core.Event) { e.Lifecycle = "finished" }, "finished"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := validEvent()

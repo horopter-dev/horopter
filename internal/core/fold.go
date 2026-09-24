@@ -184,6 +184,118 @@ func Fold(cur *Change, ev Event) Change {
 	return out
 }
 
+// changeState is the two-state space foldLifecycle branches on. End == nil is exactly
+// Status == in_progress, so the six statuses collapse to these two for guard purposes.
+type changeState uint8
+
+const (
+	stateOpen changeState = iota
+	stateClosed
+	numStates
+)
+
+// assertion is what an event says about its change, once classify has resolved
+// explicit-beats-convention. It is NOT the event's type and NOT its identity.
+type assertion uint8
+
+const (
+	assertsNothingStandalone assertion = iota
+	assertsNothingCorrelated
+	assertsStart
+	assertsTerminal
+	numAssertions
+)
+
+// statusRule is what a cell does to the change's status. The zero value is unreachable so
+// that a cell nobody wrote reads as "this pair cannot occur" rather than as "do nothing".
+type statusRule uint8
+
+const (
+	unreachable statusRule = iota
+	holdStatus
+	setInProgress
+	setOccurred
+	setAsserted // the terminal status the event asserted
+)
+
+type cell struct {
+	status   statusRule
+	setsEnd  bool
+	minStart bool
+	// commutative records whether folding this rule in either order agrees. The rebuild
+	// invariant needs it per rule, and a cell is the only place it can live beside the
+	// rule it describes. TestFoldLifecycleCommutativeCellsAgreeInBothOrders enforces it, so
+	// it is documentation that fails rather than documentation that rots.
+	commutative bool
+}
+
+// transitions has a cell for every (state, assertion) pair by construction: a fixed array
+// rather than a map, so no pair can be silently absent.
+var transitions = [numStates][numAssertions]cell{
+	stateOpen: {
+		assertsNothingStandalone: {setOccurred, true, false, true},
+		assertsNothingCorrelated: {setInProgress, false, false, true},
+		assertsStart:             {setInProgress, false, true, true},
+		assertsTerminal:          {setAsserted, true, false, false},
+	},
+	stateClosed: {
+		assertsNothingStandalone: {}, // unreachable: see the table's standalone column
+		assertsNothingCorrelated: {holdStatus, false, false, true},
+		assertsStart:             {holdStatus, false, true, true},
+		assertsTerminal:          {setAsserted, true, false, false},
+	},
+}
+
+// classify resolves what ev asserts about its change: the explicit Lifecycle field when it
+// carries one, the type's suffix otherwise. This is the only place explicit-beats-convention
+// lives, and the only ordering left in the fold — ordering that belongs to READING an
+// assertion rather than to APPLYING it.
+//
+// The standalone check is last deliberately. Having no correlation ref is an identity fact,
+// not an assertion, so it is what an event falls back to when it asserts nothing at all.
+func classify(ev Event) (assertion, Status) {
+	switch ev.Lifecycle {
+	case LifecycleStarted:
+		return assertsStart, ""
+	case LifecycleNone:
+		// Asserted nothing. Skip the convention and fall to the identity check below.
+	case LifecycleUnspecified:
+		// Said nothing at all, so the producer's type vocabulary decides.
+		if isStartType(ev.Type) {
+			return assertsStart, ""
+		}
+		if status, terminal := StatusForType(ev.Type); terminal {
+			return assertsTerminal, status
+		}
+	default:
+		return assertsTerminal, statusForLifecycle(ev.Lifecycle)
+	}
+	if ev.CorrelationRef.IsZero() {
+		return assertsNothingStandalone, ""
+	}
+	return assertsNothingCorrelated, ""
+}
+
+// statusForLifecycle maps the four terminal assertions onto their status. The two
+// vocabularies are spelled the same deliberately; this is the single conversion point that
+// keeps them from drifting apart.
+func statusForLifecycle(l Lifecycle) Status {
+	switch l {
+	case LifecycleCompleted:
+		return StatusCompleted
+	case LifecycleFailed:
+		return StatusFailed
+	case LifecycleRolledBack:
+		return StatusRolledBack
+	case LifecycleCancelled:
+		return StatusCancelled
+	}
+	// Unreachable: classify routes only terminal values here, and Validate refuses any
+	// value outside Lifecycles. Returning the zero Status rather than panicking keeps
+	// Fold total, which is a hard constraint.
+	return ""
+}
+
 // foldLifecycle applies ev's lifecycle effect — the assertion of a start, an end, and
 // the status those imply — to out.
 //
@@ -193,38 +305,37 @@ func Fold(cur *Change, ev Event) Change {
 // reason — out.End and out.StartedAt may both have been copied from cur, and writing
 // through either would reach back into the caller's Change.
 func foldLifecycle(out *Change, ev Event) {
-	switch {
-	case ev.CorrelationRef.IsZero():
+	st := stateOpen
+	if out.End != nil {
+		st = stateClosed
+	}
+	a, asserted := classify(ev)
+	c := transitions[st][a]
+	if c.status == unreachable {
+		return
+	}
+	if c.minStart && (out.StartedAt == nil || ev.OccurredAt.Before(*out.StartedAt)) {
+		at := ev.OccurredAt
+		out.StartedAt = &at
+	}
+	if c.setsEnd {
 		at := ev.OccurredAt
 		out.End = &at
+	}
+	applyStatusRule(out, c, asserted)
+}
+
+// applyStatusRule sets out.Status per c's statusRule, using asserted for a cell that sets
+// the terminal status the event asserted. Split out of foldLifecycle to keep its branching
+// within the complexity limit.
+func applyStatusRule(out *Change, c cell, asserted Status) {
+	switch c.status {
+	case setInProgress:
+		out.Status = StatusInProgress
+	case setOccurred:
 		out.Status = StatusOccurred
-	case isStartType(ev.Type):
-		// The EARLIEST assertion wins, not the last one folded. A ref can carry more
-		// than one start-type event — a retried pipeline, two producers describing one
-		// deployment — and last-folded-wins would make a rebuild (id order) and a live
-		// append (arrival order) disagree whenever their timestamps differ. Minimum is
-		// commutative, so taking it keeps the two convergent.
-		if out.StartedAt == nil || ev.OccurredAt.Before(*out.StartedAt) {
-			at := ev.OccurredAt
-			out.StartedAt = &at
-		}
-		if out.End == nil {
-			out.Status = StatusInProgress
-		}
-	default:
-		if status, terminal := StatusForType(ev.Type); terminal {
-			at := ev.OccurredAt
-			out.End = &at
-			out.Status = status
-		} else if out.End == nil {
-			// A correlated event that neither starts nor ends the change —
-			// incident.declared, deployment.triggered, maintenance.scheduled,
-			// deployment.annotated. A change has three shapes and admits no fourth, so
-			// this is in flight; leaving Status empty wrote a row that no status filter
-			// could ever select and that rendered as an interval growing to the year
-			// 9999. The End guard is why a late annotation cannot reopen a change that
-			// has already reached a terminal status.
-			out.Status = StatusInProgress
-		}
+	case setAsserted:
+		out.Status = asserted
+	case holdStatus:
 	}
 }

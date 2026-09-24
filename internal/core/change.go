@@ -5,19 +5,27 @@ import "time"
 // Status is the lifecycle state of a change.
 type Status string
 
-// The Status values are the lifecycle a change can pass through. StatusOccurred marks
-// an instantaneous change with no correlation ref (a point, never an interval).
-// StatusInProgress, StatusCompleted, StatusFailed, StatusRolledBack and StatusCancelled
-// are the possible outcomes of a correlated change that has a start and, once one of
-// the terminal statuses is folded in, an end.
+// The Status values are the lifecycle a change can pass through. StatusOccurred marks a
+// change whose event asserted no lifecycle transition and stood alone — no correlation ref,
+// and the type's suffix and any explicit Lifecycle field both said nothing happened.
+// StatusInProgress, StatusCompleted, StatusFailed, StatusRolledBack and StatusCancelled are
+// the possible outcomes of a change that has a start and, once one of the terminal statuses
+// is folded in, an end.
 //
-// StatusOccurred is the ONLY way to recognise a point. Timestamp equality is not:
-// a same-second start/complete pair — routine in backfills and from idempotent
-// producers — is a closed interval of zero duration whose End also equals its Start.
-// Only the no-correlation-ref path in Fold ever sets StatusOccurred. The rule matters
-// to a renderer that draws points and regions differently; neither adapter in this
-// repository needs to, because a zero-duration region already renders the way a point
-// should.
+// StatusOccurred is NOT a reliable point detector. Before an event could assert its own
+// lifecycle, having no correlation ref meant asserting nothing, so "point" and
+// "StatusOccurred" coincided. Now a standalone event can assert a start or a terminal
+// outcome — a deployment.started with no correlation ref folds to StatusInProgress, not
+// StatusOccurred — while its ref stays point-shaped. What identifies a point is the ABSENCE
+// OF A CORRELATION REF on the event that created it: an identity property RefFor and
+// classify read, not something Status records, and Change carries no field that reproduces
+// it. A renderer that draws points and regions differently must key off that, not Status;
+// neither adapter in this repository needs to, because a zero-duration region already
+// renders the way a point should.
+//
+// Timestamp equality is still not a point detector, and that has not changed: a same-second
+// start/complete pair — routine in backfills and from idempotent producers — is a closed
+// interval of zero duration whose End also equals its Start.
 const (
 	StatusOccurred   Status = "occurred"
 	StatusInProgress Status = "in_progress"
