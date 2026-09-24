@@ -4,7 +4,8 @@
 -- Locus is already in the data: it is everything before a ref's first "/", and
 -- event_locus_shape forbids a locus containing one, so split_part recovers it exactly.
 -- Generated rather than backfilled, so it cannot drift from the ref it derives from and a
--- rebuild has nothing to reproduce. 0003 sets the precedent for start_at and end_effective.
+-- rebuild has nothing to reproduce. 0002 set the precedent with end_effective and 0003
+-- with start_at.
 -- change_ref_has_locus (0006) guarantees strpos(ref,'/') > 1, so this is never empty.
 ALTER TABLE change ADD COLUMN locus TEXT NOT NULL
     GENERATED ALWAYS AS (split_part(ref, '/', 1)) STORED;
