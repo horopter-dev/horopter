@@ -10,12 +10,15 @@ import (
 	"horopter.dev/horopter/internal/core"
 )
 
+// ev builds the event Fold sees, which is one read back out of the log — so its ref and
+// locus are built the way a scan builds them, through the FromRow constructors, rather
+// than through the composing ones a producer's input goes through.
 func ev(id, corr, typ string, at time.Time) core.Event {
 	return core.Event{
 		ID: id, Tenant: "default", SchemaVersion: 1,
 		Source: "ci", Type: typ, Subject: "acme/prod", Actor: "ci-bot",
-		OccurredAt: at, CorrelationRef: corr,
-		Attributes: map[string]any{}, Locus: "ci",
+		OccurredAt: at, CorrelationRef: core.RefFromRow(corr),
+		Attributes: map[string]any{}, Locus: core.LocusFromRow("ci"),
 	}
 }
 
@@ -27,7 +30,7 @@ var (
 
 func TestFoldStartedProducesOpenChange(t *testing.T) {
 	c := core.Fold(nil, ev("01A", "dep-7", "deployment.started", t10))
-	assert.Equal(t, "dep-7", c.Ref)
+	assert.Equal(t, "dep-7", c.Ref.String())
 	assert.Equal(t, t10, c.Start)
 	assert.True(t, c.IsOpen())
 	assert.Equal(t, core.StatusInProgress, c.Status)
@@ -44,7 +47,7 @@ func TestFoldFinishedClosesChange(t *testing.T) {
 
 func TestFoldEventWithoutCorrelationRefIsAPoint(t *testing.T) {
 	c := core.Fold(nil, ev("01C", "", "config.changed", t10))
-	assert.Equal(t, "ci/01C", c.Ref, "a point's ref is its locus and its own event id")
+	assert.Equal(t, "ci/01C", c.Ref.String(), "a point's ref is its locus and its own event id")
 	assert.Equal(t, core.StatusOccurred, c.Status, "only the no-correlation-ref path sets it")
 	require.NotNil(t, c.End)
 	assert.True(t, c.End.Equal(c.Start), "a point's end coincides with its start")
@@ -148,7 +151,7 @@ func TestFoldTerminalEventReplacesEndWithFreshPointer(t *testing.T) {
 }
 
 // Fold(nil, ev) and Fold(&Change{}, ev) must converge on identical output for the
-// same event sequence. Accumulating into a map[string]Change invites the spelling
+// same event sequence. Accumulating into a map[core.Ref]core.Change invites the spelling
 // `c := m[ref]; m[ref] = Fold(&c, ev)`, which passes a zero-value *Change rather than
 // nil for the first event of a ref; foldEventLog in internal/store/postgres passes nil.
 // Both must agree, or a rebuild and the incremental append path would disagree about
@@ -161,8 +164,8 @@ func TestFoldNilAndZeroValueCurConverge(t *testing.T) {
 		ev("01D", "dep-8", "deployment.completed", t20), // closed change, part 2
 	}
 
-	nilFirst := map[string]core.Change{}
-	seen := map[string]bool{}
+	nilFirst := map[core.Ref]core.Change{}
+	seen := map[core.Ref]bool{}
 	for _, e := range events {
 		ref := core.RefFor(e)
 		if !seen[ref] {
@@ -174,7 +177,7 @@ func TestFoldNilAndZeroValueCurConverge(t *testing.T) {
 		nilFirst[ref] = core.Fold(&cur, e)
 	}
 
-	zeroValueFirst := map[string]core.Change{}
+	zeroValueFirst := map[core.Ref]core.Change{}
 	for _, e := range events {
 		ref := core.RefFor(e)
 		cur := zeroValueFirst[ref]
@@ -202,11 +205,11 @@ func TestFoldZeroDurationClosedIntervalIsNotAPoint(t *testing.T) {
 
 func TestRefFor(t *testing.T) {
 	withCorr := ev("01A", "dep-7", "deployment.started", t10)
-	assert.Equal(t, "dep-7", core.RefFor(withCorr),
+	assert.Equal(t, "dep-7", core.RefFor(withCorr).String(),
 		"a correlated ref is already locus-prefixed at ingest and passes through")
 
 	withoutCorr := ev("01B", "", "config.changed", t10)
-	assert.Equal(t, "ci/01B", core.RefFor(withoutCorr),
+	assert.Equal(t, "ci/01B", core.RefFor(withoutCorr).String(),
 		"a point's ref is its locus and its own event id, so there is one ref shape")
 }
 

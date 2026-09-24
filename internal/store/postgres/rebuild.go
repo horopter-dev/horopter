@@ -214,7 +214,7 @@ func clearProjection(ctx context.Context, tx pgx.Tx, tenantID string) error {
 // 0004 shipped.
 func foldEventLog(
 	ctx context.Context, tx pgx.Tx, tenantID string,
-) (map[string]core.Change, int, error) {
+) (map[core.Ref]core.Change, int, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT id, tenant, schema_version, source, type, subject, actor, title,
 		       occurred_at, received_at, correlation_ref, attributes, locus
@@ -224,15 +224,21 @@ func foldEventLog(
 	}
 	defer rows.Close()
 
-	acc := map[string]core.Change{}
+	acc := map[core.Ref]core.Change{}
 	events := 0
 	for rows.Next() {
-		var ev core.Event
+		var (
+			ev    core.Event
+			corr  string
+			locus string
+		)
 		if err := rows.Scan(&ev.ID, &ev.Tenant, &ev.SchemaVersion, &ev.Source, &ev.Type,
 			&ev.Subject, &ev.Actor, &ev.Title, &ev.OccurredAt, &ev.ReceivedAt,
-			&ev.CorrelationRef, &ev.Attributes, &ev.Locus); err != nil {
+			&corr, &ev.Attributes, &locus); err != nil {
 			return nil, 0, fmt.Errorf("scan event row for tenant %q: %w", tenantID, err)
 		}
+		ev.CorrelationRef = core.RefFromRow(corr)
+		ev.Locus = core.LocusFromRow(locus)
 		events++
 		ref := core.RefFor(ev)
 		var prev *core.Change
@@ -248,7 +254,7 @@ func foldEventLog(
 }
 
 // writeProjection inserts every rebuilt change.
-func writeProjection(ctx context.Context, tx pgx.Tx, acc map[string]core.Change) error {
+func writeProjection(ctx context.Context, tx pgx.Tx, acc map[core.Ref]core.Change) error {
 	for _, c := range acc {
 		if err := upsertChange(ctx, tx, c); err != nil {
 			return err

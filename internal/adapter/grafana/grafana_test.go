@@ -19,7 +19,7 @@ var (
 func TestRenderClosedChangeIsARegion(t *testing.T) {
 	end := start.Add(20 * time.Minute)
 	out, err := grafana.New().Render([]core.Change{{
-		Ref: "dep-7", Subject: "acme/prod", Type: "deployment", Title: "API v2.5.0",
+		Ref: core.RefFromRow("dep-7"), Subject: "acme/prod", Type: "deployment", Title: "API v2.5.0",
 		Start: start, End: &end, Status: core.StatusCompleted,
 		Attributes: map[string]any{"service.version": "2.5.0"},
 	}}, now)
@@ -37,7 +37,7 @@ func TestRenderClosedChangeIsARegion(t *testing.T) {
 
 func TestRenderOpenChangeEndsAtNow(t *testing.T) {
 	out, err := grafana.New().Render([]core.Change{{
-		Ref: "dep-8", Start: start, End: nil, Status: core.StatusInProgress,
+		Ref: core.RefFromRow("dep-8"), Start: start, End: nil, Status: core.StatusInProgress,
 	}}, now)
 	require.NoError(t, err)
 	anns := out.([]grafana.Annotation)
@@ -47,7 +47,7 @@ func TestRenderOpenChangeEndsAtNow(t *testing.T) {
 
 func TestRenderPointHasEqualTimes(t *testing.T) {
 	out, err := grafana.New().Render([]core.Change{{
-		Ref: "cfg-1", Start: start, End: &start, Status: core.StatusOccurred,
+		Ref: core.RefFromRow("cfg-1"), Start: start, End: &start, Status: core.StatusOccurred,
 	}}, now)
 	require.NoError(t, err)
 	anns := out.([]grafana.Annotation)
@@ -59,7 +59,7 @@ func TestRenderPointHasEqualTimes(t *testing.T) {
 func TestRenderGoldenJSON(t *testing.T) {
 	end := start.Add(20 * time.Minute)
 	out, err := grafana.New().Render([]core.Change{{
-		Ref: "dep-7", Subject: "acme/prod", Type: "deployment", Title: "API v2.5.0",
+		Ref: core.RefFromRow("dep-7"), Subject: "acme/prod", Type: "deployment", Title: "API v2.5.0",
 		Start: start, End: &end, Status: core.StatusCompleted,
 		Attributes: map[string]any{
 			"service.version":    "2.5.0",
@@ -91,7 +91,7 @@ func TestRenderGoldenJSON(t *testing.T) {
 // both are present on the same change.
 func TestTextForReadsNamespacedDescriptionOnly(t *testing.T) {
 	out, err := grafana.New().Render([]core.Change{{
-		Ref: "dep-11", Start: start, End: &start, Status: core.StatusOccurred,
+		Ref: core.RefFromRow("dep-11"), Start: start, End: &start, Status: core.StatusOccurred,
 		Attributes: map[string]any{
 			"description":          "unnamespaced, must be ignored",
 			"horopter.description": "namespaced, must populate the annotation",
@@ -108,7 +108,7 @@ func TestTextForReadsNamespacedDescriptionOnly(t *testing.T) {
 // must render an empty annotation body rather than leaking into it.
 func TestTextForIsEmptyWithoutNamespacedDescription(t *testing.T) {
 	out, err := grafana.New().Render([]core.Change{{
-		Ref: "dep-12", Start: start, End: &start, Status: core.StatusOccurred,
+		Ref: core.RefFromRow("dep-12"), Start: start, End: &start, Status: core.StatusOccurred,
 		Attributes: map[string]any{"description": "must not leak into text"},
 	}}, now)
 	require.NoError(t, err)
@@ -134,7 +134,7 @@ func TestRenderNilChangesMarshalsToEmptyArray(t *testing.T) {
 // adapter overlays its computed keys.
 func TestTagsForOverlaysComputedTagsOverCollidingAttributes(t *testing.T) {
 	out, err := grafana.New().Render([]core.Change{{
-		Tenant: "acme", Ref: "dep-12", Start: start, End: &start,
+		Tenant: "acme", Ref: core.RefFromRow("dep-12"), Start: start, End: &start,
 		Status: core.StatusCompleted, Subject: "acme/prod",
 		Attributes: map[string]any{
 			"status":          "eu-west-1a",

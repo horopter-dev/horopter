@@ -108,16 +108,21 @@ func eventID(t *testing.T, suffix string) string {
 // The empty ref is left empty. That is a point event, whose ref core.RefFor composes from
 // the locus and the event's own id instead.
 func mkEvent(tn, id, idem, producerRef, typ string, at time.Time) core.Event {
-	corr := producerRef
-	if corr != "" {
-		corr = "ci/" + corr
+	locus := core.LocusFromRow("ci")
+	var corr core.Ref
+	if producerRef != "" {
+		// Composed through NewRef rather than by restating "<locus>/<ref>" here, so the
+		// fixture depends on the one statement of the encoding as production does. The
+		// error is discarded because NewRef refuses exactly two shapes — a zero locus and
+		// an empty producer ref — and neither is reachable inside this branch.
+		corr, _ = core.NewRef(locus, producerRef)
 	}
 	return core.Event{
 		ID: id, Tenant: tn, IdempotencyKey: idem, SchemaVersion: core.CurrentSchemaVersion,
 		Source: "ci", Type: typ, Subject: "acme/prod", Actor: "ci-bot",
 		OccurredAt: at, ReceivedAt: at, CorrelationRef: corr,
 		Attributes: map[string]any{"service.version": "2.5.0"}, Origin: core.OriginProcess,
-		Locus: "ci",
+		Locus: locus,
 	}
 }
 

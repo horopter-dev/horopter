@@ -46,7 +46,7 @@ func TestOverlapPredicate(t *testing.T) {
 
 	refs := map[string]bool{}
 	for _, c := range got {
-		refs[c.Ref] = true
+		refs[c.Ref.String()] = true
 	}
 
 	assert.False(t, refs["ci/before"], "a change entirely before the window must be excluded")
@@ -88,14 +88,14 @@ func TestQueryChangesFiltersBySubjectTypeAndStatus(t *testing.T) {
 	byStatus, _, err := s.QueryChanges(ctx, statusQuery)
 	require.NoError(t, err)
 	require.Len(t, byStatus, 1, "the in_progress d2 must be excluded by the status filter")
-	assert.Equal(t, "ci/d1", byStatus[0].Ref)
+	assert.Equal(t, "ci/d1", byStatus[0].Ref.String())
 
 	typeQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0)
 	typeQuery.Type = "deployment.started"
 	byType, _, err := s.QueryChanges(ctx, typeQuery)
 	require.NoError(t, err)
 	require.Len(t, byType, 1, "d1's type moved on to deployment.failed; only d2 must match")
-	assert.Equal(t, "ci/d2", byType[0].Ref)
+	assert.Equal(t, "ci/d2", byType[0].Ref.String())
 
 	subjectQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0)
 	subjectQuery.Subject = "other/stack"
@@ -138,9 +138,9 @@ func TestQueryChangesCombinesFiltersAndLimit(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, combined, 2,
 		"three filters combined must keep both completed changes and drop multi-c")
-	assert.Equal(t, "ci/multi-a", combined[0].Ref,
+	assert.Equal(t, "ci/multi-a", combined[0].Ref.String(),
 		"ORDER BY start_at ASC must list the earlier row first")
-	assert.Equal(t, "ci/multi-b", combined[1].Ref)
+	assert.Equal(t, "ci/multi-b", combined[1].Ref.String())
 
 	limitedQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 1)
 	limitedQuery.Subject, limitedQuery.Type, limitedQuery.Status =
@@ -148,7 +148,8 @@ func TestQueryChangesCombinesFiltersAndLimit(t *testing.T) {
 	limited, _, err := s.QueryChanges(ctx, limitedQuery)
 	require.NoError(t, err)
 	require.Len(t, limited, 1, "limit must cap the combined-filter result set")
-	assert.Equal(t, "ci/multi-a", limited[0].Ref, "the earliest row by start_at must be the one kept")
+	assert.Equal(t, "ci/multi-a", limited[0].Ref.String(),
+		"the earliest row by start_at must be the one kept")
 }
 
 func TestQueryChangesIsTenantScoped(t *testing.T) {
@@ -256,7 +257,7 @@ func TestListEventsFindsAPointChangesEvents(t *testing.T) {
 	pointID := eventID(t, "point")
 	stored, _, err := s.AppendEvent(ctx, mkEvent(tn, pointID, "k1", "", "config.changed", at))
 	require.NoError(t, err)
-	pointRef := core.RefFor(stored)
+	pointRef := core.RefFor(stored).String()
 	require.Equal(t, "ci/"+pointID, pointRef, "precondition: a point ref carries its locus")
 
 	_, _, err = s.AppendEvent(ctx,
@@ -272,7 +273,7 @@ func TestListEventsFindsAPointChangesEvents(t *testing.T) {
 	correlated, _, err := s.ListEvents(ctx, refQuery(t, tn, "ci/dep-9"))
 	require.NoError(t, err)
 	require.Len(t, correlated, 1, "a correlated ref must still list only its own events")
-	assert.Equal(t, "ci/dep-9", correlated[0].CorrelationRef)
+	assert.Equal(t, "ci/dep-9", correlated[0].CorrelationRef.String())
 }
 
 // TestListEventsIdArmIgnoresCorrelatedEvents pins that listing a ref returns only the
@@ -294,7 +295,7 @@ func TestListEventsFindsAPointChangesEvents(t *testing.T) {
 // different changes and the audit log for one must not show the other's.
 //
 // This guard is only as reachable as the id arm makes it, and it has been unreachable
-// before: between 0006 and the strings.Cut split, the id arm compared the WHOLE ref
+// before: between 0006 and the ref split, the id arm compared the WHOLE ref
 // against e.id, no event id contains a '/', and the decoy below was excluded by "id <>
 // ref" alone — so the qualifier could have been deleted with this test staying green.
 // Check it by mutation rather than by its colour: deleting the qualifier from
@@ -326,10 +327,11 @@ func TestListEventsIdArmIgnoresCorrelatedEvents(t *testing.T) {
 	assert.Equal(t, memberID, got[0].ID)
 }
 
-// TestListEventsIgnoresARefWithNoLocus pins the no-branch design in eventSelection. After
-// 0006 no ref is bare, so a bare one names nothing and must match nothing — including the
-// point event whose id it happens to equal. strings.Cut gives that answer for free by
-// returning an empty id; a branch added to "handle" the case could only make it match.
+// TestListEventsIgnoresARefWithNoLocus pins what eventSelection does with a ref that does
+// not parse. After 0006 no ref is bare, so a bare one names nothing and must match nothing
+// — including the point event whose id it happens to equal. core.ParseRef refuses it and
+// the empty locus bound in its place matches no row, because event_locus_shape forbids
+// one. Answering 200 with an empty list, rather than erroring, is what this pins.
 func TestListEventsIgnoresARefWithNoLocus(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -397,7 +399,7 @@ func TestACorrelatedRefMayCollideWithAPointRef(t *testing.T) {
 		mkEvent(tn, corrID, "k2", pointID, "deployment.started", at))
 	require.NoError(t, err)
 
-	sharedRef := core.RefFor(point)
+	sharedRef := core.RefFor(point).String()
 	require.Equal(t, "ci/"+pointID, sharedRef,
 		"precondition: the point's ref is what the correlated event claimed")
 
@@ -430,11 +432,11 @@ func TestQueryChangesFindsAPointChangeByItsPrefixedRef(t *testing.T) {
 	require.NoError(t, err)
 
 	q := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 10)
-	q.Ref = core.RefFor(stored)
+	q.Ref = core.RefFor(stored).String()
 	changes, _, err := s.QueryChanges(ctx, q)
 	require.NoError(t, err)
 	require.Len(t, changes, 1, "a point change must be reachable by its prefixed ref")
-	assert.Equal(t, "ci/"+pointID, changes[0].Ref)
+	assert.Equal(t, "ci/"+pointID, changes[0].Ref.String())
 }
 
 // TestStartAtIsGeneratedFromTheTwoStartFacts is TestEndEffectiveIsGeneratedFromEndAt's
@@ -558,4 +560,27 @@ func TestQueryConstructorsRefuseTheZeroTenant(t *testing.T) {
 
 	_, err = postgres.NewEventQuery(core.TenantID{}, 10)
 	require.ErrorIs(t, err, postgres.ErrUnscopedQuery)
+}
+
+// core.ParseRef is deliberately stricter than change_ref_has_locus, which admits a ref whose
+// producer half is empty. That asymmetry is only safe because stored values are read through
+// core.RefFromRow, which does not validate. A scan that used ParseRef would make this row
+// unreadable.
+func TestAStoredRefTheParserWouldRejectIsStillReadable(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	// Written directly: ingest cannot produce an empty producer ref, and ParseRef refuses one.
+	_, err := s.Pool().Exec(ctx, `INSERT INTO change
+		(tenant, ref, subject, type, title, actor, started_at, first_seen_at, end_at,
+		 status, attributes, last_event_id)
+		VALUES ($1, 'ci/', 'acme/prod', 'deployment.started', '', '', $2, $2, NULL,
+		        'in_progress', '{}'::jsonb, 'e0')`, tn, at)
+	require.NoError(t, err, "precondition: change_ref_has_locus accepts a ref like ci/")
+
+	q := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 10)
+	got, _, err := s.QueryChanges(ctx, q)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "a legally stored ref must survive a read")
+	assert.Equal(t, "ci/", got[0].Ref.String(), "and must round-trip unchanged")
 }

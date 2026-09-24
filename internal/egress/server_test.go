@@ -181,9 +181,9 @@ func seed(t *testing.T, s *postgres.Store, tn, ref, typ string, at time.Time) {
 	_, _, err := s.AppendEvent(context.Background(), core.Event{
 		ID: id, Tenant: tn, IdempotencyKey: id, SchemaVersion: core.CurrentSchemaVersion,
 		Source: "ci", Type: typ, Subject: "acme/prod", Actor: "ci-bot",
-		OccurredAt: at, ReceivedAt: at, CorrelationRef: ref,
+		OccurredAt: at, ReceivedAt: at, CorrelationRef: core.RefFromRow(ref),
 		Attributes: map[string]any{"service.version": "2.5.0"}, Origin: core.OriginProcess,
-		Locus: "ci",
+		Locus: core.LocusFromRow("ci"),
 	})
 	require.NoError(t, err)
 }
@@ -418,6 +418,8 @@ func TestListEventsReturnsRawLog(t *testing.T) {
 	key := readerKey(t, s, tn)
 	seed(t, s, tn, "ci/dep-10", "deployment.started",
 		time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC))
+	seed(t, s, tn, "", "config.changed",
+		time.Date(2026, 9, 14, 10, 5, 0, 0, time.UTC))
 
 	rec := get(t, h, key, "/v1/events?tenant="+tn+"&ref="+url.QueryEscape("ci/dep-10"))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -427,6 +429,25 @@ func TestListEventsReturnsRawLog(t *testing.T) {
 	require.Len(t, events, 1)
 	assert.Equal(t, "ci/dep-10", events[0]["correlation_ref"])
 	assert.Equal(t, "deployment.started", events[0]["type"])
+
+	// The second seed() call above passes ref "", which stores CorrelationRef as the zero
+	// core.Ref — a point event. Every other seed() call in this suite passes a non-empty
+	// ref, so nothing else exercises how a point event's correlation_ref renders. It is
+	// fetched here with no ref filter, since a point's projection ref is <locus>/<its own
+	// event id>, which this test never captures on its own.
+	full := get(t, h, key, "/v1/events?tenant="+tn)
+	require.Equal(t, http.StatusOK, full.Code, full.Body.String())
+	var all []map[string]any
+	require.NoError(t, json.Unmarshal(full.Body.Bytes(), &all))
+	var point map[string]any
+	for _, e := range all {
+		if e["type"] == "config.changed" {
+			point = e
+		}
+	}
+	require.NotNil(t, point, "the seeded point event must appear in the unscoped log")
+	assert.Equal(t, "", point["correlation_ref"],
+		"a point event's correlation_ref must render as the empty string, not \"/\"")
 }
 
 // TestLimitParamRejectsInvalidValues pins that a non-numeric or negative "limit" is
@@ -1008,9 +1029,9 @@ func seedWith(t *testing.T, s *postgres.Store, tn, ref, typ, subject string, at 
 	_, _, err := s.AppendEvent(context.Background(), core.Event{
 		ID: id, Tenant: tn, IdempotencyKey: id, SchemaVersion: core.CurrentSchemaVersion,
 		Source: "ci", Type: typ, Subject: subject, Actor: "ci-bot",
-		OccurredAt: at, ReceivedAt: at, CorrelationRef: ref,
+		OccurredAt: at, ReceivedAt: at, CorrelationRef: core.RefFromRow(ref),
 		Attributes: map[string]any{}, Origin: core.OriginProcess,
-		Locus: "ci",
+		Locus: core.LocusFromRow("ci"),
 	})
 	require.NoError(t, err)
 }

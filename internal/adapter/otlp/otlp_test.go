@@ -32,7 +32,7 @@ func spansOf(t *testing.T, out any) []otlp.Span {
 func TestRenderUsesNanosecondsNotMilliseconds(t *testing.T) {
 	end := start.Add(20 * time.Minute)
 	out, err := otlp.New().Render([]core.Change{{
-		Ref: "dep-7", Subject: "acme/prod", Type: "deployment", Title: "API v2.5.0",
+		Ref: core.RefFromRow("dep-7"), Subject: "acme/prod", Type: "deployment", Title: "API v2.5.0",
 		Start: start, End: &end, Status: core.StatusCompleted,
 		Attributes: map[string]any{"service.version": "2.5.0"},
 	}}, now)
@@ -51,7 +51,7 @@ func TestRenderUsesNanosecondsNotMilliseconds(t *testing.T) {
 func TestRenderMapsAttributesToTypedAnyValue(t *testing.T) {
 	end := start.Add(time.Minute)
 	out, err := otlp.New().Render([]core.Change{{
-		Ref: "dep-7", Subject: "acme/prod", Start: start, End: &end,
+		Ref: core.RefFromRow("dep-7"), Subject: "acme/prod", Start: start, End: &end,
 		Status: core.StatusCompleted,
 		Attributes: map[string]any{
 			"service.version":           "2.5.0",
@@ -91,7 +91,7 @@ func TestRenderFallsBackToStringForUnmappedAttributeTypes(t *testing.T) {
 	type custom struct{ N int }
 	end := start.Add(time.Minute)
 	out, err := otlp.New().Render([]core.Change{{
-		Ref: "dep-9", Start: start, End: &end, Status: core.StatusCompleted,
+		Ref: core.RefFromRow("dep-9"), Start: start, End: &end, Status: core.StatusCompleted,
 		Attributes: map[string]any{"exotic": custom{N: 7}},
 	}}, now)
 	require.NoError(t, err)
@@ -107,7 +107,7 @@ func TestRenderFallsBackToStringForUnmappedAttributeTypes(t *testing.T) {
 func TestRenderMapsNilAttributeToEmptyAnyValue(t *testing.T) {
 	end := start.Add(time.Minute)
 	out, err := otlp.New().Render([]core.Change{{
-		Ref: "dep-9", Start: start, End: &end, Status: core.StatusCompleted,
+		Ref: core.RefFromRow("dep-9"), Start: start, End: &end, Status: core.StatusCompleted,
 		Attributes: map[string]any{"absent": nil},
 	}}, now)
 	require.NoError(t, err)
@@ -141,7 +141,7 @@ func TestRenderMapsStatusToOTelStatus(t *testing.T) {
 		{core.StatusCancelled, 0, false},
 	} {
 		out, err := otlp.New().Render([]core.Change{{
-			Ref: "r", Start: start, End: &end, Status: tc.in,
+			Ref: core.RefFromRow("r"), Start: start, End: &end, Status: tc.in,
 		}}, now)
 		require.NoError(t, err)
 		span := spansOf(t, out)[0]
@@ -156,7 +156,7 @@ func TestRenderMapsStatusToOTelStatus(t *testing.T) {
 
 func TestRenderOpenChangeEndsAtNow(t *testing.T) {
 	out, err := otlp.New().Render([]core.Change{{
-		Ref: "dep-8", Start: start, End: nil, Status: core.StatusInProgress,
+		Ref: core.RefFromRow("dep-8"), Start: start, End: nil, Status: core.StatusInProgress,
 	}}, now)
 	require.NoError(t, err)
 	assert.Equal(t, strconv.FormatInt(now.UnixNano(), 10), spansOf(t, out)[0].EndTimeUnixNano)
@@ -167,7 +167,8 @@ func TestRenderOpenChangeEndsAtNow(t *testing.T) {
 func TestRenderIDsAreStableAcrossReRender(t *testing.T) {
 	end := start.Add(time.Minute)
 	change := core.Change{
-		Tenant: "acme", Ref: "dep-7", Start: start, End: &end, Status: core.StatusCompleted,
+		Tenant: "acme", Ref: core.RefFromRow("dep-7"), Start: start, End: &end,
+		Status: core.StatusCompleted,
 	}
 	out1, err := otlp.New().Render([]core.Change{change}, now)
 	require.NoError(t, err)
@@ -186,11 +187,13 @@ func TestRenderIDsAreStableAcrossReRender(t *testing.T) {
 func TestRenderIDsDependOnTenant(t *testing.T) {
 	end := start.Add(time.Minute)
 	a, err := otlp.New().Render([]core.Change{{
-		Tenant: "acme", Ref: "dep-7", Start: start, End: &end, Status: core.StatusCompleted,
+		Tenant: "acme", Ref: core.RefFromRow("dep-7"), Start: start, End: &end,
+		Status: core.StatusCompleted,
 	}}, now)
 	require.NoError(t, err)
 	b, err := otlp.New().Render([]core.Change{{
-		Tenant: "other", Ref: "dep-7", Start: start, End: &end, Status: core.StatusCompleted,
+		Tenant: "other", Ref: core.RefFromRow("dep-7"), Start: start, End: &end,
+		Status: core.StatusCompleted,
 	}}, now)
 	require.NoError(t, err)
 
@@ -209,7 +212,8 @@ func TestRenderIDsDependOnTenant(t *testing.T) {
 func TestRenderSpanIDIsNotATraceIDPrefix(t *testing.T) {
 	end := start.Add(time.Minute)
 	out, err := otlp.New().Render([]core.Change{{
-		Tenant: "acme", Ref: "dep-7", Start: start, End: &end, Status: core.StatusCompleted,
+		Tenant: "acme", Ref: core.RefFromRow("dep-7"), Start: start, End: &end,
+		Status: core.StatusCompleted,
 	}}, now)
 	require.NoError(t, err)
 
@@ -225,7 +229,7 @@ func TestRenderSpanIDIsNotATraceIDPrefix(t *testing.T) {
 func TestRenderGoldenOTLPJSON(t *testing.T) {
 	end := start.Add(20 * time.Minute)
 	out, err := otlp.New().Render([]core.Change{{
-		Tenant: "acme", Ref: "dep-7", Subject: "acme/prod", Type: "deployment",
+		Tenant: "acme", Ref: core.RefFromRow("dep-7"), Subject: "acme/prod", Type: "deployment",
 		Title: "API v2.5.0", Start: start, End: &end, Status: core.StatusCompleted,
 		Attributes: map[string]any{"service.version": "2.5.0"},
 	}}, now)
@@ -306,4 +310,51 @@ func TestRenderNilChangesSpansArrayIsEmptyNotNull(t *testing.T) {
 			"scopeSpans": [{"spans": []}]
 		}]
 	}`, string(b))
+}
+
+// mustLocus builds a Locus from a name the caller asserts is well-formed, so a fixture
+// that stops being one fails where it is written rather than three assertions later.
+func mustLocus(t *testing.T, v string) core.Locus {
+	t.Helper()
+	l, err := core.NewLocus(v)
+	require.NoError(t, err)
+	return l
+}
+
+// The trace and span ids derive from the ref's STORED string form. Deriving from anything
+// else — the producer half, or a rendering with different separators — makes every
+// re-export a new span instead of the same one, which is the property derive() exists for.
+//
+// The second half is what gives the test teeth. Comparing a NewRef-built ref against a
+// RefFromRow-built one only pins that the two constructors agree, which they cannot help
+// doing; a render that hashed c.Ref.ProducerRef() instead would pass it unchanged. Two
+// refs sharing a producer half under DIFFERENT loci is the pair that separates the two
+// derivations: identical under ProducerRef, distinct under the stored form. Without it a
+// whole locus's changes would collide with another's on both ids.
+func TestSpanIDsDeriveFromTheStoredRefForm(t *testing.T) {
+	ref, err := core.NewRef(mustLocus(t, "ci"), "dep-7")
+	require.NoError(t, err)
+	change := func(r core.Ref) core.Change {
+		return core.Change{Tenant: "tnt_x", Ref: r, Type: "deployment.started",
+			Start: time.Unix(0, 0).UTC(), Status: core.StatusInProgress}
+	}
+	spanFor := func(r core.Ref) otlp.Span {
+		out, renderErr := otlp.New().Render([]core.Change{change(r)}, now)
+		require.NoError(t, renderErr)
+		spans := spansOf(t, out)
+		require.Len(t, spans, 1)
+		return spans[0]
+	}
+
+	composed := spanFor(ref)
+	fromRow := spanFor(core.RefFromRow("ci/dep-7"))
+	assert.Equal(t, composed.TraceID, fromRow.TraceID,
+		"a ref built by NewRef and one read from a row must derive the same ids")
+	assert.Equal(t, composed.SpanID, fromRow.SpanID)
+
+	otherLocus := spanFor(core.RefFromRow("dev/dep-7"))
+	assert.NotEqual(t, composed.TraceID, otherLocus.TraceID,
+		"the whole stored form feeds the hash; two loci sharing a producer ref must not "+
+			"derive the same trace id")
+	assert.NotEqual(t, composed.SpanID, otherLocus.SpanID)
 }

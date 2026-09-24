@@ -69,7 +69,7 @@ var OpenSentinel = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 // removes the dilemma instead of resolving it.
 type Change struct {
 	Tenant      string
-	Ref         string
+	Ref         Ref
 	Subject     string
 	Type        string
 	Title       string

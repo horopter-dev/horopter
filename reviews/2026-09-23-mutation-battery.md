@@ -262,12 +262,12 @@ Before:
 		subjectForbidden(w, p.SubjectPattern, req.Subject)
 		return
 	}
-	ref, err := resolveRef(p.Locus, req.CorrelationRef)
+	ref, err := resolveRef(core.LocusFromRow(p.Locus), req.CorrelationRef)
 ```
 After:
 ```go
 	p, _ := auth.PrincipalFrom(r.Context())
-	ref, err := resolveRef(p.Locus, req.CorrelationRef)
+	ref, err := resolveRef(core.LocusFromRow(p.Locus), req.CorrelationRef)
 ```
 (Leaves `subjectAllowed`/`subjectForbidden` otherwise unused — harmless for `go build`,
 flagged by `golangci-lint`'s unused check if left in place, which is one more reason the

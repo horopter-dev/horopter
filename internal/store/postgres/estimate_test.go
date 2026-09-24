@@ -30,7 +30,7 @@ func sizedChanges(t *testing.T, s *postgres.Store, tn string) ([]string, []int64
 		require.NoError(t, err)
 		// The stored ref, not the producer's: mkEvent composes the locus onto it, and a
 		// row is only measurable by the ref it was actually written under.
-		ref := core.RefFor(ev)
+		ref := core.RefFor(ev).String()
 		refs = append(refs, ref)
 		sizes = append(sizes, changeRowBytes(t, s, tn, ref))
 	}
@@ -68,7 +68,7 @@ func sizedWindow(t *testing.T, tn string, limit int) postgres.ChangeQuery {
 func changeRefs(changes []core.Change) []string {
 	var refs []string
 	for _, c := range changes {
-		refs = append(refs, c.Ref)
+		refs = append(refs, c.Ref.String())
 	}
 	return refs
 }

@@ -567,7 +567,7 @@ func changesToJSON(changes []core.Change) []map[string]any {
 	out := make([]map[string]any, 0, len(changes))
 	for _, c := range changes {
 		m := map[string]any{
-			"ref": c.Ref, "subject": c.Subject, "type": c.Type, "title": c.Title,
+			"ref": c.Ref.String(), "subject": c.Subject, "type": c.Type, "title": c.Title,
 			"actor": c.Actor, "start": c.Start.UTC().Format(time.RFC3339Nano),
 			"first_seen_at": c.FirstSeenAt.UTC().Format(time.RFC3339Nano),
 			"status":        string(c.Status), "attributes": c.Attributes,
@@ -599,7 +599,7 @@ func eventsToJSON(events []core.Event) []map[string]any {
 			"subject": e.Subject, "actor": e.Actor, "title": e.Title,
 			"occurred_at":     e.OccurredAt.UTC().Format(time.RFC3339Nano),
 			"received_at":     e.ReceivedAt.UTC().Format(time.RFC3339Nano),
-			"correlation_ref": e.CorrelationRef, "attributes": e.Attributes,
+			"correlation_ref": e.CorrelationRef.String(), "attributes": e.Attributes,
 			"origin": string(e.Origin), "edited": e.Edited,
 		})
 	}

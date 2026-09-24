@@ -23,10 +23,10 @@ func validEvent() core.Event {
 		Actor:          "ci-bot",
 		OccurredAt:     time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC),
 		ReceivedAt:     time.Date(2026, 9, 14, 10, 0, 1, 0, time.UTC),
-		CorrelationRef: "dep-7",
+		CorrelationRef: core.RefFromRow("dep-7"),
 		Attributes:     map[string]any{"service.version": "2.5.0"},
 		Origin:         core.OriginProcess,
-		Locus:          "buildkite",
+		Locus:          core.LocusFromRow("buildkite"),
 	}
 }
 
@@ -89,6 +89,15 @@ func TestNewULIDIsSortableByTime(t *testing.T) {
 // "invalid event" — inval·id — and the fixture is "not-a-ulid", so that assertion holds
 // whichever branch fired and whatever it said. "26-character ULID" is produced by the id
 // branch alone.
+//
+// There is no case for a locus containing "/", and it is not that the type makes one
+// unconstructible: core.LocusFromRow does not validate, so core.LocusFromRow("a/b") mints
+// one from outside core today. The rule moved to core.NewLocus, where
+// TestNewLocusRejectsASlash pins it, and what keeps a slash-bearing locus out of a
+// production event is auth.ValidateLocus at issue time plus credential_locus_shape
+// (migration 0004) at write time — a cross-file invariant that core.Event.validateLocus
+// records. Validate is left with the one thing no constructor can settle: an event that
+// never had a locus set.
 func TestValidateFailuresAreInvalidEvent(t *testing.T) {
 	valid := core.Event{
 		ID:     "01J0000000000000000000000A",
@@ -96,7 +105,7 @@ func TestValidateFailuresAreInvalidEvent(t *testing.T) {
 		Source: "ci", Type: "deployment.started", Subject: "acme/prod",
 		OccurredAt: time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC),
 		Origin:     core.OriginProcess,
-		Locus:      "github",
+		Locus:      core.LocusFromRow("github"),
 	}
 	require.NoError(t, valid.Validate(), "precondition: the base event is acceptable")
 
@@ -112,8 +121,7 @@ func TestValidateFailuresAreInvalidEvent(t *testing.T) {
 		"occurred_at":    {func(e *core.Event) { e.OccurredAt = time.Time{} }, "occurred_at"},
 		"schema_version": {func(e *core.Event) { e.SchemaVersion = 99 }, "schema_version"},
 		"origin":         {func(e *core.Event) { e.Origin = "" }, "origin"},
-		"locus_empty":    {func(e *core.Event) { e.Locus = "" }, "locus"},
-		"locus_slash":    {func(e *core.Event) { e.Locus = "a/b" }, "locus"},
+		"locus_empty":    {func(e *core.Event) { e.Locus = core.Locus{} }, "locus"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			bad := valid

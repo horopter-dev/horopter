@@ -60,8 +60,8 @@ func TestRunRebuildsATenantsProjection(t *testing.T) {
 		SchemaVersion: core.CurrentSchemaVersion,
 		Source:        "ci", Type: "deployment.started", Subject: "acme/prod", Actor: "ci-bot",
 		Title: "from the event log", OccurredAt: at, ReceivedAt: at,
-		CorrelationRef: "ci/dep-1", Attributes: map[string]any{}, Origin: core.OriginProcess,
-		Locus: "ci",
+		CorrelationRef: core.RefFromRow("ci/dep-1"), Attributes: map[string]any{},
+		Origin: core.OriginProcess, Locus: core.LocusFromRow("ci"),
 	})
 	require.NoError(t, err)
 
@@ -103,9 +103,9 @@ func TestRunWithoutRebuildTenantLeavesTheProjectionAlone(t *testing.T) {
 		ID: core.NewULID(time.Now(), rand.Reader), Tenant: tn,
 		SchemaVersion: core.CurrentSchemaVersion,
 		Source:        "ci", Type: "deployment.started", Subject: "acme/prod", Actor: "ci-bot",
-		OccurredAt: at, ReceivedAt: at, CorrelationRef: "ci/dep-1",
+		OccurredAt: at, ReceivedAt: at, CorrelationRef: core.RefFromRow("ci/dep-1"),
 		Attributes: map[string]any{}, Origin: core.OriginProcess,
-		Locus: "ci",
+		Locus: core.LocusFromRow("ci"),
 	})
 	require.NoError(t, err)
 
