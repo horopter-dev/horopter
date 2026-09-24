@@ -335,3 +335,49 @@ func TestMigrationsLeaveTheProjectionRebuildable(t *testing.T) {
 		"a rebuild after the migrations must reproduce the projection exactly — same refs, "+
 			"same rows, same contents — or change has stopped being a function of event")
 }
+
+// TestMigration0007BackfillsSourceFromTheLastEvent pins the backfill to the same rule
+// core.Fold applies, which is what makes a rebuild straight after the migration a no-op.
+//
+// Two events on one ref with different sources is the only fixture that can tell the rule
+// apart: seedLegacyProjection has one event per change, so it would pass under a backfill
+// that took the FIRST event's source, the earliest, or an arbitrary one.
+func TestMigration0007BackfillsSourceFromTheLastEvent(t *testing.T) {
+	ctx := context.Background()
+	pool, _ := freshDatabase(t)
+
+	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	first := core.NewULID(at, rand.Reader)
+	last := core.NewULID(at.Add(time.Minute), rand.Reader)
+
+	for _, e := range []struct{ id, source string }{
+		{first, "buildkite"},
+		{last, "github"},
+	} {
+		mustExec(t, pool, `INSERT INTO event
+			(id, tenant, schema_version, source, type, subject, occurred_at, received_at,
+			 correlation_ref)
+			VALUES ($1, 'acme', 1, $2, 'deployment.started', 'acme/prod', $3, $3, 'dep-1')`,
+			e.id, e.source, at)
+	}
+	mustExec(t, pool, `INSERT INTO change
+		(tenant, ref, subject, type, title, actor, started_at, first_seen_at, end_at,
+		 status, attributes, last_event_id)
+		VALUES ('acme', 'dep-1', 'acme/prod', 'deployment.started', 'deployment.started',
+		        '', $1, $1, NULL, 'in_progress', '{}'::jsonb, $2)`,
+		at, last)
+
+	_, err := postgres.Migrate(ctx, pool)
+	require.NoError(t, err)
+
+	var tenantID string
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT id FROM tenant WHERE display_name = 'acme'`).Scan(&tenantID))
+
+	var source string
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT source FROM change WHERE tenant = $1`, tenantID).Scan(&source))
+	assert.Equal(t, "github", source,
+		"the backfill takes the event named by last_event_id, which is the one core.Fold's "+
+			"last-wins rule left the change carrying")
+}

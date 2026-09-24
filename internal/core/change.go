@@ -81,6 +81,11 @@ type Change struct {
 	Status      Status
 	Attributes  map[string]any
 	LastEventID string
+	// Source is the system that reported the change, taken from the last event folded
+	// into it. Descriptive rather than identifying: a ref's events can carry different
+	// sources, because source still comes from the request body rather than the
+	// credential (#23). Filtering finds a change under its latest source only.
+	Source string
 }
 
 // IsOpen reports whether the change is still in flight. An open change renders

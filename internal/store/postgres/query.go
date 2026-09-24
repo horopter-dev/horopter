@@ -124,7 +124,7 @@ type selection struct {
 
 // changeColumns are the columns scanChanges reads, in its order.
 const changeColumns = `tenant, ref, subject, type, title, actor, start_at, started_at,
-	first_seen_at, end_at, status, attributes, last_event_id`
+	first_seen_at, end_at, status, attributes, last_event_id, source`
 
 // eventColumns are the columns scanEvents reads, in its order.
 const eventColumns = `id, tenant, idempotency_key, schema_version, source, type, subject,
@@ -448,7 +448,7 @@ func scanChanges(rows pgx.Rows, extra ...any) ([]core.Change, error) {
 		)
 		dest := []any{&c.Tenant, &ref, &c.Subject, &c.Type, &c.Title,
 			&c.Actor, &c.Start, &startedAt, &c.FirstSeenAt, &endAt, &st,
-			&c.Attributes, &c.LastEventID}
+			&c.Attributes, &c.LastEventID, &c.Source}
 		if err := rows.Scan(append(dest, extra...)...); err != nil {
 			return nil, fmt.Errorf("scan change row: %w", err)
 		}

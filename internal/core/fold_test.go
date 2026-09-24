@@ -503,3 +503,28 @@ func TestFoldLaterNonEmptyTitleWins(t *testing.T) {
 	c = core.Fold(&c, second)
 	assert.Equal(t, "Deploy v2.5.1", c.Title)
 }
+
+// TestFoldTakesTheLastEventsSource pins source to the same last-wins rule as subject and
+// type. A ref's events can legitimately carry different sources today, because source comes
+// from the request body rather than the credential (#23) — so first-wins and last-wins are
+// distinguishable, and the migration's backfill has to agree with whichever this is.
+func TestFoldTakesTheLastEventsSource(t *testing.T) {
+	at := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+	first := core.Event{
+		ID: "01K5A000000000000000000001", Tenant: "t", Type: "deployment.started",
+		Source: "buildkite", Subject: "acme/prod", OccurredAt: at,
+		CorrelationRef: core.RefFromRow("dep-1"),
+	}
+	second := core.Event{
+		ID: "01K5A000000000000000000002", Tenant: "t", Type: "deployment.completed",
+		Source: "github", Subject: "acme/prod", OccurredAt: at.Add(time.Minute),
+		CorrelationRef: core.RefFromRow("dep-1"),
+	}
+
+	c := core.Fold(nil, first)
+	assert.Equal(t, "buildkite", c.Source, "the first event's source opens the change")
+
+	c = core.Fold(&c, second)
+	assert.Equal(t, "github", c.Source,
+		"the last event's source wins, as it does for subject and type")
+}

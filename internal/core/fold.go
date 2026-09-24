@@ -89,6 +89,11 @@ func Fold(cur *Change, ev Event) Change {
 	out.Ref = RefFor(ev)
 	out.Subject = ev.Subject
 	out.Type = ev.Type
+	// Unconditional last-wins, like Subject and Type, and deliberately NOT guarded
+	// non-empty like Actor and Title below: Event.Validate requires a non-empty source, so
+	// the hazard that guard exists for — an ordinary event blanking a value a previous one
+	// recorded — cannot arise here.
+	out.Source = ev.Source
 	// Last NON-EMPTY wins. Actor is optional on both ingest paths, so an event carrying
 	// none is ordinary traffic; an unconditional assignment let any such event blank the
 	// actor a previous event had recorded, and a rebuild reproduced the erasure rather
