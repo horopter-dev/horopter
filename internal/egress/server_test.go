@@ -1103,6 +1103,145 @@ func TestQueryChangesFiltersByStatus(t *testing.T) {
 		"the complementary status must select the other change")
 }
 
+// seedSpec is one change to seed, named rather than positional. seedWith hardcodes source
+// "ci" and empty attributes, which is enough for the subject and type filters and not for
+// these.
+//
+// The stored ref's first segment is what change.locus is generated from, so ref "gha/dep-1"
+// seeds a change in the gha locus.
+//
+// Named seedSpec, not seed: seed is already the package's existing single-event helper
+// above, and a struct sharing its name would not compile alongside it.
+type seedSpec struct {
+	tenant, ref, source string
+	attrs               map[string]any
+}
+
+func seedChange(t *testing.T, s *postgres.Store, sd seedSpec, at time.Time) {
+	t.Helper()
+	id := core.NewULID(time.Now(), rand.Reader)
+	if sd.attrs == nil {
+		sd.attrs = map[string]any{}
+	}
+	ref := core.RefFromRow(sd.ref)
+	_, _, err := s.AppendEvent(context.Background(), core.Event{
+		ID: id, Tenant: sd.tenant, IdempotencyKey: id,
+		SchemaVersion: core.CurrentSchemaVersion,
+		Source:        sd.source, Type: "deployment.started", Subject: "acme/prod",
+		Actor: "ci-bot", OccurredAt: at, ReceivedAt: at,
+		CorrelationRef: ref, Attributes: sd.attrs,
+		Origin: core.OriginProcess, Locus: ref.Locus(),
+	})
+	require.NoError(t, err)
+}
+
+// TestQueryChangesFiltersByLocusAndSource pins the two scalar filters together, because
+// they are wired in adjacent lines from adjacent query parameters and a transposition
+// between them is invisible to every other test.
+//
+// The two changes share a source and differ in locus, then share a locus and differ in
+// source, so each filter is the only thing that can select exactly one row — a clause
+// reading the other column matches none or both, never the one expected.
+func TestQueryChangesFiltersByLocusAndSource(t *testing.T) {
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	seedChange(t, s, seedSpec{tenant: tn, ref: "ci/dep-1", source: "github"}, at)
+	seedChange(t, s, seedSpec{tenant: tn, ref: "gha/dep-2", source: "github"}, at)
+	seedChange(t, s, seedSpec{tenant: tn, ref: "gha/dep-3", source: "buildkite"}, at)
+
+	window := "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
+	base := "/v1/changes?tenant=" + tn + window
+
+	assert.Equal(t, []string{"ci/dep-1", "gha/dep-2", "gha/dep-3"},
+		refsIn(t, get(t, h, key, base)), "precondition: all three are in the window")
+
+	assert.Equal(t, []string{"ci/dep-1"}, refsIn(t, get(t, h, key, base+"&locus=ci")),
+		"locus= must filter on the generated locus column, not on source")
+	assert.Equal(t, []string{"gha/dep-3"},
+		refsIn(t, get(t, h, key, base+"&source=buildkite")),
+		"source= must filter on source, not on locus")
+	assert.Equal(t, []string{"gha/dep-2"},
+		refsIn(t, get(t, h, key, base+"&locus=gha&source=github")),
+		"the two filters must compose rather than replace one another")
+
+	assert.Equal(t, []string{"ci/dep-1", "gha/dep-2", "gha/dep-3"},
+		refsIn(t, get(t, h, key, base+"&locus=&source=")),
+		"a present but empty value is no filter, as an empty subject= is")
+}
+
+// TestQueryChangesFiltersByAllowlistedAttribute covers the ?attr.<key>= surface, including
+// that everything after the prefix is the key: attribute keys are dotted by convention, so
+// a parser splitting on "." would truncate every real one to "deployment".
+func TestQueryChangesFiltersByAllowlistedAttribute(t *testing.T) {
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	seedChange(t, s, seedSpec{tenant: tn, ref: "ci/dep-prod", source: "github",
+		attrs: map[string]any{"deployment.environment.name": "prod"}}, at)
+	seedChange(t, s, seedSpec{tenant: tn, ref: "ci/dep-stg", source: "github",
+		attrs: map[string]any{"deployment.environment.name": "staging"}}, at)
+
+	window := "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
+	base := "/v1/changes?tenant=" + tn + window
+
+	assert.Equal(t, []string{"ci/dep-prod"},
+		refsIn(t, get(t, h, key,
+			base+"&attr.deployment.environment.name=prod")))
+
+	assert.Equal(t, []string{"ci/dep-prod", "ci/dep-stg"},
+		refsIn(t, get(t, h, key, base+"&attr.deployment.environment.name=")),
+		"an empty value is no filter, as an empty subject= is")
+}
+
+// TestQueryChangesRefusesAnUnfilterableAttributeKey is the assertion that proves the
+// allowlist reaches the HTTP surface. Filtering on an allowlisted key passes whether or not
+// the allowlist is enforced; only a refusal discriminates.
+//
+// 400 rather than 500: an unknown key is the caller's mistake, and readFailed's 500 would
+// tell them the server is broken when their query is. And 400 rather than an unfiltered
+// 200, because a caller handed every row in answer to a narrowing question has been told
+// something false.
+func TestQueryChangesRefusesAnUnfilterableAttributeKey(t *testing.T) {
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	window := "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
+	base := "/v1/changes?tenant=" + tn + window
+
+	for name, url := range map[string]string{
+		"unknown key": base + "&attr.service.version=2.5.0",
+		"empty key":   base + "&attr.=prod",
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := get(t, h, key, url)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "deployment.environment.name",
+				"the refusal must list what IS filterable, or the caller has to guess")
+		})
+	}
+}
+
+// TestChangesRenderTheirSource pins the field to the response. A filter on a value the
+// caller cannot read back is half a feature: #5 asked for source to be returned AND
+// filtered.
+func TestChangesRenderTheirSource(t *testing.T) {
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	seedChange(t, s, seedSpec{tenant: tn, ref: "ci/dep-1", source: "github"}, at)
+
+	rec := get(t, h, key, "/v1/changes?tenant="+tn+
+		"&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var changes []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &changes))
+	require.Len(t, changes, 1)
+	assert.Equal(t, "github", changes[0]["source"])
+	assert.NotContains(t, changes[0], "locus",
+		"ref already carries the locus; a second copy is a second thing to keep in agreement")
+}
+
 // TestEveryNonProbeEgressRouteRequiresACredential asserts, by enumerating the mux rather
 // than driving a hand-written list of URLs, that a credential guards every route but the
 // two probes. A hand-written list of routes can go stale the moment a route is added; this

@@ -524,12 +524,39 @@ oldest rows that fit; see Read admission. The same advice applies.
 Act on it. Changes are returned oldest first, so truncation discards the **most recent**
 rows — during an incident, exactly the ones being looked for — and a truncated response
 is otherwise indistinguishable from a complete one. Narrow the time window, or filter by
-`subject`, `type` or `status`, and repeat the query until the header is gone. A `limit`
-query parameter below 1000 asks for fewer rows; it cannot raise the cap.
+`subject`, `type`, `status`, `locus`, `source` or `attr.deployment.environment.name`, and
+repeat the query until the header is gone. A `limit` query parameter below 1000 asks for
+fewer rows; it cannot raise the cap.
 
 The signal is a header rather than a field in the body because two of these routes render
 vendor-owned shapes — Grafana annotations and OTLP spans — that cannot carry a Horopter
 envelope.
+
+## Filtering changes
+
+`GET /v1/changes` and both adapter routes take the same filters, all exact equality, all
+optional, all combining with AND:
+
+| parameter | matches |
+|---|---|
+| `subject` | the change's subject |
+| `type` | the change's type |
+| `status` | the change's status |
+| `locus` | the namespace the ref was issued under — the part of a stored ref before its `/` |
+| `source` | the system that reported the change, from the last event folded into it |
+| `attr.<key>` | an attribute's exact value |
+
+An empty value is no filter, so `?status=` and an omitted `status` mean the same thing.
+
+**Attribute keys are allowlisted.** Only `deployment.environment.name` is filterable today.
+Any other `attr.` key is answered **400** naming the key and listing what is permitted,
+rather than being ignored — a filter that silently matches everything answers a narrowing
+question with the wrong result set. Each filterable key needs its own expression index, so
+adding one is a migration rather than a configuration change; that cost is deliberate,
+because a key that becomes filterable is one callers may depend on afterwards.
+
+`source` is the **last** event's source, not the set of every source that contributed. A ref
+whose events come from two systems reports one, and is found by filtering on that one only.
 
 ## Read admission
 
