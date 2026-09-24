@@ -565,7 +565,7 @@ func TestQueryConstructorsRefuseTheZeroTenant(t *testing.T) {
 // core.ParseRef is deliberately stricter than change_ref_has_locus, which admits a ref whose
 // producer half is empty. That asymmetry is only safe because stored values are read through
 // core.RefFromRow, which does not validate. A scan that used ParseRef would make this row
-// unreadable — and RebuildProjection reads every row, so one of them would break a tenant.
+// unreadable.
 func TestAStoredRefTheParserWouldRejectIsStillReadable(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)

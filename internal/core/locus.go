@@ -33,10 +33,20 @@ func NewLocus(v string) (Locus, error) {
 	return Locus{v: v}, nil
 }
 
-// LocusFromRow is for values already stored, where event_locus_shape has enforced the rules
-// at write time: rebuild, migrate, and every scan. It does not re-validate, for the same
-// reason TenantIDFromRow does not — a stored value's validity was settled when it was
-// written, and failing a read on it would make a row unreadable rather than unwritable.
+// LocusFromRow is for a value whose shape was already settled by one of two backstops, not
+// by this call.
+//
+// Stored event rows — rebuild, migrate, and every scan — have event_locus_shape's
+// enforcement at write time behind them. A credential's locus at an input boundary —
+// internal/ingress's server.go and cloudevents.go, both converting p.Locus into the event's
+// Locus — has a different backstop instead: credential_locus_shape (migration 0004) plus
+// auth.ValidateLocus, enforced when the credential was issued, not when the request
+// arrives.
+//
+// It does not re-validate, for the same reason TenantIDFromRow does not: each caller's
+// value was already validated by its own backstop, and failing the read here would make a
+// row unreadable, or a valid credential's request unservable, rather than making either
+// value unwritable or un-issuable in the first place.
 func LocusFromRow(v string) Locus { return Locus{v: v} }
 
 func (l Locus) String() string { return l.v }
