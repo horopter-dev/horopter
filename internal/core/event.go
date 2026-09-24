@@ -43,7 +43,7 @@ type Event struct {
 	Title          string
 	OccurredAt     time.Time
 	ReceivedAt     time.Time
-	CorrelationRef string
+	CorrelationRef Ref
 	Attributes     map[string]any
 	// Origin is derived from the appending credential's type, never from the request
 	// body: a caller-asserted origin would be worthless, since a producer can post any
@@ -53,7 +53,7 @@ type Event struct {
 	// caller-asserted locus would defeat the namespacing it exists to provide, which is
 	// the argument Origin makes for itself. RefFor composes a point change's ref from it,
 	// so it is part of what the event is, not a denormalised copy of a credential field.
-	Locus string
+	Locus Locus
 	// Edited is false on every append. v0.2's edit path is what sets it true; nothing
 	// in this build does.
 	Edited bool
@@ -74,14 +74,10 @@ type Event struct {
 // hypothetical.
 //
 // Validate does not guard CorrelationRef against event_corr_ref_has_locus (a non-empty
-// correlation_ref must carry a slash after its first character) the way it guards Locus
-// against event_locus_shape below. The same argument applies — a constraint violation
-// reaches ingress as a store failure, a 503 telling the producer to retry a request that
-// can never succeed — but nothing reaches Validate with a CorrelationRef that could trip
-// it: resolveRef (internal/ingress/server.go) is the only production composer, and it
-// returns either an empty string or the locus and ref joined with a slash. A future
-// caller that appends directly, bypassing resolveRef, would need this guard added rather
-// than assuming Validate already provides it.
+// correlation_ref must carry a slash after its first character): Ref's COMPOSING
+// constructors are that guard now, not the type. NewRef and ParseRef both refuse a value
+// without a locus, and the only other source, RefFromRow, carries a value the constraint
+// already passed. There is nothing left for Validate to add.
 func (e Event) Validate() error {
 	if _, err := ulid.ParseStrict(e.ID); err != nil {
 		return fmt.Errorf("%w %q: id must be a 26-character ULID: %w",
@@ -121,17 +117,34 @@ func (e Event) Validate() error {
 	return nil
 }
 
-// validateLocus reports whether the event's locus is well-formed. The rule lives in
-// NewLocus, which is the single statement of what the ref encoding requires; this wraps it
-// so the error names the event, as every other Validate failure does.
+// validateLocus reports whether the event carries a locus at all. That is the one thing no
+// constructor can settle; the shape rules the ref encoding requires — non-empty, no "/" —
+// are settled before a Locus exists, so re-checking them here would restate a rule rather
+// than enforce one. It wraps the failure so the error names the event, as every other
+// Validate failure does.
+//
+// Be precise about WHERE those rules are held, because it is not the type. NewLocus holds
+// them, and so does ParseRef through it; LocusFromRow does NOT, by design and for the same
+// reason TenantIDFromRow does not — failing a read on a stored value would make a row
+// unreadable rather than unwritable. LocusFromRow is exported, so core.LocusFromRow("a/b")
+// mints a slash-bearing Locus from outside this package today.
+//
+// What keeps that out of a production event is a CROSS-FILE INVARIANT, not the compiler.
+// Only two sites set Locus on an event that reaches this check — internal/ingress's
+// server.go and cloudevents.go — and both set it from the credential alone. (The store's
+// scans set it too, but from rows event_locus_shape has already passed, and a read does
+// not call Validate.) A credential's locus is in turn held slash-free twice over: by
+// auth.ValidateLocus when horoctl issues one, and by credential_locus_shape (migration
+// 0004) when the row is written. Anything that adds a third writer of Locus — or that
+// relaxes either of those two — owes this check the rule back.
 //
 // The fuller rule an operator is held to — the reserved "legacy", a length cap, edge
-// whitespace — is auth.ValidateLocus's, and is checked when a credential is issued rather
-// than when an event is appended.
+// whitespace — is auth.ValidateLocus's too, and is checked when a credential is issued
+// rather than when an event is appended.
 func (e Event) validateLocus() error {
-	if _, err := NewLocus(e.Locus); err != nil {
-		return fmt.Errorf("%w %q: %w; it is derived from the appending credential",
-			ErrInvalidEvent, e.ID, err)
+	if e.Locus.IsZero() {
+		return fmt.Errorf("%w %q: locus is required; it is derived from the appending "+
+			"credential", ErrInvalidEvent, e.ID)
 	}
 	return nil
 }

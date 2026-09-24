@@ -181,9 +181,9 @@ func seed(t *testing.T, s *postgres.Store, tn, ref, typ string, at time.Time) {
 	_, _, err := s.AppendEvent(context.Background(), core.Event{
 		ID: id, Tenant: tn, IdempotencyKey: id, SchemaVersion: core.CurrentSchemaVersion,
 		Source: "ci", Type: typ, Subject: "acme/prod", Actor: "ci-bot",
-		OccurredAt: at, ReceivedAt: at, CorrelationRef: ref,
+		OccurredAt: at, ReceivedAt: at, CorrelationRef: core.RefFromRow(ref),
 		Attributes: map[string]any{"service.version": "2.5.0"}, Origin: core.OriginProcess,
-		Locus: "ci",
+		Locus: core.LocusFromRow("ci"),
 	})
 	require.NoError(t, err)
 }
@@ -1008,9 +1008,9 @@ func seedWith(t *testing.T, s *postgres.Store, tn, ref, typ, subject string, at 
 	_, _, err := s.AppendEvent(context.Background(), core.Event{
 		ID: id, Tenant: tn, IdempotencyKey: id, SchemaVersion: core.CurrentSchemaVersion,
 		Source: "ci", Type: typ, Subject: subject, Actor: "ci-bot",
-		OccurredAt: at, ReceivedAt: at, CorrelationRef: ref,
+		OccurredAt: at, ReceivedAt: at, CorrelationRef: core.RefFromRow(ref),
 		Attributes: map[string]any{}, Origin: core.OriginProcess,
-		Locus: "ci",
+		Locus: core.LocusFromRow("ci"),
 	})
 	require.NoError(t, err)
 }

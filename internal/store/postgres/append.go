@@ -214,7 +214,8 @@ func insertEvent(ctx context.Context, tx pgx.Tx, ev core.Event) error {
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
 		ev.ID, ev.Tenant, idem, ev.SchemaVersion, ev.Source, ev.Type,
 		ev.Subject, ev.Actor, ev.Title, ev.OccurredAt.UTC(), ev.ReceivedAt.UTC(),
-		ev.CorrelationRef, ev.Attributes, string(ev.Origin), ev.Edited, ev.Locus,
+		ev.CorrelationRef.String(), ev.Attributes, string(ev.Origin), ev.Edited,
+		ev.Locus.String(),
 	); err != nil {
 		return fmt.Errorf("insert event %q: %w", ev.ID, err)
 	}
@@ -299,6 +300,8 @@ func findByIdemKey(
 		ev     core.Event
 		idem   *string
 		origin string
+		corr   string
+		locus  string
 	)
 	err := q.QueryRow(ctx, `
 		SELECT id, tenant, idempotency_key, schema_version, source, type, subject,
@@ -307,8 +310,8 @@ func findByIdemKey(
 		FROM event WHERE tenant = $1 AND idempotency_key = $2`,
 		tenantID, idempotencyKey,
 	).Scan(&ev.ID, &ev.Tenant, &idem, &ev.SchemaVersion, &ev.Source, &ev.Type, &ev.Subject,
-		&ev.Actor, &ev.Title, &ev.OccurredAt, &ev.ReceivedAt, &ev.CorrelationRef, &ev.Attributes,
-		&origin, &ev.Edited, &ev.Locus)
+		&ev.Actor, &ev.Title, &ev.OccurredAt, &ev.ReceivedAt, &corr, &ev.Attributes,
+		&origin, &ev.Edited, &locus)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return core.Event{}, false, nil
 	}
@@ -320,6 +323,8 @@ func findByIdemKey(
 		ev.IdempotencyKey = *idem
 	}
 	ev.Origin = core.Origin(origin)
+	ev.CorrelationRef = core.RefFromRow(corr)
+	ev.Locus = core.LocusFromRow(locus)
 	return ev, true, nil
 }
 
@@ -340,7 +345,7 @@ var afterDeleteHook func()
 // applyToProjection folds one event onto its change, under the advisory locks that make
 // the read-modify-write a critical section.
 func applyToProjection(ctx context.Context, tx pgx.Tx, ev core.Event, out *appendOutcome) error {
-	ref := core.RefFor(ev)
+	ref := core.RefFor(ev).String()
 	if err := lockProjectionWrite(ctx, tx, ev.Tenant, ref, out); err != nil {
 		return err
 	}
@@ -446,13 +451,14 @@ func lockAndLoadChange(
 		startedAt *time.Time
 		endAt     *time.Time
 		st        string
+		storedRef string
 	)
 	err := tx.QueryRow(ctx, `
 		SELECT tenant, ref, subject, type, title, actor, start_at, started_at,
 		       first_seen_at, end_at, status, attributes, last_event_id
 		FROM change WHERE tenant = $1 AND ref = $2 FOR UPDATE`,
 		tenantID, ref,
-	).Scan(&c.Tenant, &c.Ref, &c.Subject, &c.Type, &c.Title, &c.Actor,
+	).Scan(&c.Tenant, &storedRef, &c.Subject, &c.Type, &c.Title, &c.Actor,
 		&c.Start, &startedAt, &c.FirstSeenAt, &endAt, &st, &c.Attributes, &c.LastEventID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return core.Change{}, false, nil
@@ -460,6 +466,7 @@ func lockAndLoadChange(
 	if err != nil {
 		return core.Change{}, false, fmt.Errorf("lock change %q/%q: %w", tenantID, ref, err)
 	}
+	c.Ref = core.RefFromRow(storedRef)
 	c.StartedAt = startedAt
 	c.End = endAt
 	c.Status = core.Status(st)
@@ -488,7 +495,7 @@ func upsertChange(ctx context.Context, tx pgx.Tx, c core.Change) error {
 		  first_seen_at=EXCLUDED.first_seen_at, end_at=EXCLUDED.end_at,
 		  status=EXCLUDED.status, attributes=EXCLUDED.attributes,
 		  last_event_id=EXCLUDED.last_event_id`,
-		c.Tenant, c.Ref, c.Subject, c.Type, c.Title, c.Actor,
+		c.Tenant, c.Ref.String(), c.Subject, c.Type, c.Title, c.Actor,
 		c.StartedAt, c.FirstSeenAt, c.End, string(c.Status), c.Attributes, c.LastEventID,
 	)
 	if err != nil {

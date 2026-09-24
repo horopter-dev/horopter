@@ -163,8 +163,8 @@ func (r *Renderer) Render(changes []core.Change, now time.Time) (any, error) {
 			name = c.Type
 		}
 		spans = append(spans, Span{
-			TraceID:           traceID(c.Tenant, c.Ref),
-			SpanID:            spanID(c.Tenant, c.Ref),
+			TraceID:           traceID(c.Tenant, c.Ref.String()),
+			SpanID:            spanID(c.Tenant, c.Ref.String()),
 			Name:              name,
 			StartTimeUnixNano: formatUnixNano(c.Start),
 			EndTimeUnixNano:   formatUnixNano(end),
@@ -201,7 +201,7 @@ func mergedAttributes(c core.Change) map[string]any {
 		attrs[k] = v
 	}
 	attrs["horopter.subject"] = c.Subject
-	attrs["horopter.ref"] = c.Ref
+	attrs["horopter.ref"] = c.Ref.String()
 	attrs["horopter.status"] = string(c.Status)
 	return attrs
 }

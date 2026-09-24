@@ -159,18 +159,27 @@ func changeSelection(q ChangeQuery) selection {
 //
 // The ref is split in Go rather than in SQL so e.id stays a primary-key comparison; a
 // predicate on e.locus || '/' || e.id would compute a value per row and scan the table.
-// A locus cannot contain '/', so cutting at the FIRST '/' recovers both halves exactly.
-//
-// There is deliberately no branch for a ref carrying no '/': strings.Cut then returns an
-// empty id, which no event id equals, so the id arm matches nothing — and nothing is the
-// right answer, since no ref is bare after 0006. Adding a branch to "handle" that case
-// can only make it match something.
+// core.ParseRef is what splits it, so the one statement of the encoding serves the read
+// side as well as the write side.
 func eventSelection(q EventQuery) selection {
 	query := `SELECT e.* FROM event e WHERE e.tenant = $1`
 	args := []any{q.tenant}
 	if q.Ref != "" {
-		locus, id, _ := strings.Cut(q.Ref, "/")
-		args = append(args, q.Ref, locus, id)
+		parsed, err := core.ParseRef(q.Ref)
+		if err != nil {
+			// A ref that does not parse names no change, so it must match nothing. Binding
+			// the impossible locus rather than returning an error keeps this function total
+			// and preserves the route's behaviour: a malformed ref answers 200 with an empty
+			// list, which TestListEventsIgnoresARefWithNoLocus and
+			// TestListEventsIgnoresARefWithAnEmptyLocus pin. The empty locus is what makes
+			// it impossible — event_locus_shape forbids one, so no row can carry it, which
+			// is the same reason the old strings.Cut form was safe, now stated rather than
+			// implied. The correlation_ref arm still binds q.Ref verbatim, so a stored ref
+			// ParseRef refuses stays findable by it.
+			args = append(args, q.Ref, "", "")
+		} else {
+			args = append(args, q.Ref, parsed.Locus().String(), parsed.ProducerRef())
+		}
 		query += fmt.Sprintf(
 			" AND (e.correlation_ref = $%d OR"+
 				" (e.correlation_ref = '' AND e.locus = $%d AND e.id = $%d))",
@@ -302,10 +311,12 @@ func scanEvents(rows pgx.Rows, tenantID string, extra ...any) ([]core.Event, err
 			ev     core.Event
 			idem   *string
 			origin string
+			corr   string
+			locus  string
 		)
 		dest := []any{&ev.ID, &ev.Tenant, &idem, &ev.SchemaVersion, &ev.Source, &ev.Type,
 			&ev.Subject, &ev.Actor, &ev.Title, &ev.OccurredAt, &ev.ReceivedAt,
-			&ev.CorrelationRef, &ev.Attributes, &origin, &ev.Edited, &ev.Locus}
+			&corr, &ev.Attributes, &origin, &ev.Edited, &locus}
 		if err := rows.Scan(append(dest, extra...)...); err != nil {
 			return nil, fmt.Errorf("scan event row for tenant %q: %w", tenantID, err)
 		}
@@ -313,6 +324,8 @@ func scanEvents(rows pgx.Rows, tenantID string, extra ...any) ([]core.Event, err
 			ev.IdempotencyKey = *idem
 		}
 		ev.Origin = core.Origin(origin)
+		ev.CorrelationRef = core.RefFromRow(corr)
+		ev.Locus = core.LocusFromRow(locus)
 		evs = append(evs, ev)
 	}
 	if err := rows.Err(); err != nil {
@@ -431,13 +444,15 @@ func scanChanges(rows pgx.Rows, extra ...any) ([]core.Change, error) {
 			startedAt *time.Time
 			endAt     *time.Time
 			st        string
+			ref       string
 		)
-		dest := []any{&c.Tenant, &c.Ref, &c.Subject, &c.Type, &c.Title,
+		dest := []any{&c.Tenant, &ref, &c.Subject, &c.Type, &c.Title,
 			&c.Actor, &c.Start, &startedAt, &c.FirstSeenAt, &endAt, &st,
 			&c.Attributes, &c.LastEventID}
 		if err := rows.Scan(append(dest, extra...)...); err != nil {
 			return nil, fmt.Errorf("scan change row: %w", err)
 		}
+		c.Ref = core.RefFromRow(ref)
 		c.StartedAt = startedAt
 		c.End = endAt
 		c.Status = core.Status(st)

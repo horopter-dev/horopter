@@ -105,7 +105,7 @@ func TestEventFromCloudEventLiftsEveryRecognisedDataKey(t *testing.T) {
 	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
 	require.NoError(t, err)
 
-	assert.Equal(t, "github/dep-7", ev.CorrelationRef,
+	assert.Equal(t, "github/dep-7", ev.CorrelationRef.String(),
 		"correlation_ref must be lifted out of data and prefixed with the locus")
 	assert.Equal(t, "Deploy api", ev.Title, "title must be lifted out of data")
 	assert.Equal(t, "alice", ev.Actor, "actor must be lifted out of data")
@@ -188,7 +188,7 @@ func TestEventFromCloudEventSetsLocusFromThePrincipal(t *testing.T) {
 
 	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
 	require.NoError(t, err)
-	assert.Equal(t, testPrincipal.Locus, ev.Locus)
+	assert.Equal(t, testPrincipal.Locus, ev.Locus.String())
 }
 
 // TestEventFromCloudEventRejectsARefOverTheCap pins that the CloudEvents path validates

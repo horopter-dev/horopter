@@ -141,7 +141,7 @@ func eventFromCloudEvent(
 		}
 		return ""
 	}
-	corr, err := resolveRef(p.Locus, pull("correlation_ref"))
+	corr, err := resolveRef(core.LocusFromRow(p.Locus), pull("correlation_ref"))
 	if err != nil {
 		// Wrapped for the same reason as the data-not-JSON-object case above: the taxonomy
 		// must hold even though the sole caller today answers every error from here 400
@@ -171,6 +171,6 @@ func eventFromCloudEvent(
 		CorrelationRef: corr,
 		Attributes:     attrs,
 		Origin:         p.Origin,
-		Locus:          p.Locus,
+		Locus:          core.LocusFromRow(p.Locus),
 	}, nil
 }

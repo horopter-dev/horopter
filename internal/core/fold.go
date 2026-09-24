@@ -37,11 +37,15 @@ func isStartType(t string) bool {
 // composed at ingest by resolveRef, and a point's is composed here. Composing a point's
 // from the stored event — rather than prefixing the projection — is what keeps
 // RebuildProjection able to reproduce it from the log alone.
-func RefFor(ev Event) string {
-	if ev.CorrelationRef != "" {
+//
+// The point branch constructs a Ref directly rather than through NewRef because both
+// halves are already validated — the locus by Validate, the id by ulid.ParseStrict — and
+// because RefFor has no error return to give: Fold calls it and must stay total.
+func RefFor(ev Event) Ref {
+	if !ev.CorrelationRef.IsZero() {
 		return ev.CorrelationRef
 	}
-	return ev.Locus + "/" + ev.ID
+	return Ref{s: ev.Locus.String() + "/" + ev.ID}
 }
 
 // mergedAttributes returns cur's attributes overlaid with ev's, in a fresh map. Fold's
@@ -63,7 +67,7 @@ func mergedAttributes(cur *Change, ev Event) map[string]any {
 
 // Fold applies one event to a change and returns the result. cur is nil for
 // the first event of a ref, but a zero-value *Change (as produced by, e.g.,
-// `c := m[ref]; m[ref] = Fold(&c, ev)` over a map[string]Change) must yield
+// `c := m[ref]; m[ref] = Fold(&c, ev)` over a map[Ref]Change) must yield
 // the identical result. Both spellings are natural when accumulating into a
 // map, and a rebuild that picked the zero-value one must not diverge from the
 // incremental path, which passes nil.
@@ -153,7 +157,7 @@ func Fold(cur *Change, ev Event) Change {
 // through either would reach back into the caller's Change.
 func foldLifecycle(out *Change, ev Event) {
 	switch {
-	case ev.CorrelationRef == "":
+	case ev.CorrelationRef.IsZero():
 		at := ev.OccurredAt
 		out.End = &at
 		out.Status = StatusOccurred

@@ -155,10 +155,15 @@ func subjectAllowed(pattern, subject string) bool {
 	return ok
 }
 
-// resolveRef validates the producer's ref as given, prefixes it with the credential's
+// resolveRef validates the producer's ref as given, composes it with the credential's
 // locus, and caps the composed form — the form that is actually stored, so the length
 // cap applies to what is stored rather than to what the producer sent. An empty ref
-// stays empty: a point event has no correlation ref to namespace.
+// yields the zero core.Ref: a point event has no correlation ref to namespace.
+//
+// This is the anti-corruption boundary between the wire and the domain. The composition
+// itself belongs to core.NewRef; what stays here are the two rules about what a PRODUCER
+// may send, which are auth's business rather than the type's — the ordering guard below
+// and the byte cap.
 //
 // ValidateRef must run on ref BEFORE it is composed with locus, not after. Composing
 // first can move a leading or trailing space away from the string's edge: " deploy-1"
@@ -166,19 +171,22 @@ func subjectAllowed(pattern, subject string) bool {
 // the middle once prefixed. That check exists for exactly this producer mistake — an
 // untrimmed ref posts a start under one ref and its completion under another, and
 // nothing errors — so disabling it for the composed form defeats the reason it exists.
-func resolveRef(locus, ref string) (string, error) {
+func resolveRef(locus core.Locus, ref string) (core.Ref, error) {
 	if ref == "" {
-		return "", nil
+		return core.Ref{}, nil
 	}
 	if err := auth.ValidateRef(ref); err != nil {
-		return "", err
+		return core.Ref{}, err
 	}
-	stored := locus + "/" + ref
-	if len(stored) > auth.MaxRefBytes {
-		return "", fmt.Errorf("ref %q is %d bytes once prefixed with locus %q; the "+
-			"limit is %d", ref, len(stored), locus, auth.MaxRefBytes)
+	composed, err := core.NewRef(locus, ref)
+	if err != nil {
+		return core.Ref{}, err
 	}
-	return stored, nil
+	if len(composed.String()) > auth.MaxRefBytes {
+		return core.Ref{}, fmt.Errorf("ref %q is %d bytes once prefixed with locus %q; the "+
+			"limit is %d", ref, len(composed.String()), locus, auth.MaxRefBytes)
+	}
+	return composed, nil
 }
 
 // subjectForbidden answers a subject the credential's subject_pattern does not cover.
@@ -205,7 +213,7 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		subjectForbidden(w, p.SubjectPattern, req.Subject)
 		return
 	}
-	ref, err := resolveRef(p.Locus, req.CorrelationRef)
+	ref, err := resolveRef(core.LocusFromRow(p.Locus), req.CorrelationRef)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -228,7 +236,7 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		CorrelationRef: ref,
 		Attributes:     req.Attributes,
 		Origin:         p.Origin,
-		Locus:          p.Locus,
+		Locus:          core.LocusFromRow(p.Locus),
 	}
 	s.append(w, r, ev)
 }
@@ -244,7 +252,7 @@ func (s *Server) append(w http.ResponseWriter, r *http.Request, ev core.Event) {
 		status = http.StatusCreated
 	}
 	writeJSON(w, status, map[string]any{
-		"id": stored.ID, "ref": core.RefFor(stored), "created": created,
+		"id": stored.ID, "ref": core.RefFor(stored).String(), "created": created,
 	})
 }
 
