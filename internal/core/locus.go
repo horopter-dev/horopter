@@ -10,9 +10,9 @@ import (
 // conversion, because a locus containing "/" would make <locus>/<ref> unsplittable and
 // that is the one property every ref in the system rests on.
 //
-// See decisions/2026-09-22-credentials-carry-source-and-locus.md for why refs are
-// namespaced at all, and the design doc for why the namespace is encoded into the ref
-// string rather than stored as its own column.
+// See decisions/2026-09-22-credentials-carry-source-and-locus.md, in the horopter-internal
+// repository, for why refs are namespaced at all, and the design doc there for why the
+// namespace is encoded into the ref string rather than stored as its own column.
 type Locus struct{ v string }
 
 // NewLocus validates the two rules the ref encoding depends on: a locus must be non-empty,
