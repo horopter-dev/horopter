@@ -38,14 +38,14 @@ func isStartType(t string) bool {
 // from the stored event — rather than prefixing the projection — is what keeps
 // RebuildProjection able to reproduce it from the log alone.
 //
-// The point branch constructs a Ref directly rather than through NewRef because both
-// halves are already validated — the locus by Validate, the id by ulid.ParseStrict — and
-// because RefFor has no error return to give: Fold calls it and must stay total.
+// The point branch calls composeRef rather than NewRef because both halves are already
+// validated — the locus by Validate, the id by ulid.ParseStrict — and because RefFor has no
+// error return to give: Fold calls it and must stay total.
 func RefFor(ev Event) Ref {
 	if !ev.CorrelationRef.IsZero() {
 		return ev.CorrelationRef
 	}
-	return Ref{s: ev.Locus.String() + "/" + ev.ID}
+	return composeRef(ev.Locus, ev.ID)
 }
 
 // mergedAttributes returns cur's attributes overlaid with ev's, in a fresh map. Fold's

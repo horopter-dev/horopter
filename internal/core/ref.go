@@ -39,7 +39,17 @@ func NewRef(locus Locus, producer string) (Ref, error) {
 	if producer == "" {
 		return Ref{}, fmt.Errorf("ref under locus %q is empty", locus.v)
 	}
-	return Ref{s: locus.v + "/" + producer}, nil
+	return composeRef(locus, producer), nil
+}
+
+// composeRef is the one statement of the encoding: <locus>/<producer>. NewRef and RefFor
+// both build through it, so nothing else may restate the separator.
+//
+// It does not validate: NewRef checks locus and producer before calling it, and RefFor may
+// call it directly because a point event's locus and id are already validated by the time
+// Fold runs.
+func composeRef(locus Locus, producer string) Ref {
+	return Ref{s: locus.v + "/" + producer}
 }
 
 // ParseRef splits at the FIRST "/". A locus cannot contain one, so both halves are recovered
