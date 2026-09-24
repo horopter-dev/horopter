@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"horopter.dev/horopter/internal/auth"
+	"horopter.dev/horopter/internal/core"
 )
 
 // runAdminKeys dispatches admin keys' sub-verbs.
@@ -58,7 +59,9 @@ func runKeysIssue(args []string) error {
 		return helpOrErr(err)
 	}
 
-	effectiveLocus, err := resolveAndValidateIssue(*role, *source, *locus)
+	effectiveLocus, err := resolveAndValidateIssue(issueFlags{
+		role: *role, source: *source, locus: *locus,
+	})
 	if err != nil {
 		return err
 	}
@@ -80,7 +83,7 @@ func runKeysIssue(args []string) error {
 	}
 
 	if err := issueCredentialTx(ctx, pool, issueParams{
-		tenant: *tenant, role: *role, source: *source, locus: effectiveLocus,
+		tenant: *tenant, role: *role, source: *source, locus: effectiveLocus.String(),
 		subjectPattern: *subjectPattern, prefix: prefix, hash: hash,
 	}); err != nil {
 		return err
@@ -95,11 +98,19 @@ func runKeysIssue(args []string) error {
 	return nil
 }
 
-func validateIssueFlags(role, source string) error {
-	if role == "" {
+// issueFlags carries the three issue-time flags together so callers name each one. They
+// were three bare string parameters, which made every call site a place a transposition
+// could hide: role, source and locus are interchangeable to the compiler and not to the
+// code, since a swapped role becomes the locus and a swapped source changes which value
+// the locus defaults from. bootstrap.go already passes its flags this way as
+// bootstrapRequest; this is the same answer applied to the file that lacked it.
+type issueFlags struct{ role, source, locus string }
+
+func validateIssueFlags(f issueFlags) error {
+	if f.role == "" {
 		return errors.New("--role is required")
 	}
-	if source == "" {
+	if f.source == "" {
 		return errors.New("--source is required")
 	}
 	return nil
@@ -109,15 +120,25 @@ func validateIssueFlags(role, source string) error {
 // flags and the locus, for which ValidateLocus gives a readable error rather than the
 // credential_locus_shape constraint violation the insert would surface. Split out of
 // runKeysIssue to keep that function's own branching within the complexity limit.
-func resolveAndValidateIssue(role, source, locus string) (string, error) {
-	if err := validateIssueFlags(role, source); err != nil {
-		return "", err
+//
+// It returns a core.Locus rather than a string because by this point the value has been
+// through auth.ValidateLocus, and the type is what says so — a caller cannot mistake it
+// for an unchecked flag value.
+func resolveAndValidateIssue(f issueFlags) (core.Locus, error) {
+	if err := validateIssueFlags(f); err != nil {
+		return core.Locus{}, err
 	}
-	effectiveLocus := resolveLocus(source, locus)
-	if err := auth.ValidateLocus(effectiveLocus); err != nil {
-		return "", err
+	effective := resolveLocus(f)
+	if err := auth.ValidateLocus(effective); err != nil {
+		return core.Locus{}, err
 	}
-	return effectiveLocus, nil
+	// ValidateLocus is the stricter of the two: it enforces core.NewLocus's rules and
+	// three more, so this cannot fail where that succeeded.
+	locus, err := core.NewLocus(effective)
+	if err != nil {
+		return core.Locus{}, err
+	}
+	return locus, nil
 }
 
 // checkRoleAllowsSubjectPattern refuses a subject pattern on any role whose capabilities reach
