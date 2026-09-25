@@ -656,7 +656,7 @@ interesting paths reachable:
 ## CloudEvents: reserved data keys
 
 `POST /v1/events/cloudevents` takes a CloudEvents envelope. CloudEvents carries an
-instant but no duration or lifecycle, so three fields that `POST /v1/events` sends as
+instant but no duration or lifecycle, so four fields that `POST /v1/events` sends as
 first-class request fields travel in the `data` payload instead:
 
 | data key | becomes | if absent |
@@ -664,21 +664,72 @@ first-class request fields travel in the `data` payload instead:
 | `correlation_ref` | the ref two events share to describe one interval | the event stands alone as a point |
 | `title` | the change title | falls back to the event type |
 | `actor` | who performed the change | empty |
+| `lifecycle` | the explicit lifecycle assertion | the type's suffix decides — see below |
 
-These three keys are **reserved**: each is lifted into its field and removed from the
+These four keys are **reserved**: each is lifted into its field and removed from the
 attribute map, so it is not also stored as a generic attribute. Every other key in `data`
 is kept as an attribute untouched.
 
 A reserved key holding a non-string value is left alone rather than coerced — `{"title":
 7}` stays an attribute and the title falls back as though it were absent.
 
-CloudEvents carries no tenancy either, but `tenant` is not a fourth reserved key: it is
-derived from the credential, the same as on `POST /v1/events`, and a `data.tenant` of any
-kind — including `null` — is rejected with `400` rather than read.
+CloudEvents carries no tenancy either, but `tenant` is not one more reserved key alongside
+the ones above: it is derived from the credential, the same as on `POST /v1/events`, and a
+`data.tenant` of any kind — including `null` — is rejected with `400` rather than read.
 
 The envelope's own `time` supplies `occurred_at`. It is optional in CloudEvents; when it
 is missing, receipt time is used, since that is the earliest moment the system can attest
 to.
+
+## Type suffixes and the lifecycle field
+
+Every event asserts something about its change's lifecycle: whether a projection opens,
+stays open, or closes. The assertion comes from the explicit `lifecycle` field on
+`POST /v1/events` (or the `lifecycle` data key on the CloudEvents route, above) when the
+producer sets one; the event type's final dot-separated segment decides otherwise. The
+suffix vocabulary below is transcribed from `internal/core/fold.go`'s `StatusForType` and
+`isStartType`, the only place it is defined — read there if this ever needs rechecking.
+
+A type ending in `.started` or `.begun` asserts a start. A type ending in one of these
+suffixes asserts the terminal status next to it:
+
+| status | suffixes |
+|---|---|
+| `completed` | `.completed`, `.finished`, `.succeeded`, `.resolved`, `.closed`, `.done`, `.ended` |
+| `failed` | `.failed`, `.errored`, `.timed_out` |
+| `rolled_back` | `.rolled_back`, `.rolledback` |
+| `cancelled` | `.cancelled`, `.canceled`, `.aborted` |
+
+A type matching none of these — `deployment.annotated`, say — asserts nothing by suffix.
+
+The explicit `lifecycle` field overrides the suffix entirely, for producers whose own type
+vocabulary does not follow it: `started`, `completed`, `failed`, `rolled_back` and
+`cancelled` assert exactly what their names say, whatever the event's type ends in. `none`
+asserts nothing, and is how a producer whose type happens to end in `.started` (a type
+reused from another system, say) records that particular event as a point rather than the
+start of an interval.
+
+Absence — no `lifecycle` field, no `lifecycle` data key — does not mean "nothing happened";
+it means the type's suffix decides. Only an explicit `none`, or a type matching neither list
+above, leaves an event with no lifecycle assertion at all.
+
+## The append response
+
+`POST /v1/events` and `POST /v1/events/cloudevents` answer the same four fields:
+
+| field | goes |
+|---|---|
+| `id` | nowhere — it identifies the *event*, for dedup and audit |
+| `ref` | `GET /v1/changes?ref=…` |
+| `correlation_ref` | the next append's `correlation_ref` |
+| `created` | nowhere — it says whether this append created the event or matched an existing idempotency key |
+
+`correlation_ref` is the amend handle: to add another event to this same change, echo it
+back, unmodified, as that next event's own `correlation_ref`. Do **not** echo `ref` there
+instead — `ref` is already prefixed with the credential's locus, so composing it again
+prefixes it a second time and silently addresses a different change. `id` names the event,
+not the change, and has no second use; `ref` is for looking a change up by its stored
+identity, not for amending it.
 
 ## Attributes
 

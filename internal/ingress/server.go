@@ -254,9 +254,20 @@ func (s *Server) append(w http.ResponseWriter, r *http.Request, ev core.Event) {
 		status = http.StatusCreated
 	}
 	writeJSON(w, status, map[string]any{
-		"id": stored.ID, "ref": core.RefFor(stored).String(), "created": created,
+		"id": stored.ID, "ref": core.RefFor(stored).String(),
+		"correlation_ref": amendHandle(stored), "created": created,
 	})
 }
+
+// amendHandle returns the value a producer echoes into the NEXT event's correlation_ref to
+// amend this change.
+//
+// It is RefFor composed with ProducerRef, which are inverses, and that is the whole point:
+// for a point the result is the event's own id, for a correlated event it is what the
+// producer sent, and for a producer ref containing "/" it is the whole thing, since only
+// the first cut is taken. A producer never has to know which case they are in — and if the
+// ref encoding ever changes, both halves move together.
+func amendHandle(ev core.Event) string { return core.RefFor(ev).ProducerRef() }
 
 // appendFailed answers a failed append, and the distinction it draws is the whole point
 // of core.ErrInvalidEvent. Producers treat 4xx as "do not retry", so answering a

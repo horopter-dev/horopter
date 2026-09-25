@@ -523,6 +523,76 @@ func TestPostEventRefusesAnUnknownLifecycle(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "started", "and list what is permitted")
 }
 
+// TestAmendHandleRoundTrips is the assertion the ref/id fork needs, and it has to ECHO the
+// value rather than inspect it: a test asserting the response's shape passes while the
+// documented handle still forks.
+//
+// One change with both events is the discriminating assertion. Echoing the stored ref
+// instead composes a second locus prefix and creates a SECOND change, which no
+// single-change assertion would notice.
+func TestAmendHandleRoundTrips(t *testing.T) {
+	f := newIngressFixture(t)
+	open := fmt.Sprintf(`{"source":"ci","type":"deployment.started",
+		"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z",
+		"idempotency_key":%q}`, idemKey(t, "open"))
+	rec := post(t, f.srv, f.producerKey, open)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var opened map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &opened))
+	handle, ok := opened["correlation_ref"].(string)
+	require.True(t, ok, "the response must carry a correlation_ref handle")
+	require.NotEmpty(t, handle, "the response must carry an amend handle")
+
+	// Verbatim. Any transformation here would test the test rather than the contract.
+	closeBody := fmt.Sprintf(`{"source":"ci","type":"deployment.completed",
+		"subject":"acme/prod","occurred_at":"2026-09-22T01:00:00Z",
+		"correlation_ref":%q,"idempotency_key":%q}`, handle, idemKey(t, "close"))
+	rec = post(t, f.srv, f.producerKey, closeBody)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var closed map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &closed))
+	require.Equal(t, handle, closed["correlation_ref"],
+		"the handle is stable across appends to one change")
+
+	var changes int
+	require.NoError(t, f.store.Pool().QueryRow(context.Background(),
+		`SELECT count(*) FROM change WHERE tenant = $1`,
+		f.producerTenant.String()).Scan(&changes))
+	assert.Equal(t, 1, changes,
+		"echoing the handle must amend the change, not fork a second one")
+
+	var status, lastEvent string
+	require.NoError(t, f.store.Pool().QueryRow(context.Background(),
+		`SELECT status, last_event_id FROM change WHERE tenant = $1`,
+		f.producerTenant.String()).Scan(&status, &lastEvent))
+	assert.Equal(t, "completed", status,
+		"the change opened and then closed, rather than being a point from the start")
+	assert.Equal(t, closed["id"], lastEvent,
+		"both events landed on it, and the amending one folded last")
+}
+
+// TestAmendHandleRoundTripsForASlashedProducerRef is the Review Focus case. ProducerRef
+// cuts at the FIRST slash only, so a producer ref containing one comes back whole —
+// splitting on every slash would truncate it to "repo#123" and the echo would address
+// nothing.
+func TestAmendHandleRoundTripsForASlashedProducerRef(t *testing.T) {
+	f := newIngressFixture(t)
+	body := fmt.Sprintf(`{"source":"ci","type":"deployment.started",
+		"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z",
+		"correlation_ref":"myorg/repo#123","idempotency_key":%q}`, idemKey(t, "1"))
+	rec := post(t, f.srv, f.producerKey, body)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, "myorg/repo#123", got["correlation_ref"],
+		"only the locus is stripped; the producer's own slashes survive")
+	assert.Equal(t, "github/myorg/repo#123", got["ref"],
+		"and the stored ref keeps the locus the credential supplied")
+}
+
 // TestPostEventRecordsTheTenantOnTheSpan pins horopter.tenant on the request's server
 // span. It must be set once per request, on the span that exists for every request,
 // rather than only on the ones that reach the store.
