@@ -73,17 +73,33 @@ type ingressFixture struct {
 
 func newIngressFixture(t *testing.T, opts ...postgres.Option) ingressFixture {
 	t.Helper()
+	return newIngressFixtureOpts(t, opts, nil)
+}
+
+// newIngressFixtureWith builds the same fixture with ingress options, for the handful of
+// tests that exercise a non-default server configuration.
+func newIngressFixtureWith(t *testing.T, srvOpts ...ingress.Option) ingressFixture {
+	t.Helper()
+	return newIngressFixtureOpts(t, nil, srvOpts)
+}
+
+// newIngressFixtureOpts is the one body both constructors share, so a change to the fixture
+// cannot apply to only one of them.
+func newIngressFixtureOpts(
+	t *testing.T, storeOpts []postgres.Option, srvOpts []ingress.Option,
+) ingressFixture {
+	t.Helper()
 	v := os.Getenv("HOROPTER_TEST_DSN")
 	if v == "" {
 		t.Skip("set HOROPTER_TEST_DSN to run ingress tests (docker compose up -d db)")
 	}
-	s, err := postgres.Open(context.Background(), v, opts...)
+	s, err := postgres.Open(context.Background(), v, storeOpts...)
 	require.NoError(t, err)
 	t.Cleanup(s.Close)
 
 	clock := func() time.Time { return fixed }
 	authn := auth.New(auth.NewStore(s.Pool()), clock, auth.DefaultOptions())
-	srv, err := ingress.New(s, clock, rand.Reader, authn)
+	srv, err := ingress.New(s, clock, rand.Reader, authn, srvOpts...)
 	require.NoError(t, err)
 
 	producerTenant, producerKey := seedCredential(t, s, "github", "")
@@ -571,6 +587,63 @@ func TestAmendHandleRoundTrips(t *testing.T) {
 		"the change opened and then closed, rather than being a point from the start")
 	assert.Equal(t, closed["id"], lastEvent,
 		"both events landed on it, and the amending one folded last")
+}
+
+// TestPostRefusesARefStartingWithTheCredentialsLocus pins the guard against the one shape
+// that used to fork silently. The fixture's credential has locus "github", so a producer
+// echoing the append response's "ref" — already prefixed — sends "github/dep-1", which would
+// compose and store "github/github/dep-1": a second change, with nothing erroring.
+//
+// The assertion names the composed value rather than just the status, because a 400 for the
+// wrong reason (a length or whitespace failure, say) would pass a status-only check.
+func TestPostRefusesARefStartingWithTheCredentialsLocus(t *testing.T) {
+	f := newIngressFixture(t)
+	body := fmt.Sprintf(`{"source":"ci","type":"deployment.started",
+		"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z",
+		"correlation_ref":"github/dep-1","idempotency_key":%q}`, idemKey(t, "1"))
+	rec := post(t, f.srv, f.producerKey, body)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "github/github/dep-1",
+		"the refusal must show what would have been stored, or the caller cannot see the bug")
+	assert.Contains(t, rec.Body.String(), "correlation_ref",
+		"and must name the field to echo instead of ref")
+}
+
+// TestPostAcceptsALocusPrefixedRefWhenAllowed is the escape hatch the guard needs: a producer
+// whose locus is "github" and whose own refs genuinely begin "github/" is not wrong, just
+// unusual, and an operator can say so.
+//
+// It asserts the STORED ref, not just the status. A guard lifted by silently stripping the
+// prefix would also return 201, and that is the behaviour this design rejected.
+func TestPostAcceptsALocusPrefixedRefWhenAllowed(t *testing.T) {
+	f := newIngressFixtureWith(t, ingress.WithAllowLocusPrefixedRef(true))
+	body := fmt.Sprintf(`{"source":"ci","type":"deployment.started",
+		"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z",
+		"correlation_ref":"github/dep-1","idempotency_key":%q}`, idemKey(t, "1"))
+	rec := post(t, f.srv, f.producerKey, body)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, "github/github/dep-1", got["ref"],
+		"lifting the guard stores the composed ref; it does not strip the prefix")
+}
+
+// TestPostAcceptsASlashedRefThatIsNotLocusPrefixed keeps the guard narrow. Only the echo
+// shape is refused — a path-shaped producer ref, which this domain is full of, still works
+// with the guard on.
+func TestPostAcceptsASlashedRefThatIsNotLocusPrefixed(t *testing.T) {
+	f := newIngressFixture(t)
+	body := fmt.Sprintf(`{"source":"ci","type":"deployment.started",
+		"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z",
+		"correlation_ref":"myorg/repo#123","idempotency_key":%q}`, idemKey(t, "1"))
+	rec := post(t, f.srv, f.producerKey, body)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, "github/myorg/repo#123", got["ref"])
 }
 
 // TestAmendHandleRoundTripsForASlashedProducerRef is the Review Focus case. ProducerRef

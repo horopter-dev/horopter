@@ -103,7 +103,7 @@ func TestEventFromCloudEventLiftsEveryRecognisedDataKey(t *testing.T) {
 		"region":          "eu-west-1",
 	})
 
-	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
+	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal, false)
 	require.NoError(t, err)
 
 	assert.Equal(t, "github/dep-7", ev.CorrelationRef.String(),
@@ -123,7 +123,7 @@ func TestEventFromCloudEventLiftsEveryRecognisedDataKey(t *testing.T) {
 func TestEventFromCloudEventWithoutActorIsValid(t *testing.T) {
 	ce := ceWithData(t, map[string]any{"correlation_ref": "dep-7"})
 
-	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
+	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal, false)
 	require.NoError(t, err)
 	assert.Empty(t, ev.Actor, "an event carrying no actor is accepted with an empty one")
 }
@@ -134,7 +134,7 @@ func TestEventFromCloudEventWithoutActorIsValid(t *testing.T) {
 func TestEventFromCloudEventLeavesNonStringRecognisedKeysAsAttributes(t *testing.T) {
 	ce := ceWithData(t, map[string]any{"title": 7, "actor": true, "lifecycle": 7})
 
-	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
+	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal, false)
 	require.NoError(t, err)
 
 	assert.Empty(t, ev.Title, "a non-string title must not be coerced into the field")
@@ -152,7 +152,7 @@ func TestEventFromCloudEventLeavesNonStringRecognisedKeysAsAttributes(t *testing
 func TestEventFromCloudEventTakesTenantFromThePrincipal(t *testing.T) {
 	ce := ceWithData(t, map[string]any{"correlation_ref": "dep-7"})
 
-	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
+	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal, false)
 	require.NoError(t, err)
 	assert.Equal(t, testPrincipal.Tenant.String(), ev.Tenant)
 }
@@ -165,7 +165,7 @@ func TestEventFromCloudEventRejectsDataCarryingTenant(t *testing.T) {
 	for name, tenant := range map[string]any{"string": "other", "number": 7, "null": nil} {
 		t.Run(name, func(t *testing.T) {
 			ce := ceWithData(t, map[string]any{"tenant": tenant, "correlation_ref": "dep-7"})
-			_, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
+			_, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal, false)
 			require.Error(t, err)
 			assert.ErrorIs(t, err, core.ErrInvalidEvent)
 			assert.Contains(t, err.Error(), "tenant is derived from the credential")
@@ -179,7 +179,7 @@ func TestEventFromCloudEventRejectsDataCarryingTenant(t *testing.T) {
 func TestEventFromCloudEventSetsOriginFromThePrincipal(t *testing.T) {
 	ce := ceWithData(t, map[string]any{"correlation_ref": "dep-7"})
 
-	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
+	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal, false)
 	require.NoError(t, err)
 	assert.Equal(t, core.OriginProcess, ev.Origin)
 }
@@ -191,7 +191,7 @@ func TestEventFromCloudEventSetsOriginFromThePrincipal(t *testing.T) {
 func TestEventFromCloudEventSetsLocusFromThePrincipal(t *testing.T) {
 	ce := ceWithData(t, map[string]any{"correlation_ref": "dep-7"})
 
-	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
+	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal, false)
 	require.NoError(t, err)
 	assert.Equal(t, testPrincipal.Locus, ev.Locus.String())
 }
@@ -207,7 +207,7 @@ func TestEventFromCloudEventRejectsARefOverTheCap(t *testing.T) {
 		"correlation_ref": strings.Repeat("x", auth.MaxRefBytes-len("github/")+1),
 	})
 
-	_, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
+	_, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal, false)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidEvent)
 	assert.Contains(t, err.Error(), "ref")
@@ -222,7 +222,7 @@ func TestEventFromCloudEventRejectsARefOverTheCap(t *testing.T) {
 func TestEventFromCloudEventRejectsARefWithLeadingWhitespaceEvenAfterTheLocusPrefix(t *testing.T) {
 	ce := ceWithData(t, map[string]any{"correlation_ref": " dep-1"})
 
-	_, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
+	_, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal, false)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidEvent)
 	assert.Contains(t, err.Error(), "whitespace")
@@ -233,7 +233,7 @@ func TestEventFromCloudEventRejectsARefWithLeadingWhitespaceEvenAfterTheLocusPre
 func TestEventFromCloudEventDataOmittingTenantIsAccepted(t *testing.T) {
 	ce := ceWithData(t, map[string]any{"correlation_ref": "dep-7"})
 
-	_, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
+	_, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal, false)
 	assert.NoError(t, err)
 }
 
@@ -246,7 +246,7 @@ func TestEventFromCloudEventFallsBackToReceiptTimeWithoutAnEnvelopeTime(t *testi
 	ce := ceWithData(t, map[string]any{"correlation_ref": "dep-7"})
 	ce.SetTime(time.Time{})
 
-	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
+	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal, false)
 	require.NoError(t, err)
 
 	assert.Equal(t, ceNow, ev.OccurredAt,
@@ -259,7 +259,7 @@ func TestEventFromCloudEventFallsBackToReceiptTimeWithoutAnEnvelopeTime(t *testi
 func TestEventFromCloudEventKeepsAnEnvelopeTime(t *testing.T) {
 	ce := ceWithData(t, map[string]any{"correlation_ref": "dep-7"})
 
-	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
+	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal, false)
 	require.NoError(t, err)
 	assert.Equal(t, ceOccurred, ev.OccurredAt, "a stated occurrence time must be preserved")
 }

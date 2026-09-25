@@ -49,7 +49,8 @@ func (s *Server) postCloudEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	p, _ := auth.PrincipalFrom(r.Context())
 	now := s.clock()
-	ev, err := eventFromCloudEvent(ce, now, core.NewULID(now, s.entropy), p)
+	ev, err := eventFromCloudEvent(
+		ce, now, core.NewULID(now, s.entropy), p, s.allowLocusPrefixedRef)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -100,7 +101,7 @@ func idempotencyKey(source, id string) string {
 // the idempotency key, which makes producer retries safe for free. Tenant and origin come
 // from p, the resolved credential, never from the envelope: see postCloudEvent.
 func eventFromCloudEvent(
-	ce cloudevents.Event, now time.Time, id string, p auth.Principal,
+	ce cloudevents.Event, now time.Time, id string, p auth.Principal, allowLocusPrefix bool,
 ) (core.Event, error) {
 	attrs := map[string]any{}
 	if len(ce.Data()) > 0 {
@@ -141,7 +142,8 @@ func eventFromCloudEvent(
 		}
 		return ""
 	}
-	corr, err := resolveRef(core.LocusFromRow(p.Locus), pull("correlation_ref"))
+	corr, err := resolveRef(
+		core.LocusFromRow(p.Locus), pull("correlation_ref"), allowLocusPrefix)
 	if err != nil {
 		// Wrapped for the same reason as the data-not-JSON-object case above: the taxonomy
 		// must hold even though the sole caller today answers every error from here 400

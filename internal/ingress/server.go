@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -43,6 +44,9 @@ type Server struct {
 	clock   func() time.Time
 	entropy io.Reader
 	authn   *auth.Authenticator
+	// allowLocusPrefixedRef lifts the guard in resolveRef. False is the safe default and
+	// the zero value, so a Server built without the option keeps the guard.
+	allowLocusPrefixedRef bool
 }
 
 // New returns an ingress Server. clock and entropy are injected so handlers stay
@@ -53,6 +57,7 @@ type Server struct {
 // request or, worse, need every caller to remember the guard itself.
 func New(
 	s *postgres.Store, clock func() time.Time, entropy io.Reader, authn *auth.Authenticator,
+	opts ...Option,
 ) (*Server, error) {
 	if authn == nil {
 		return nil, errors.New(
@@ -60,8 +65,21 @@ func New(
 				"store — a nil authenticator would panic on the first request rather than " +
 				"reject it")
 	}
-	return &Server{store: s, clock: clock, entropy: entropy, authn: authn}, nil
+	srv := &Server{store: s, clock: clock, entropy: entropy, authn: authn}
+	for _, opt := range opts {
+		opt(srv)
+	}
+	return srv, nil
 }
+
+// WithAllowLocusPrefixedRef lifts the guard against a correlation_ref whose first segment is
+// the credential's own locus. See AllowLocusPrefixedRefFromEnv for why it defaults to off.
+func WithAllowLocusPrefixedRef(allow bool) Option {
+	return func(s *Server) { s.allowLocusPrefixedRef = allow }
+}
+
+// Option configures a Server at construction.
+type Option func(*Server)
 
 // Routes returns the handler for every ingress endpoint. Probes are unauthenticated;
 // everything else requires a credential granting the append capability.
@@ -172,12 +190,24 @@ func subjectAllowed(pattern, subject string) bool {
 // the middle once prefixed. That check exists for exactly this producer mistake — an
 // untrimmed ref posts a start under one ref and its completion under another, and
 // nothing errors — so disabling it for the composed form defeats the reason it exists.
-func resolveRef(locus core.Locus, ref string) (core.Ref, error) {
+func resolveRef(locus core.Locus, ref string, allowLocusPrefix bool) (core.Ref, error) {
 	if ref == "" {
 		return core.Ref{}, nil
 	}
 	if err := auth.ValidateRef(ref); err != nil {
 		return core.Ref{}, err
+	}
+	if !allowLocusPrefix {
+		if first, _, found := strings.Cut(ref, "/"); found && first == locus.String() {
+			return core.Ref{}, fmt.Errorf(
+				"correlation_ref %q already starts with this credential's locus %q, so "+
+					"storing it would compose %q and address a different change than the "+
+					"one you meant; echo the append response's \"correlation_ref\" rather "+
+					"than its \"ref\", which is already prefixed. Set %s=true if your refs "+
+					"genuinely begin %q",
+				ref, locus, locus.String()+"/"+ref, allowLocusPrefixedRefVar,
+				locus.String()+"/")
+		}
 	}
 	composed, err := core.NewRef(locus, ref)
 	if err != nil {
@@ -214,7 +244,7 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		subjectForbidden(w, p.SubjectPattern, req.Subject)
 		return
 	}
-	ref, err := resolveRef(core.LocusFromRow(p.Locus), req.CorrelationRef)
+	ref, err := resolveRef(core.LocusFromRow(p.Locus), req.CorrelationRef, s.allowLocusPrefixedRef)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

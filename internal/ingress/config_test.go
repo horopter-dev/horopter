@@ -11,6 +11,42 @@ import (
 
 const maxAttributeBytesVar = "HOROPTER_INGRESS_MAX_EVENT_ATTRIBUTE_BYTES"
 
+const allowLocusPrefixedRefVar = "HOROPTER_INGRESS_ALLOW_LOCUS_PREFIXED_REF"
+
+// TestAllowLocusPrefixedRefFromEnv pins the DEFAULT as much as the parsing. Unset must mean
+// guard on: a mutation flipping that default is invisible to every handler test, because
+// those build the Server through an option rather than the environment.
+func TestAllowLocusPrefixedRefFromEnv(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"", false},
+		{"false", false},
+		{"0", false},
+		{"true", true},
+		{"1", true},
+	} {
+		t.Run("accepts "+strconv.Quote(tc.value), func(t *testing.T) {
+			t.Setenv(allowLocusPrefixedRefVar, tc.value)
+			got, err := ingress.AllowLocusPrefixedRefFromEnv()
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+
+	for _, bad := range []string{"yes", "on", "maybe", "2"} {
+		t.Run("refuses "+strconv.Quote(bad), func(t *testing.T) {
+			t.Setenv(allowLocusPrefixedRefVar, bad)
+			_, err := ingress.AllowLocusPrefixedRefFromEnv()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), allowLocusPrefixedRefVar,
+				"the error must name the variable an operator has to fix")
+			assert.Contains(t, err.Error(), bad, "and the value they set")
+		})
+	}
+}
+
 func TestMaxAttributeBytesFromEnv(t *testing.T) {
 	for _, tc := range []struct {
 		value string

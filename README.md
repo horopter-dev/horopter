@@ -90,6 +90,9 @@ Each service is configured with environment variables:
 - `HOROPTER_INGRESS_MAX_EVENT_ATTRIBUTE_BYTES` — the largest attribute map
   `horopter-ingress` accepts, in bytes of JSON: default `4096`, from `1` to `1048576`. See
   Attributes below.
+- `HOROPTER_INGRESS_ALLOW_LOCUS_PREFIXED_REF` — accept a `correlation_ref` whose first
+  segment is the credential's own locus: default `false`, which refuses it with `400`. See
+  Filtering changes' sibling note under the append response below.
 - `HOROPTER_EGRESS_READ_MEMORY_BYTES` — the memory pool `horopter-egress` reserves reads
   against: default `268435456` (256 MiB), at least `1048576`.
 - `HOROPTER_EGRESS_ADMISSION_WAIT` — how long a read waits at each admission gate before it
@@ -730,6 +733,17 @@ instead — `ref` is already prefixed with the credential's locus, so composing 
 prefixes it a second time and silently addresses a different change. `id` names the event,
 not the change, and has no second use; `ref` is for looking a change up by its stored
 identity, not for amending it.
+
+**Ingress refuses that mistake rather than storing it.** A `correlation_ref` whose first
+segment equals the appending credential's locus is answered `400`, naming what would have
+been stored. Only that shape is refused: a producer ref may contain `/` freely —
+`myorg/repo#123` is composed to `<locus>/myorg/repo#123` and read back whole, because only
+the locus prefix is stripped, and a locus may never contain `/` itself.
+
+If your refs genuinely begin with your own locus, set
+`HOROPTER_INGRESS_ALLOW_LOCUS_PREFIXED_REF=true`. It lifts the guard for **every** producer
+on that ingress, not just yours — it is a daemon setting, not a per-credential one — and the
+double prefix is then stored as sent rather than silently stripped.
 
 ## Attributes
 
