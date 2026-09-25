@@ -1461,3 +1461,34 @@ func TestListEventsReturnsLifecycle(t *testing.T) {
 	assert.Equal(t, string(core.LifecycleStarted), events[0]["lifecycle"],
 		"the explicit assertion must render, not just the type suffix that would imply it")
 }
+
+// TestListEventsReturnsLocus pins the field that explains the ref transformation this route
+// otherwise shows without its input: the producer sent "dep-locus" and the stored
+// correlation_ref reads back "gha/dep-locus". Without locus, nothing in the rendered event
+// says where the prefix came from.
+//
+// The locus deliberately differs from the source, because they default to the same value and
+// a fixture using "ci" for both would pass while rendering either one.
+func TestListEventsReturnsLocus(t *testing.T) {
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	id := core.NewULID(time.Now(), rand.Reader)
+	_, _, err := s.AppendEvent(context.Background(), core.Event{
+		ID: id, Tenant: tn, IdempotencyKey: id, SchemaVersion: core.CurrentSchemaVersion,
+		Source: "ci", Type: "deployment.started", Subject: "acme/prod", Actor: "ci-bot",
+		OccurredAt: fixed, ReceivedAt: fixed, CorrelationRef: core.RefFromRow("gha/dep-locus"),
+		Origin: core.OriginProcess, Locus: core.LocusFromRow("gha"),
+	})
+	require.NoError(t, err)
+
+	rec := get(t, h, key, "/v1/events?tenant="+tn+"&ref="+url.QueryEscape("gha/dep-locus"))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var events []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &events))
+	require.Len(t, events, 1)
+	assert.Equal(t, "gha", events[0]["locus"],
+		"the locus every stored ref is prefixed with must be readable back")
+	assert.Equal(t, "ci", events[0]["source"],
+		"and must not be confused with source, which defaults to the same value")
+}
