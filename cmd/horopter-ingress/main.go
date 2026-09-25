@@ -29,9 +29,10 @@ func main() {
 }
 
 type ingressConfig struct {
-	addr              string
-	dsn               string
-	maxAttributeBytes int
+	addr                  string
+	dsn                   string
+	maxAttributeBytes     int
+	allowLocusPrefixedRef bool
 }
 
 func setupIngressConfig() (ingressConfig, error) {
@@ -49,10 +50,16 @@ func setupIngressConfig() (ingressConfig, error) {
 		return ingressConfig{}, err
 	}
 
+	allowLocusPrefixedRef, err := ingress.AllowLocusPrefixedRefFromEnv()
+	if err != nil {
+		return ingressConfig{}, err
+	}
+
 	return ingressConfig{
-		addr:              *addr,
-		dsn:               *dsn,
-		maxAttributeBytes: maxAttributeBytes,
+		addr:                  *addr,
+		dsn:                   *dsn,
+		maxAttributeBytes:     maxAttributeBytes,
+		allowLocusPrefixedRef: allowLocusPrefixedRef,
 	}, nil
 }
 
@@ -96,7 +103,8 @@ func run() error {
 
 	// ingress.New rejects a nil authenticator, so this is checked exactly once, in the
 	// constructor, rather than here as well: two guards on one fact drift.
-	api, err := ingress.New(store, time.Now, rand.Reader, authn)
+	api, err := ingress.New(store, time.Now, rand.Reader, authn,
+		ingress.WithAllowLocusPrefixedRef(cfg.allowLocusPrefixedRef))
 	if err != nil {
 		return err
 	}
