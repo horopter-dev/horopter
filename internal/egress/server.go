@@ -627,6 +627,11 @@ func changesToJSON(changes []core.Change) []map[string]any {
 // lifecycle is emitted for the same reason, more so: it is producer-set, not server-set, and
 // it changes how the event folds. Without it a producer auditing its own log cannot tell an
 // explicit "lifecycle": "started" from a ".started" type suffix it never sent.
+//
+// locus is server-set from the appending credential and is what every stored ref is prefixed
+// with, so it is the one field that explains why a correlation_ref sent as "dep-1" reads back
+// as "ci/dep-1" here. Omitting it left the audit route showing a transformation without its
+// input.
 func eventsToJSON(events []core.Event) []map[string]any {
 	out := make([]map[string]any, 0, len(events))
 	for _, e := range events {
@@ -638,7 +643,7 @@ func eventsToJSON(events []core.Event) []map[string]any {
 			"received_at":     e.ReceivedAt.UTC().Format(time.RFC3339Nano),
 			"correlation_ref": e.CorrelationRef.String(), "attributes": e.Attributes,
 			"origin": string(e.Origin), "edited": e.Edited,
-			"lifecycle": string(e.Lifecycle),
+			"lifecycle": string(e.Lifecycle), "locus": e.Locus.String(),
 		})
 	}
 	return out
