@@ -329,6 +329,15 @@ func projectionRowsForTenant(t *testing.T, pool *pgxpool.Pool, tenantID string) 
 // RebuildProjection deleted every change row and re-inserted it under the UNPREFIXED ref,
 // silently undoing the migration. 0006 can fail the same way twice over: by not backfilling
 // event.locus, and by not selecting it in foldEventLog.
+//
+// This fixture does not cover every row class, though a green run here invites that belief.
+// An uncorrelated terminal-type event stored before 0008 (a standalone "incident.resolved",
+// say) folded to StatusOccurred under the old point-vs-region rule; classify's reorder now
+// folds the same row to StatusCompleted, because a standalone event's type suffix is
+// consulted before its correlation ref. 0008 does not backfill change.status for that row
+// class — re-deriving StatusForType's suffix vocabulary in SQL would duplicate it, for a
+// handful of rows in databases that predate this release — so change and event disagree for
+// that row class until an operator runs a rebuild.
 func TestMigrationsLeaveTheProjectionRebuildable(t *testing.T) {
 	ctx := context.Background()
 	pool, freshDSN := freshDatabase(t)

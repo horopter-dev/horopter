@@ -158,25 +158,6 @@ func TestFoldTerminalEventReplacesEndWithFreshPointer(t *testing.T) {
 	assert.Equal(t, t20, *c.End, "the prior change value must remain untouched")
 }
 
-// TestFoldClosedTerminalDoesNotAliasEnd pins the same purity hazard TestFoldIsPure pins for
-// StartedAt, but for End: a terminal event folded onto an already-closed change (the
-// closed/terminal cell) must assign out.End a freshly allocated pointer rather than write
-// through the one copied from cur, or Fold would mutate the caller's own Change in place.
-// cur is captured by VALUE beforehand, as TestFoldIsPure's base.StartedAt is, because
-// comparing the two folded results to each other cannot catch this: both would hold the
-// same mutated pointer.
-func TestFoldClosedTerminalDoesNotAliasEnd(t *testing.T) {
-	closed := core.Fold(nil, ev("01A", "dep-7", "deployment.started", t10))
-	closed = core.Fold(&closed, ev("01B", "dep-7", "deployment.completed", t20))
-	require.NotNil(t, closed.End, "precondition: the change is closed")
-	endBefore := *closed.End
-
-	core.Fold(&closed, ev("01C", "dep-7", "deployment.rolled_back", t30))
-
-	assert.Equal(t, endBefore, *closed.End,
-		"Fold must not write through the End pointer it copied from cur")
-}
-
 // Fold(nil, ev) and Fold(&Change{}, ev) must converge on identical output for the
 // same event sequence. Accumulating into a map[core.Ref]core.Change invites the spelling
 // `c := m[ref]; m[ref] = Fold(&c, ev)`, which passes a zero-value *Change rather than

@@ -623,6 +623,10 @@ func changesToJSON(changes []core.Change) []map[string]any {
 // unreadable from a request body, which is what makes them worth reading back: origin is the
 // only record of whether a human or a process appended the event, and audit is this route's
 // whole purpose.
+//
+// lifecycle is emitted for the same reason, more so: it is producer-set, not server-set, and
+// it changes how the event folds. Without it a producer auditing its own log cannot tell an
+// explicit "lifecycle": "started" from a ".started" type suffix it never sent.
 func eventsToJSON(events []core.Event) []map[string]any {
 	out := make([]map[string]any, 0, len(events))
 	for _, e := range events {
@@ -634,6 +638,7 @@ func eventsToJSON(events []core.Event) []map[string]any {
 			"received_at":     e.ReceivedAt.UTC().Format(time.RFC3339Nano),
 			"correlation_ref": e.CorrelationRef.String(), "attributes": e.Attributes,
 			"origin": string(e.Origin), "edited": e.Edited,
+			"lifecycle": string(e.Lifecycle),
 		})
 	}
 	return out

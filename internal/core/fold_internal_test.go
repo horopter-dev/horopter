@@ -1,6 +1,7 @@
 package core
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -119,6 +120,25 @@ func TestFoldLifecycleTransitions(t *testing.T) {
 	}
 }
 
+// TestFoldStatusForLifecycleIsTotalOverLifecycles folds a standalone event carrying each
+// value in core.Lifecycles and asserts the resulting Change.Status is always one of
+// core.Statuses. statusForLifecycle enumerates four terminal values and returns "" for
+// anything else, calling that unreachable — but nothing pinned it as total over Lifecycles
+// until this test: classify routes every Lifecycle that is not Started, None or Unspecified
+// to assertsTerminal with statusForLifecycle(ev.Lifecycle), so an eighth Lifecycle added to
+// core.Lifecycles without a matching case here would fold to Status == "", and
+// migration 0002's change_status_vocabulary CHECK would reject it on the next append.
+func TestFoldStatusForLifecycleIsTotalOverLifecycles(t *testing.T) {
+	at := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+	for _, lc := range Lifecycles {
+		ev := Event{ID: "01M", Tenant: "t", Type: "widget.frobnicated", Source: "ci",
+			Subject: "s", OccurredAt: at, Locus: LocusFromRow("ci"), Lifecycle: lc}
+		got := Fold(nil, ev)
+		assert.True(t, slices.Contains(Statuses, got.Status),
+			"Lifecycle %q folded to Status %q, which is not in core.Statuses", lc, got.Status)
+	}
+}
+
 // TestFoldLifecycleCommutativeCellsAgreeInBothOrders enforces cell.commutative rather than
 // leaving it a comment with extra syntax. A cell claiming commutativity that nothing folds
 // backwards is a claim nobody checked.
@@ -152,11 +172,6 @@ func TestFoldLifecycleCommutativeCellsAgreeInBothOrders(t *testing.T) {
 			func() Change { return Fold(nil, corr("01E", "deployment.started", "", at)) },
 			corr("01F", "deployment.annotated", "", at),
 			corr("01G", "deployment.annotated", "", later)},
-		"open/none-standalone": {stateOpen, assertsNothingStandalone, nil,
-			Event{ID: "01H", Tenant: "t", Type: "config.changed", Source: "ci",
-				Subject: "s", OccurredAt: at, Locus: LocusFromRow("ci")},
-			Event{ID: "01H", Tenant: "t", Type: "config.changed", Source: "ci",
-				Subject: "s", OccurredAt: at, Locus: LocusFromRow("ci")}},
 		"closed/start": {stateClosed, assertsStart, closed,
 			corr("01I", "deployment.started", "", at.Add(-time.Hour)),
 			corr("01J", "deployment.started", "", at.Add(-2*time.Hour))},
@@ -190,6 +205,36 @@ func TestFoldLifecycleCommutativeCellsAgreeInBothOrders(t *testing.T) {
 			assert.Equal(t, forward.End, backward.End)
 		})
 	}
+
+	// open/none-standalone does not fit the forward/backward shape above: folding a
+	// standalone none-assertion sets End (setsEnd is true even in the open cell), so a
+	// second, DISTINCT standalone-none event folded after the first never lands in this
+	// same cell again — it lands in stateClosed, a different cell entirely. The only
+	// event that can ever reach this cell twice is the SAME event id replayed onto its
+	// own change, which makes the claim here idempotence, not commutativity: folding x
+	// again must reproduce the change folding it once already produced.
+	seen[[2]int{int(stateOpen), int(assertsNothingStandalone)}] = true
+	t.Run("open/none-standalone", func(t *testing.T) {
+		require.True(t, transitions[stateOpen][assertsNothingStandalone].commutative,
+			"this case claims a cell that does not claim commutativity")
+
+		x := Event{ID: "01H", Tenant: "t", Type: "config.changed", Source: "ci",
+			Subject: "s", OccurredAt: at, Locus: LocusFromRow("ci")}
+		once := Fold(nil, x)
+		twice := Fold(&once, x)
+
+		// Replaying x is what reaches transitions[stateClosed][assertsNothingStandalone]:
+		// once.End is already set, so the second fold sees stateClosed, and that cell is
+		// the zero value — unreachable — which is the ONLY thing that keeps a replayed
+		// event from re-triggering the open cell's effects a second time. If that cell
+		// stopped being unreachable, twice would diverge from once.
+		assert.Equal(t, once.Status, twice.Status,
+			"folding the same event again must not change the status it already set")
+		assert.Equal(t, once.End, twice.End,
+			"folding the same event again must not move End")
+		assert.Equal(t, once.StartedAt, twice.StartedAt,
+			"folding the same event again must not touch StartedAt")
+	})
 
 	// Coverage read from the table: every cell CLAIMING commutativity has a pair here.
 	for st := changeState(0); st < numStates; st++ {
