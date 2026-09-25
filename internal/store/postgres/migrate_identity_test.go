@@ -297,6 +297,29 @@ func projectionRows(t *testing.T, pool *pgxpool.Pool) map[string]string {
 	return out
 }
 
+// projectionRowsForTenant is projectionRows scoped to one tenant. projectionRows' other
+// callers each own a private freshDatabase; TestMigration0008PreservesAnAssertionAcrossARebuild
+// runs against the shared dev database instead, where an unscoped read can catch a row an
+// unrelated, concurrently running package's test wrote between the "before" and "after"
+// snapshots — go test ./... runs packages in parallel, and every package's tests share this
+// one Postgres instance.
+func projectionRowsForTenant(t *testing.T, pool *pgxpool.Pool, tenantID string) map[string]string {
+	t.Helper()
+	rows, err := pool.Query(context.Background(),
+		`SELECT ref, to_jsonb(c)::text FROM change c WHERE tenant = $1 ORDER BY ref`, tenantID)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	out := map[string]string{}
+	for rows.Next() {
+		var ref, body string
+		require.NoError(t, rows.Scan(&ref, &body))
+		out[ref] = body
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
 // TestMigrationsLeaveTheProjectionRebuildable is the invariant the whole design rests on
 // and the one nothing asserted until 0004 broke it: change is a derived view of the
 // immutable event log, so it must be discardable and replayable at any time — including
@@ -306,6 +329,15 @@ func projectionRows(t *testing.T, pool *pgxpool.Pool) map[string]string {
 // RebuildProjection deleted every change row and re-inserted it under the UNPREFIXED ref,
 // silently undoing the migration. 0006 can fail the same way twice over: by not backfilling
 // event.locus, and by not selecting it in foldEventLog.
+//
+// This fixture does not cover every row class, though a green run here invites that belief.
+// An uncorrelated terminal-type event stored before 0008 (a standalone "incident.resolved",
+// say) folded to StatusOccurred under the old point-vs-region rule; classify's reorder now
+// folds the same row to StatusCompleted, because a standalone event's type suffix is
+// consulted before its correlation ref. 0008 does not backfill change.status for that row
+// class — re-deriving StatusForType's suffix vocabulary in SQL would duplicate it, for a
+// handful of rows in databases that predate this release — so change and event disagree for
+// that row class until an operator runs a rebuild.
 func TestMigrationsLeaveTheProjectionRebuildable(t *testing.T) {
 	ctx := context.Background()
 	pool, freshDSN := freshDatabase(t)
@@ -399,4 +431,60 @@ func TestMigration0007BackfillsTheUnionOfAReferencesSources(t *testing.T) {
 	assert.Equal(t, "legacy", locus,
 		"locus is split_part(ref, '/', 1): migration 0004 prefixes this ref to "+
 			"'legacy/dep-1', so the first segment is 'legacy'")
+}
+
+// TestMigration0008PreservesAnAssertionAcrossARebuild is the invariant for the lifecycle
+// column, and it fails for a reason no unit test can reach: foldEventLog names only the
+// columns Fold reads, so a lifecycle omitted there folds correctly live and vanishes on
+// replay. That is 0006's second failure mode, and this is the shape that catches it.
+func TestMigration0008PreservesAnAssertionAcrossARebuild(t *testing.T) {
+	ctx := context.Background()
+	s, tn := newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	// An explicit assertion on a type whose suffix says the OPPOSITE. If the column is
+	// lost, the convention takes over and the change folds as a point — so this fixture
+	// discriminates the column from the fallback, which a .started type could not.
+	ev := mkEvent(tn, eventID(t, "assert"), "k-assert", "", "config.changed", at)
+	ev.Lifecycle = core.LifecycleStarted
+	_, _, err := s.AppendEvent(ctx, ev)
+	require.NoError(t, err)
+
+	before := projectionRowsForTenant(t, s.Pool(), tn) // ref -> to_jsonb(c), defined in this file
+	require.NoError(t, s.RebuildProjection(ctx, tn))
+
+	assert.Equal(t, before, projectionRowsForTenant(t, s.Pool(), tn),
+		"a rebuild must reproduce the change exactly; if the assertion is lost, status "+
+			"falls back to the type suffix and the change becomes a point")
+}
+
+// TestLifecycleVocabularyIsEnforced pins core.Lifecycles to migration 0008's CHECK, in the
+// shape TestChangeStatusVocabularyIsEnforced uses for Status — which exists because a
+// seventh Status was added without a migration, compiled, passed, and failed at runtime on
+// the first insert.
+func TestLifecycleVocabularyIsEnforced(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+
+	for _, lc := range core.Lifecycles {
+		t.Run("admits "+string(lc), func(t *testing.T) {
+			ev := mkEvent(tn, eventID(t, "ok-"+string(lc)), "k-"+string(lc), "",
+				"config.changed", at)
+			ev.Lifecycle = lc
+			_, _, err := s.AppendEvent(ctx, ev)
+			require.NoError(t, err,
+				"0008's CHECK must admit every value in core.Lifecycles; %q is in the Go "+
+					"vocabulary and not in the SQL one", lc)
+		})
+	}
+
+	// The other direction, through raw SQL: Validate would refuse this before the store
+	// saw it, so only a direct insert reaches the constraint.
+	_, err := s.Pool().Exec(ctx, `INSERT INTO event
+		(id, tenant, schema_version, source, type, subject, occurred_at, received_at,
+		 correlation_ref, origin, locus, lifecycle)
+		VALUES ($1, $2, 2, 'ci', 'config.changed', 's', $3, $3, '', 'process', 'ci', 'bogus')`,
+		eventID(t, "bad"), tn, at)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "event_lifecycle_vocabulary")
 }

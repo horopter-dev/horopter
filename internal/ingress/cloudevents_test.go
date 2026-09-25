@@ -88,17 +88,18 @@ func TestIdempotencyKeyIsInjective(t *testing.T) {
 }
 
 // TestEventFromCloudEventLiftsEveryRecognisedDataKey pins the whole lifted set at once:
-// correlation_ref, title and actor each become a first-class event field, and each is
-// REMOVED from attributes so one value is not stored twice under two names. An
+// correlation_ref, title, actor and lifecycle each become a first-class event field, and
+// each is REMOVED from attributes so one value is not stored twice under two names. An
 // unrecognised key stays in attributes untouched.
 //
-// The mapping previously had no assertions at all. Mutating any of the three pulls to a
+// The mapping previously had no assertions at all. Mutating any of the four pulls to a
 // constant "", or deleting the delete(attrs, key) line, passed the entire suite.
 func TestEventFromCloudEventLiftsEveryRecognisedDataKey(t *testing.T) {
 	ce := ceWithData(t, map[string]any{
 		"correlation_ref": "dep-7",
 		"title":           "Deploy api",
 		"actor":           "alice",
+		"lifecycle":       "started",
 		"region":          "eu-west-1",
 	})
 
@@ -109,6 +110,7 @@ func TestEventFromCloudEventLiftsEveryRecognisedDataKey(t *testing.T) {
 		"correlation_ref must be lifted out of data and prefixed with the locus")
 	assert.Equal(t, "Deploy api", ev.Title, "title must be lifted out of data")
 	assert.Equal(t, "alice", ev.Actor, "actor must be lifted out of data")
+	assert.Equal(t, core.LifecycleStarted, ev.Lifecycle, "lifecycle must be lifted out of data")
 
 	assert.Equal(t, map[string]any{"region": "eu-west-1"}, ev.Attributes,
 		"a lifted key must not remain in attributes, and an unrecognised key must stay")
@@ -130,14 +132,17 @@ func TestEventFromCloudEventWithoutActorIsValid(t *testing.T) {
 // Stringifying it would put a number into a field the schema promises is a title, and
 // silently remove the caller's own attribute in the process.
 func TestEventFromCloudEventLeavesNonStringRecognisedKeysAsAttributes(t *testing.T) {
-	ce := ceWithData(t, map[string]any{"title": 7, "actor": true})
+	ce := ceWithData(t, map[string]any{"title": 7, "actor": true, "lifecycle": 7})
 
 	ev, err := eventFromCloudEvent(ce, ceNow, "01A", testPrincipal)
 	require.NoError(t, err)
 
 	assert.Empty(t, ev.Title, "a non-string title must not be coerced into the field")
 	assert.Empty(t, ev.Actor, "a non-string actor must not be coerced into the field")
-	assert.Equal(t, map[string]any{"title": float64(7), "actor": true}, ev.Attributes,
+	assert.Empty(t, ev.Lifecycle, "a non-string lifecycle must not be coerced into the field")
+	assert.Equal(t,
+		map[string]any{"title": float64(7), "actor": true, "lifecycle": float64(7)},
+		ev.Attributes,
 		"a value the field cannot hold must survive as the attribute it was sent as")
 }
 

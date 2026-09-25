@@ -174,7 +174,7 @@ const changeColumns = `tenant, ref, subject, type, title, actor, start_at, start
 // eventColumns are the columns scanEvents reads, in its order.
 const eventColumns = `id, tenant, idempotency_key, schema_version, source, type, subject,
 	actor, title, occurred_at, received_at, correlation_ref, attributes, origin, edited,
-	locus`
+	locus, lifecycle`
 
 // changeSelection selects the change rows q reads: by ref alone when q.Ref is set, or by
 // window otherwise. The two predicates are mutually exclusive, not layered — a window
@@ -361,7 +361,7 @@ func scanEvents(rows pgx.Rows, tenantID string, extra ...any) ([]core.Event, err
 		)
 		dest := []any{&ev.ID, &ev.Tenant, &idem, &ev.SchemaVersion, &ev.Source, &ev.Type,
 			&ev.Subject, &ev.Actor, &ev.Title, &ev.OccurredAt, &ev.ReceivedAt,
-			&corr, &ev.Attributes, &origin, &ev.Edited, &locus}
+			&corr, &ev.Attributes, &origin, &ev.Edited, &locus, &ev.Lifecycle}
 		if err := rows.Scan(append(dest, extra...)...); err != nil {
 			return nil, fmt.Errorf("scan event row for tenant %q: %w", tenantID, err)
 		}

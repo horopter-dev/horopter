@@ -210,12 +210,12 @@ func insertEvent(ctx context.Context, tx pgx.Tx, ev core.Event) error {
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO event (id, tenant, idempotency_key, schema_version, source, type,
 		                   subject, actor, title, occurred_at, received_at,
-		                   correlation_ref, attributes, origin, edited, locus)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+		                   correlation_ref, attributes, origin, edited, locus, lifecycle)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
 		ev.ID, ev.Tenant, idem, ev.SchemaVersion, ev.Source, ev.Type,
 		ev.Subject, ev.Actor, ev.Title, ev.OccurredAt.UTC(), ev.ReceivedAt.UTC(),
 		ev.CorrelationRef.String(), ev.Attributes, string(ev.Origin), ev.Edited,
-		ev.Locus.String(),
+		ev.Locus.String(), string(ev.Lifecycle),
 	); err != nil {
 		return fmt.Errorf("insert event %q: %w", ev.ID, err)
 	}
@@ -306,12 +306,12 @@ func findByIdemKey(
 	err := q.QueryRow(ctx, `
 		SELECT id, tenant, idempotency_key, schema_version, source, type, subject,
 		       actor, title, occurred_at, received_at, correlation_ref, attributes,
-		       origin, edited, locus
+		       origin, edited, locus, lifecycle
 		FROM event WHERE tenant = $1 AND idempotency_key = $2`,
 		tenantID, idempotencyKey,
 	).Scan(&ev.ID, &ev.Tenant, &idem, &ev.SchemaVersion, &ev.Source, &ev.Type, &ev.Subject,
 		&ev.Actor, &ev.Title, &ev.OccurredAt, &ev.ReceivedAt, &corr, &ev.Attributes,
-		&origin, &ev.Edited, &locus)
+		&origin, &ev.Edited, &locus, &ev.Lifecycle)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return core.Event{}, false, nil
 	}

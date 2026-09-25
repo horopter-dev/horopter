@@ -128,8 +128,8 @@ func eventFromCloudEvent(
 	// pull lifts a recognised key out of the data payload into a first-class event
 	// field, removing it from the attribute map so the same value is not also stored as
 	// a generic attribute. The lifted set is exactly the core.Event fields CloudEvents
-	// has no envelope attribute for: correlation_ref, title and actor. Every other key
-	// stays in attributes untouched.
+	// has no envelope attribute for: correlation_ref, title, actor and lifecycle. Every
+	// other key stays in attributes untouched.
 	//
 	// Non-string values are left alone rather than coerced: a caller sending
 	// {"title": 7} keeps it as an attribute instead of having it silently stringified
@@ -151,6 +151,7 @@ func eventFromCloudEvent(
 	}
 	title := pull("title")
 	actor := pull("actor")
+	lifecycle := pull("lifecycle")
 
 	occurred := ce.Time()
 	if occurred.IsZero() {
@@ -172,5 +173,6 @@ func eventFromCloudEvent(
 		Attributes:     attrs,
 		Origin:         p.Origin,
 		Locus:          core.LocusFromRow(p.Locus),
+		Lifecycle:      core.Lifecycle(lifecycle),
 	}, nil
 }

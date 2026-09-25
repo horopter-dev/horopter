@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -29,6 +30,37 @@ const CurrentSchemaVersion = 2
 // Its message is written to read as the opening of the wrapping message, which is why the
 // wrappers below spell it "%w %q:" rather than appending it.
 var ErrInvalidEvent = errors.New("invalid event")
+
+// Lifecycle is what an event asserts about its change's lifecycle, stated by the producer
+// rather than inferred from the type's last segment.
+//
+// The values are TRANSITIONS, not statuses. There is deliberately no "occurred" or
+// "in_progress": an event cannot assert that a change IS in progress, only that it
+// started. The status is what Fold derives.
+type Lifecycle string
+
+// LifecycleUnspecified is absence: the producer said nothing and the type suffix
+// decides. LifecycleNone is an assertion that nothing happened, which overrides the
+// suffix. They must stay distinct — collapsing them makes "explicit beats convention"
+// unimplementable, because an omitted JSON key and an explicit "" decode alike.
+const (
+	LifecycleUnspecified Lifecycle = ""
+	LifecycleNone        Lifecycle = "none"
+	LifecycleStarted     Lifecycle = "started"
+	LifecycleCompleted   Lifecycle = "completed"
+	LifecycleFailed      Lifecycle = "failed"
+	LifecycleRolledBack  Lifecycle = "rolled_back"
+	LifecycleCancelled   Lifecycle = "cancelled"
+)
+
+// Lifecycles is every value a producer may assert, in the order migration 0008's CHECK
+// lists them. An eighth added here without a migration compiles, passes, and fails at
+// runtime on the first insert — which is what TestChangeStatusVocabularyIsEnforced was
+// written for after exactly that happened to Status.
+var Lifecycles = []Lifecycle{
+	LifecycleUnspecified, LifecycleNone, LifecycleStarted, LifecycleCompleted,
+	LifecycleFailed, LifecycleRolledBack, LifecycleCancelled,
+}
 
 // Event is an immutable fact. Events are never updated or deleted.
 type Event struct {
@@ -54,6 +86,10 @@ type Event struct {
 	// the argument Origin makes for itself. RefFor composes a point change's ref from it,
 	// so it is part of what the event is, not a denormalised copy of a credential field.
 	Locus Locus
+	// Lifecycle is what this event asserts about its change. Empty means the producer
+	// said nothing, in which case the type's suffix decides — which is every event
+	// stored before migration 0008.
+	Lifecycle Lifecycle
 	// Edited is false on every append. v0.2's edit path is what sets it true; nothing
 	// in this build does.
 	Edited bool
@@ -88,7 +124,7 @@ func (e Event) Validate() error {
 			"%w %q: tenant is required; it comes from the appending credential, so this "+
 				"credential is not bound to one", ErrInvalidEvent, e.ID)
 	}
-	if err := e.validateRequiredText(); err != nil {
+	if err := e.validateFieldShapes(); err != nil {
 		return err
 	}
 	if e.OccurredAt.IsZero() {
@@ -149,10 +185,10 @@ func (e Event) validateLocus() error {
 	return nil
 }
 
-// validateRequiredText reports the first required text field the event leaves empty, naming
-// an example of what it should carry. Split out of Validate to keep its branching within the
-// complexity limit.
-func (e Event) validateRequiredText() error {
+// validateFieldShapes reports the first required text field the event leaves empty, naming
+// an example of what it should carry, or an out-of-vocabulary lifecycle if the text fields
+// are fine. Split out of Validate to keep its branching within the complexity limit.
+func (e Event) validateFieldShapes() error {
 	switch {
 	case e.Source == "":
 		return fmt.Errorf("%w %q: source is required, e.g. \"buildkite/pipelines/api\"",
@@ -164,6 +200,9 @@ func (e Event) validateRequiredText() error {
 		return fmt.Errorf(
 			"%w %q: subject is required — the entity the change "+
 				"happened to, e.g. \"acme/prod\"", ErrInvalidEvent, e.ID)
+	case !slices.Contains(Lifecycles, e.Lifecycle):
+		return fmt.Errorf("%w %q: lifecycle %q is not one of %v",
+			ErrInvalidEvent, e.ID, e.Lifecycle, Lifecycles)
 	}
 	return nil
 }
