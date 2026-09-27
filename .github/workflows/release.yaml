@@ -32,6 +32,38 @@ jobs:
       contents: write # creates the GitHub release and uploads its assets
       packages: write # pushes the built images to GHCR
     steps:
+      # First, before a checkout, a login or any credential setup: a tag can be pushed to
+      # any commit, reviewed or not, and this job holds contents:write and packages:write.
+      # The Stage 1 design called tags-are-cut-from-main "a convention, not a gate"
+      # (docs/superpowers/specs/2026-09-17-container-images-and-compose-stack-design.md,
+      # risk 2). This is the gate.
+      #
+      # Asked of the API rather than with `git merge-base`: the checkout below sets
+      # persist-credentials: false, so a later `git fetch origin main` has no credentials
+      # on a private repository, and relying on checkout having populated origin/main is
+      # relying on undocumented behaviour for a tag ref.
+      #
+      # compare/BASE...HEAD reports HEAD's relation to BASE. A tag on main is either
+      # `identical` (the tip) or `behind` (an ancestor). `ahead` or `diverged` means the
+      # commit is not on main.
+      - name: Refuse a tag that is not on main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          status=$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${GITHUB_SHA}" --jq .status)
+          case "$status" in
+            identical | behind)
+              echo "Tagged commit ${GITHUB_SHA} is on main (${status})."
+              ;;
+            *)
+              echo "::error::Tagged commit ${GITHUB_SHA} is not on main (compare status:" \
+                "${status}). Tags are cut from main, which CI has tested. Nothing was" \
+                "built or published."
+              exit 1
+              ;;
+          esac
+
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
