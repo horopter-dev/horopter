@@ -112,7 +112,7 @@ jobs:
           set -euo pipefail
           # DATABASE_URL comes from the job's env: block above, not this script.
           # shellcheck disable=SC2154
-          go run ./cmd/horoctl-migrate -dsn "$DATABASE_URL"
+          go run ./cmd/horopter-migrate -dsn "$DATABASE_URL"
 
       - name: Test
         run: |

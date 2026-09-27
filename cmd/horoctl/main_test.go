@@ -151,6 +151,10 @@ func writeExecutable(t *testing.T, path, content string) {
 
 func TestSchemaTouchingVerbsAreNeverDelegated(t *testing.T) {
 	dir := t.TempDir()
+	// horoctl-migrate, NOT horopter-migrate: delegate() looks up "horoctl-" + verb, so the
+	// plugin convention and the standalone binary's name merely share a spelling. Staging the
+	// binary's name would leave nothing on PATH for delegate() to find, and the test would pass
+	// because the hijack candidate was absent rather than because the compiled-in verb won.
 	writeExecutable(t, filepath.Join(dir, "horoctl-migrate"), "#!/bin/sh\necho hijacked\n")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 

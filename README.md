@@ -22,7 +22,7 @@ either daemon anywhere its port can be reached.
 ## Quick start
 
 Horopter is published as four container images — `horopter-ingress`, `horopter-egress`,
-`horoctl-migrate` and `horoctl` — and a compose file that runs them. A release carries a
+`horopter-migrate` and `horoctl` — and a compose file that runs them. A release carries a
 `docker-compose.yaml` release asset with that release's image tags already rendered in:
 
     curl -O https://github.com/horopter-dev/horopter/releases/download/v0.1.0/docker-compose.yaml
@@ -47,7 +47,7 @@ names instead of building locally:
 `task stop` halts the stack and `task down` removes its containers, both keeping the
 database; `task down:wipe` also **destroys the database volume**.
 
-The stack starts with no credentials of its own. After `horoctl-migrate` applies the schema,
+The stack starts with no credentials of its own. After `horopter-migrate` applies the schema,
 a `bootstrap` service runs `horoctl admin bootstrap`, which creates a `default` tenant if
 absent and issues two fixed development credentials if their key prefixes are absent — one
 `producer` (`append` only) and one `reader` (`read` only), never a `superuser`, which also
@@ -71,8 +71,8 @@ Then post an event and read it back:
     curl -H "Authorization: Bearer $HOROPTER_DEV_READER_KEY" \
       "localhost:8081/adapters/grafana/annotations?from=1789376400000&to=1789383600000"
 
-The compose file pulls `ghcr.io/horopter-dev/{horopter-ingress,horopter-egress,horoctl-migrate,horoctl}`
-at the tag it names, runs `horoctl-migrate` — the only standalone binary permitted to apply
+The compose file pulls `ghcr.io/horopter-dev/{horopter-ingress,horopter-egress,horopter-migrate,horoctl}`
+at the tag it names, runs `horopter-migrate` — the only standalone binary permitted to apply
 schema DDL — to completion, then `bootstrap` (above), before starting `horopter-ingress` on
 port 8080 and `horopter-egress` on port 8081.
 
@@ -226,7 +226,7 @@ metric is reported against:
 
 - `OTEL_SERVICE_NAME` — overrides the `service.name` resource attribute reported with every
   span and metric. Defaults to the binary's own name: `horopter-ingress`, `horopter-egress`
-  or `horoctl-migrate` — the same default whether an operator ran `horoctl-migrate` or
+  or `horopter-migrate` — the same default whether an operator ran `horopter-migrate` or
   `horoctl migrate`, since both apply the identical migration.
 - `OTEL_RESOURCE_ATTRIBUTES` — comma-separated `key=value` pairs merged onto the resource
   every span and metric carries, e.g. `deployment.environment.name=prod,team=platform`.
@@ -275,7 +275,7 @@ Tracing is **off by default** in all three binaries.
   - `http` — the server span `otelhttp` wraps every request in.
   - `store` — the spans the store package creates around each store-level operation: append an
     event, list events, list changes, estimate a read's size, and rebuild a tenant's
-    projection. Disabling it on `horoctl-migrate` silences the rebuild span, which is the one
+    projection. Disabling it on `horopter-migrate` silences the rebuild span, which is the one
     an operator running `--rebuild-tenant` most wants.
   - `sql` — the per-statement spans `otelpgx` creates around every SQL statement the store
     issues.
@@ -320,7 +320,7 @@ configured.
   exporter themselves. Defaults: a push every 60 seconds, a 30-second timeout, cumulative
   temporality.
 
-`horoctl-migrate` (and `horoctl migrate`) runs once and exits, so nothing could scrape it and
+`horopter-migrate` (and `horoctl migrate`) runs once and exits, so nothing could scrape it and
 it serves no `/metrics`. With a collector configured, its metrics go out over OTLP as it
 finishes.
 
@@ -403,7 +403,7 @@ as the rest of the binary.** Two cases are worth knowing because neither stops t
 
 ## Upgrading
 
-`horoctl-migrate` and `horoctl`'s compiled-in `migrate` verb — the same `internal/migrate.Run`
+`horopter-migrate` and `horoctl`'s compiled-in `migrate` verb — the same `internal/migrate.Run`
 behind both, so neither can drift from the other — are the only ways schema DDL is applied.
 Run one to completion against the database before starting any daemon at the new version;
 each daemon asserts the recorded schema version at startup and refuses to run against one it
@@ -411,7 +411,7 @@ does not understand, so a skewed rollout fails loudly rather than corrupting dat
 
 ### Rebuilding a tenant's projection
 
-    horoctl-migrate --rebuild-tenant=<tenant-id>
+    horopter-migrate --rebuild-tenant=<tenant-id>
 
 The `change` table is a derived view of the immutable `event` log, so it can be discarded and
 replayed. This runs only after the schema-version assertion passes. What makes that true is

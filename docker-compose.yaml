@@ -25,13 +25,13 @@ services:
       timeout: 3s
       retries: 15
 
-  horoctl-migrate:
+  horopter-migrate:
     # The tag after :- is the published version this stack runs. Bump it in the commit the
     # tag is cut from, so the tagged tree names the images that tag builds; bumping it
     # afterwards leaves the release pointing at the version before it. Set HOROPTER_IMAGE_TAG
     # in the environment to override it for one run; `task up:local` bypasses both and runs
     # images built from the working tree.
-    image: ghcr.io/horopter-dev/horoctl-migrate:${HOROPTER_IMAGE_TAG:-v0.2.0}
+    image: ghcr.io/horopter-dev/horopter-migrate:${HOROPTER_IMAGE_TAG:-v0.2.0}
     environment:
       DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
     depends_on:
@@ -50,7 +50,7 @@ services:
       --producer-key ${HOROPTER_DEV_PRODUCER_KEY:-horo_dead00000001_00000000000000000000000000000000000000000000000000000000000000}
       --reader-key ${HOROPTER_DEV_READER_KEY:-horo_dead00000002_11111111111111111111111111111111111111111111111111111111111111}
     depends_on:
-      horoctl-migrate:
+      horopter-migrate:
         condition: service_completed_successfully
 
   ingress:

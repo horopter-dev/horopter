@@ -24,7 +24,7 @@ command -v jq > /dev/null || {
   echo "services:"
   # kos build id -> compose service name. horoctl's image runs as the bootstrap service;
   # every other id names its own service.
-  for pair in horoctl-migrate:horoctl-migrate ingress:ingress egress:egress horoctl:bootstrap; do
+  for pair in horopter-migrate:horopter-migrate ingress:ingress egress:egress horoctl:bootstrap; do
     id="${pair%%:*}"
     service="${pair#*:}"
     ref="$(jq -r --arg id "$id" \

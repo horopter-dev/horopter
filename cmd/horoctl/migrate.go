@@ -10,7 +10,7 @@ import (
 )
 
 // runMigrate is horoctl's compiled-in migrate verb. It calls the same internal/migrate.Run
-// entry point cmd/horoctl-migrate's thin main does, so the two never disagree on what a
+// entry point cmd/horopter-migrate's thin main does, so the two never disagree on what a
 // migration does — see main.go's package comment for why this verb is never delegated.
 func runMigrate(args []string) error {
 	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)

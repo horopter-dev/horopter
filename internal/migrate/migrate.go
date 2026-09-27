@@ -1,5 +1,5 @@
 // Package migrate applies the database schema and rebuilds a tenant's projection from its
-// event log. It backs both cmd/horoctl-migrate's thin main and horoctl's compiled-in
+// event log. It backs both cmd/horopter-migrate's thin main and horoctl's compiled-in
 // migrate verb, so the schema-changing logic exists exactly once regardless of which
 // binary an operator runs — and both entry points are compiled in, never resolved through
 // horoctl's PATH-dispatched plugin fallthrough, so a differently-versioned plugin can
@@ -22,10 +22,10 @@ import (
 )
 
 // serviceName is the telemetry service name for every caller of Run, deliberately the
-// same regardless of whether the operator typed horoctl-migrate or horoctl migrate: both
+// same regardless of whether the operator typed horopter-migrate or horoctl migrate: both
 // are the same build running the same migration, so a trace or metric from either should
 // resolve to the same service.
-const serviceName = "horoctl-migrate"
+const serviceName = "horopter-migrate"
 
 // RebuildHelp is the flag help text every caller of Run's rebuildTenant parameter should
 // surface, stated up front because there is no way to discover the operational cost from

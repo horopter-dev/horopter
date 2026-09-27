@@ -21,7 +21,7 @@ const ExpectedSchemaVersion = 8
 func (s *Store) SchemaVersion(ctx context.Context) (int, error) {
 	var v int
 	if err := s.pool.QueryRow(ctx, `SELECT version FROM schema_version`).Scan(&v); err != nil {
-		return 0, fmt.Errorf("read schema_version: %w; has horoctl-migrate been run?", err)
+		return 0, fmt.Errorf("read schema_version: %w; has horopter-migrate been run?", err)
 	}
 	return v, nil
 }
@@ -35,14 +35,14 @@ func (s *Store) AssertSchemaVersion(ctx context.Context) error {
 	if v != ExpectedSchemaVersion {
 		return fmt.Errorf(
 			"schema version mismatch: database is at %d, this build expects %d; "+
-				"run horoctl-migrate at the matching version before starting this daemon",
+				"run horopter-migrate at the matching version before starting this daemon",
 			v, ExpectedSchemaVersion)
 	}
 	return nil
 }
 
 // OpenNoMigrate connects without applying migrations, for daemons that must not
-// migrate. Only horoctl-migrate changes the schema.
+// migrate. Only horopter-migrate changes the schema.
 func OpenNoMigrate(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 	pool, err := connect(ctx, dsn, "check DATABASE_URL")
 	if err != nil {
