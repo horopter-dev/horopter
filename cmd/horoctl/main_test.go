@@ -151,7 +151,7 @@ func writeExecutable(t *testing.T, path, content string) {
 
 func TestSchemaTouchingVerbsAreNeverDelegated(t *testing.T) {
 	dir := t.TempDir()
-	writeExecutable(t, filepath.Join(dir, "horoctl-migrate"), "#!/bin/sh\necho hijacked\n")
+	writeExecutable(t, filepath.Join(dir, "horopter-migrate"), "#!/bin/sh\necho hijacked\n")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	out := runHoroctl(t, "migrate", "--help")

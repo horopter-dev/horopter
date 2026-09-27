@@ -4,7 +4,7 @@
 // It follows kubectl's dispatch model. migrate and admin touch the database schema or the
 // identity tables that gate every write to it, so they are compiled in and version-locked
 // rather than resolved from PATH: a PATH-dispatched launcher could exec a
-// differently-versioned plugin, and cmd/horoctl-migrate/main.go's package comment records
+// differently-versioned plugin, and cmd/horopter-migrate/main.go's package comment records
 // why that would matter for migrate specifically. Because every schema-touching verb is
 // compiled in, the launcher can never exec a different build for one — the fallthrough
 // below only ever reaches verbs that do not exist in this repository.

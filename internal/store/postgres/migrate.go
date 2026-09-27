@@ -25,7 +25,7 @@ const migrationLockKey int64 = 8145209847321
 //
 // The applied_migration ledger cannot answer this after the fact: once the transaction
 // commits, a file applied by this run and one applied a year ago are both simply present.
-// horoctl-migrate reports the difference to an operator, so the difference has to be
+// horopter-migrate reports the difference to an operator, so the difference has to be
 // carried out of the run that knew it.
 func (s *Store) AppliedMigrations() []string { return s.appliedMigrations }
 
@@ -173,7 +173,7 @@ func applyPendingMigrations(ctx context.Context, tx pgx.Tx, names []string) ([]s
 // LEDGER holds. It must run after applyPendingMigrations, inside the same transaction, so
 // it reads the ledger this run has just finished extending.
 //
-// The ledger is the authority, not the binary's embedded list. An older horoctl-migrate
+// The ledger is the authority, not the binary's embedded list. An older horopter-migrate
 // run against a newer database embeds fewer migrations, so recording its own highest
 // embedded file rewrote schema_version DOWNWARD while applied_migration still listed every
 // file actually applied — leaving the recorded version contradicting the database's real

@@ -15,7 +15,7 @@ import (
 // it first gives OTel the text handler and keeps it for the life of the process — with
 // nothing failing and no line out of place except OTel's own.
 //
-// cmd/horoctl-migrate and horoctl's compiled-in migrate verb both call
+// cmd/horopter-migrate and horoctl's compiled-in migrate verb both call
 // internal/migrate.Run rather than defining their own run(), so Run is where this
 // ordering is enforced for both of them — one entry, not one per caller.
 func TestEveryBinaryInstallsTheHandlerBeforeTelemetry(t *testing.T) {

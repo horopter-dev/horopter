@@ -38,13 +38,13 @@ func TestAssertSchemaVersionFailsLoudlyOnMismatch(t *testing.T) {
 	err = s.AssertSchemaVersion(ctx)
 	require.Error(t, err, "a daemon must refuse to run against an unexpected schema")
 	assert.Contains(t, err.Error(), "99")
-	assert.Contains(t, err.Error(), "horoctl-migrate",
+	assert.Contains(t, err.Error(), "horopter-migrate",
 		"the error must tell the operator how to fix it")
 }
 
 // daemonMainFiles are the daemons that must never apply DDL: several replicas start
 // together on every rolling deploy, and the only safe number of processes migrating
-// is one. cmd/horoctl-migrate/main.go is deliberately absent from this list — it is
+// is one. cmd/horopter-migrate/main.go is deliberately absent from this list — it is
 // the one binary that must keep calling postgres.Open.
 var daemonMainFiles = []string{
 	"../../../cmd/horopter-ingress/main.go",
@@ -55,7 +55,7 @@ var daemonMainFiles = []string{
 // TestNoWriteRouteIsRegisteredAnywhere in internal/egress/server_test.go: no test
 // anywhere under cmd/ exercises a daemon's startup wiring against a real database, and
 // no configured linter has a rule against calling postgres.Open outside
-// horoctl-migrate, so nothing previously caught a daemon being reverted to the
+// horopter-migrate, so nothing previously caught a daemon being reverted to the
 // migrating constructor. This parses each daemon's main.go and inspects every
 // postgres.* call it makes.
 //
@@ -95,7 +95,7 @@ func TestDaemonsNeverMigrateOnStartup(t *testing.T) {
 			for _, name := range calls {
 				assert.NotEqual(t, "Open", name,
 					"%s calls postgres.Open, which applies migrations; daemons must call "+
-						"postgres.OpenNoMigrate instead, because only horoctl-migrate may "+
+						"postgres.OpenNoMigrate instead, because only horopter-migrate may "+
 						"change the schema", path)
 			}
 			assert.Contains(t, calls, "OpenNoMigrate",
@@ -106,7 +106,7 @@ func TestDaemonsNeverMigrateOnStartup(t *testing.T) {
 }
 
 // TestMigrateDoesNotDowngradeARecordedSchemaVersion covers running an OLD
-// horoctl-migrate against a NEWER database, which happens on any rollback or skewed
+// horopter-migrate against a NEWER database, which happens on any rollback or skewed
 // rollout. The recorded version used to come from the highest migration the BINARY
 // embeds, so the old binary rewrote schema_version downward while applied_migration still
 // listed every file actually applied — the recorded version then contradicted the

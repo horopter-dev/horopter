@@ -21,15 +21,15 @@ builds:
     goos: [linux]
     goarch: [amd64, arm64]
     flags: [-trimpath]
-  - id: horoctl-migrate
-    main: ./cmd/horoctl-migrate
-    binary: horoctl-migrate
+  - id: horopter-migrate
+    main: ./cmd/horopter-migrate
+    binary: horopter-migrate
     env: [CGO_ENABLED=0]
     goos: [linux]
     goarch: [amd64, arm64]
     flags: [-trimpath]
   # horoctl is the first binary here needing a non-Linux target: ingress, egress and
-  # horoctl-migrate exist to become container images, but operators run horoctl from a
+  # horopter-migrate exist to become container images, but operators run horoctl from a
   # laptop. darwin/amd64 is excluded rather than built and left unpublished.
   - id: horoctl
     main: ./cmd/horoctl
@@ -74,11 +74,11 @@ kos:
     labels:
       org.opencontainers.image.source: "{{ .GitURL }}"
       org.opencontainers.image.revision: "{{ .FullCommit }}"
-  - id: horoctl-migrate
-    build: horoctl-migrate
+  - id: horopter-migrate
+    build: horopter-migrate
     base_image: gcr.io/distroless/static-debian12:nonroot
     user: "65532:65532"
-    repositories: [ghcr.io/horopter-dev/horoctl-migrate]
+    repositories: [ghcr.io/horopter-dev/horopter-migrate]
     platforms: [linux/amd64, linux/arm64]
     tags: ["{{ .Tag }}"]
     bare: true
@@ -109,7 +109,7 @@ archives:
   # explicit name_template — their default names collide on every linux platform, since
   # both otherwise render "horopter_<version>_<os>_<arch>".
   - id: binaries
-    ids: [ingress, egress, horoctl-migrate]
+    ids: [ingress, egress, horopter-migrate]
     formats: [tar.gz]
     name_template: "horopter_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
   - id: horoctl

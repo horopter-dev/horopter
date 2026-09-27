@@ -100,7 +100,7 @@ func run() error {
 }
 
 // openStore connects without migrating and refuses a schema this build does not
-// understand. Only horoctl-migrate changes the schema.
+// understand. Only horopter-migrate changes the schema.
 func openStore(ctx context.Context, dsn string) (*postgres.Store, error) {
 	store, err := postgres.OpenNoMigrate(ctx, dsn)
 	if err != nil {

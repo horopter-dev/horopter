@@ -1,4 +1,4 @@
-// Command horoctl-migrate applies the database schema. Together with horoctl's
+// Command horopter-migrate applies the database schema. Together with horoctl's
 // compiled-in migrate verb — which calls the identical internal/migrate.Run entry point
 // this thin main does — it is the only way the schema changes; run this binary as a Job
 // or init container before the daemons start.
@@ -25,7 +25,7 @@ func main() {
 	flag.Parse()
 
 	if err := migrate.Run(context.Background(), *dsn, *rebuildTenant); err != nil {
-		slog.Error("horoctl-migrate failed", "error", err)
+		slog.Error("horopter-migrate failed", "error", err)
 		os.Exit(1)
 	}
 }
