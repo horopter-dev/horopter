@@ -208,15 +208,8 @@ func clearProjection(ctx context.Context, tx pgx.Tx, tenantID string) error {
 }
 
 // foldEventLog replays a tenant's event log in ULID order and returns the projection it
-// implies, keyed by ref, together with the number of events it read to build it.
-//
-// Folding inside the scan loop, rather than materialising the whole log into a slice
-// first, keeps peak memory proportional to the number of distinct refs rather than the
-// total number of events replayed.
-//
-// The accumulator passes a nil *core.Change for the first event of each ref, matching how
-// AppendEvent applies events incrementally; core.Fold is written so both spellings
-// converge.
+// implies, keyed by ref, each entry carrying the change folded for that ref together with
+// the number of events that produced it.
 func foldEventLog(
 	ctx context.Context, tx pgx.Tx, tenantID string,
 ) (map[core.Ref]foldedRef, error) {
