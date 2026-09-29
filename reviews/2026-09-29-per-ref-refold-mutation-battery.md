@@ -85,10 +85,10 @@ against the mutation below before reverting it.
 | 5 | `append.go`, `refoldOutOfOrderAppend` | `out.foldStatus = folded.Status` instead of `refolded.Status` | none in the brief; `TestAppendRecordsTheReFoldedStatusNotTheIncrementalOne` per correction 1(a) | **caught, as corrected** |
 | 6 | `refold.go`, `refoldRef` | return before the `DELETE` when `folded.events == 0` | none — predicted to survive | **survived; new test `TestRefoldRefDeletesAChangeWhoseEventsAreGone` added and confirmed to catch it** |
 | 7 | `refold.go`, `foldRef` | pass `ref.String()` where `ref.ProducerRef()` is expected | `TestRefoldRefFoldsAPointRefFromItsOwnEvent` | **caught, as predicted** |
-| 8 | `append.go`, `AppendEvent`'s deferred metrics | `len(out.refoldMoved) > 0` instead of `movedSomethingRecorded(out.refoldMoved)` | `TestARefoldThatMovesOnlyBookkeepingIsNotCountedAsAltered` | **caught, as predicted** |
+| 8 | `append.go`, `recordAppendOutcome` | `len(out.refoldMoved) > 0` instead of `movedSomethingRecorded(out.refoldMoved)` | `TestARefoldThatMovesOnlyBookkeepingIsNotCountedAsAltered` | **caught, as predicted** |
 | 9 | `refold.go`, `alteredFields` | compare `end` by `(before.End == nil) != (after.End == nil)` instead of `!sameInstant(...)` | none — predicted to survive | **survived; new test `TestARefoldThatMovesOnlyTheEndTimeIsCountedAsAltered` added (corrected per 1(b)) and confirmed to catch it** |
 | 10 | `outcome.go`, `metricAttributes` | add `attribute.StringSlice("horopter.refold.moved", o.refoldMoved)` | none — predicted to survive | **caught immediately by six existing tests** — see note. **This is a decoy: it targets the wrong counter. The real cardinality gap is row 11.** |
-| 11 | `append.go`, `AppendEvent`'s deferred metrics (`s.refolds.Add`) | add `attribute.StringSlice("horopter.refold.moved", out.refoldMoved)` to the inline attribute set, alongside `horopter.refold.altered` | none — this is the corrected mutation 10, applied to its actual target | **survived; new test `TestRefoldCountsOnlyTheAlteredBoolean` added and confirmed to catch it** |
+| 11 | `append.go`, `recordAppendOutcome` (`s.refolds.Add`) | add `attribute.StringSlice("horopter.refold.moved", out.refoldMoved)` to the inline attribute set, alongside `horopter.refold.altered` | none — this is the corrected mutation 10, applied to its actual target | **survived; new test `TestRefoldCountsOnlyTheAlteredBoolean` added and confirmed to catch it** |
 | 12 | `append.go`, `AppendEvent`'s dedupe branch (`writeEvent`'s sibling, `if found { ... }`) | run `applyToProjection(ctx, tx, ev, &out)` before returning `existing, false, tx.Commit(ctx)` on the dedupe path | none — predicted to survive against the suite as it stood | **survived against the two original assertions; new span assertion added to `TestARetriedOutOfOrderAppendDoesNotRefoldAgain` and confirmed to catch it** |
 
 All twelve mutations are caught in the final state of the tree (six by pre-existing tests
@@ -288,13 +288,13 @@ Messages:   	expected exactly one change at ref "ci/01M3PP9ZPP0GQ1Q5Y5D2MX5T14"
 
 ### Mutation 8 — count with a presence check instead of `movedSomethingRecorded`
 
-`internal/store/postgres/append.go`, `AppendEvent`'s deferred metrics block:
+`internal/store/postgres/append.go`, `recordAppendOutcome`:
 
 ```diff
- 			s.refolds.Add(ctx, 1, metric.WithAttributeSet(attribute.NewSet(
- 				attribute.Bool("horopter.refold.altered",
--					movedSomethingRecorded(out.refoldMoved)))))
-+					len(out.refoldMoved) > 0))))
+ 		s.refolds.Add(ctx, 1, metric.WithAttributeSet(attribute.NewSet(
+ 			attribute.Bool("horopter.refold.altered",
+-				movedSomethingRecorded(out.refoldMoved)))))
++				len(out.refoldMoved) > 0))))
 ```
 
 Caught by `TestARefoldThatMovesOnlyBookkeepingIsNotCountedAsAltered`, as predicted:
@@ -394,16 +394,16 @@ moving on," and mutation 10, as specified, was never actually run against the co
 own motivating comment names. This row is that correction, applied to its real target and
 actually run — not merely reasoned about.
 
-`internal/store/postgres/append.go`, `AppendEvent`'s deferred metrics block — the
+`internal/store/postgres/append.go`, `recordAppendOutcome` — the
 `s.refolds.Add` call itself, which builds its attribute set inline rather than through
 `outcome.go`:
 
 ```diff
- 			s.refolds.Add(ctx, 1, metric.WithAttributeSet(attribute.NewSet(
- 				attribute.Bool("horopter.refold.altered",
--					movedSomethingRecorded(out.refoldMoved)))))
-+					movedSomethingRecorded(out.refoldMoved)),
-+				attribute.StringSlice("horopter.refold.moved", out.refoldMoved))))
+ 		s.refolds.Add(ctx, 1, metric.WithAttributeSet(attribute.NewSet(
+ 			attribute.Bool("horopter.refold.altered",
+-				movedSomethingRecorded(out.refoldMoved)))))
++				movedSomethingRecorded(out.refoldMoved)),
++			attribute.StringSlice("horopter.refold.moved", out.refoldMoved))))
 ```
 
 **Survived** `task test -- ./internal/store/postgres/` run against the full package (not
@@ -539,8 +539,8 @@ on six different tests without any new code. The correction's own justification 
 predicting survival — "`refoldCounts` in `refold_test.go` reads one attribute key and
 never asserts the metric's attribute set" — is about `horopter.refold`, not
 `horopter.event.appends`: `refoldCounts` reads `horopter.refold` (the `s.refolds` counter,
-built inline in `AppendEvent`'s deferred closure with a single hand-written
-`attribute.Bool`, never through `metricAttributes`), while mutation 10's edit is in
+built inline in `recordAppendOutcome` with a single hand-written `attribute.Bool`, never
+through `metricAttributes`), while mutation 10's edit is in
 `outcome.go`'s `metricAttributes()`, which feeds `horopter.event.appends` (`s.appends`)
 exclusively. Mutation 11 is that same edit relocated to the counter the reasoning actually
 describes, and it survives exactly as originally predicted — confirmed by running it, not
