@@ -104,16 +104,17 @@ func lockRebuildWrite(ctx context.Context, tx pgx.Tx, tenantID string) error {
 // previous event recorded, which is why the guard exists. Attributes MERGE, so the set of
 // keys is a union and commutative — no reorder loses or gains one — while the value at a
 // key that two events both set follows last-wins like the first group; a query filtering
-// on such a key can therefore match a different set of changes afterwards. End and Status
-// follow the fourth — core.Fold guards both on End being nil, so once a change has closed
-// only a terminal event moves them: "the last TERMINAL event folded wins".
-// Reordering two terminal events swaps the recorded outcome; a late annotation cannot
-// reopen a change that already closed. Start, StartedAt, FirstSeenAt and the source set are
-// NOT in that set: both start facts are minima (migration 0003, core.Fold) and the source
-// set is a union, so all of them are commutative and the two orders agree on them. Every
-// event is still folded in, and the rebuild is still deterministic — replaying the same log
-// again gives the same answer — but "reproduces the projection exactly" is only true up to
-// that ordering.
+// on such a key can therefore match a different set of changes afterwards. End and Status follow
+// the fourth: "the last TERMINAL event folded wins". The guard on End being nil is what stops a
+// NON-terminal event moving them — a late annotation cannot reopen a change that already closed
+// — but a terminal event is NOT guarded, and overwrites both whether the change is open or
+// closed: transitions[stateClosed][assertsTerminal] is {setAsserted, setsEnd: true}. So
+// reordering two terminal events swaps the recorded outcome, which is the flip an operator
+// actually meets. Start, StartedAt, FirstSeenAt and the source set are NOT in that set: both
+// start facts are minima (migration 0003, core.Fold) and the source set is a union, so all of
+// them are commutative and the two orders agree on them. Every event is still folded in, and the
+// rebuild is still deterministic — replaying the same log again gives the same answer — but
+// "reproduces the projection exactly" is only true up to that ordering.
 //
 // See README.md's "Rebuilding a tenant's projection" section for what an operator meets
 // today.
