@@ -16,12 +16,16 @@ import (
 )
 
 // refoldCounter creates horopter.refold. It counts refs recomputed from the log, labelled
-// by whether the recomputation altered the stored change — which is the difference
-// between "the log arrived out of order" and "a recorded outcome moved".
+// by whether the recomputation moved the change's recorded OUTCOME — Status or End — not
+// by whether it changed the stored change at all: a re-fold that moves Subject, Type,
+// Title, Actor, Attributes or last_event_id, and neither Status nor End, still reports
+// altered="false". See movedSomethingRecorded for why those two fields and no others.
 func refoldCounter() metric.Int64Counter {
 	counter, err := otel.Meter(telemetry.StoreScope).Int64Counter("horopter.refold",
 		metric.WithUnit("{refold}"),
-		metric.WithDescription("Refs recomputed from the log, by whether the change changed"))
+		metric.WithDescription(
+			"Refs recomputed from the log, by whether the recomputed Status or End "+
+				"differs from what was stored"))
 	if err != nil {
 		// The SDK returns a working instrument alongside a name-validation error, so the
 		// store opens either way. The error means this call is wrong, not the environment.
@@ -249,7 +253,9 @@ func alteredFields(before, after core.Change) []string {
 	return moved
 }
 
-// sameInstant compares two optional timestamps by VALUE, not by presence.
+// sameInstant compares two optional timestamps by VALUE, not by presence, and at the
+// precision Postgres actually stores rather than whatever precision Go happens to be
+// holding in memory.
 //
 // Comparing only nil-ness hides a real move: two terminal events of the same type folded
 // onto one ref, in different orders, both leave End non-nil — core.Fold's terminal cell
@@ -258,11 +264,24 @@ func alteredFields(before, after core.Change) []string {
 // other field agrees. Clock skew across ingress replicas is exactly what makes two
 // terminal events on one ref reachable, and is the whole premise of this work. That is a
 // change to when the log says the work finished, and it must not be invisible.
+//
+// Comparing at full VALUE, without the truncation, hides the opposite failure: before is
+// folded incrementally from the event as AppendEvent received it, still carrying whatever
+// sub-microsecond precision the producer sent; after comes from refoldRef, which reads
+// that same event's occurred_at back from Postgres — a timestamptz column, and pgx's
+// binary wire encoding truncates a Go time.Time to microseconds on the way in (integer
+// division of the nanosecond field by 1000). Nothing under internal/ truncates OccurredAt
+// before insert, so without this, a producer emitting sub-microsecond timestamps gets
+// "end" reported as moved, and horopter_refold_altered="true" fired, on every terminal
+// out-of-order append — whether or not the recorded outcome actually changed. Truncating
+// both sides to the granularity Postgres actually stores is sameAttributes's fix applied
+// to the same class of problem: compare at the representation the two paths can agree on,
+// not at whichever one happens to carry more precision.
 func sameInstant(a, b *time.Time) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	return a.Equal(*b)
+	return a.Truncate(time.Microsecond).Equal(b.Truncate(time.Microsecond))
 }
 
 // sameAttributes compares two attribute maps by the JSON value they encode, not by their Go

@@ -428,7 +428,10 @@ func refoldOutOfOrderAppend(
 	out.refoldMoved = alteredFields(folded, refolded)
 	// Status and End are the pair that changes what the log SAYS HAPPENED, as against
 	// which of two titles it kept. That is the one an operator wants without tracing on.
-	if refolded.Status != folded.Status || !sameInstant(folded.End, refolded.End) {
+	// movedSomethingRecorded, not a second inline re-derivation of the same condition:
+	// two independent expressions of "Status or End moved" is how they went out of sync
+	// before.
+	if movedSomethingRecorded(out.refoldMoved) {
 		slog.WarnContext(ctx, "a re-fold moved a recorded outcome",
 			"tenant", ev.Tenant, "ref", refRef.String(),
 			"was", string(folded.Status), "now", string(refolded.Status),
