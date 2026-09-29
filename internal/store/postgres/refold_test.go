@@ -395,21 +395,32 @@ func TestARefoldThatMovesOnlyBookkeepingIsNotCountedAsAltered(t *testing.T) {
 	assert.Zero(t, counts["true"])
 }
 
-// TestARefoldWithUnchangedNonStringAttributesIsNotCountedAsAltered catches the JSONB
-// round-trip regression: refoldOutOfOrderAppend used to read the re-folded change back
-// from the row refoldRef had just written, so alteredFields compared core.Fold's in-memory
-// Attributes (a Go int) against the same value decoded from JSONB (a float64).
-// reflect.DeepEqual reported those as different, so "attributes" moved and the re-fold was
-// counted as altering on every out-of-order append whose attributes held anything but a
-// string — even when both fold orders agree on every value. A string-only fixture, like
-// TestARefoldThatMovesOnlyBookkeepingIsNotCountedAsAltered's, cannot catch this: JSON
-// strings decode back to Go strings, so no type ever changes underneath them.
+// TestARefoldWithUnchangedIntAttributesDoesNotReportAttributesMoved pins sameAttributes's
+// fix directly. It does not pin it through the counter: after movedSomethingRecorded's
+// narrowing to Status and End, a false "attributes" move here still reports
+// altered="false", the same as a true one, so horopter.refold — via refoldCounts — cannot
+// tell this fixture's fix from its absence. Only horopter.refold.moved, read from the
+// append span, is specific enough to catch it;
+// TestARefoldThatMovesOnlyBookkeepingIsNotCountedAsAltered already pins the counter half
+// of this scenario, so it is not repeated here.
 //
-// Both events set the SAME key to the SAME int, so the two fold orders agree on
-// Attributes exactly; the only field a re-fold may legitimately move here is
-// last_event_id, which movedSomethingRecorded already excludes.
-func TestARefoldWithUnchangedNonStringAttributesIsNotCountedAsAltered(t *testing.T) {
-	reader := recordMetrics(t)
+// The drift this pins is NOT a change-row read-back — refoldOutOfOrderAppend no longer has
+// one. It is foldRows: refoldRef's re-folded Attributes come from scanning the event
+// table's jsonb column, where a JSON number always decodes as a Go float64, while
+// applyToProjection's incremental fold takes the out-of-order event's OWN attribute values
+// straight from the request, where a JSON number stays whatever Go type the caller sent —
+// an int here. Without sameAttributes's JSON-encoding comparison, that type mismatch alone
+// makes "attributes" look moved on every out-of-order append whose contested key holds a
+// JSON number, whether or not the recorded value actually changed. See sameAttributes's
+// own doc comment in refold.go for the mechanism in full.
+//
+// Both events set the SAME key to the SAME int, so the two fold orders agree on Attributes
+// exactly; the only field a re-fold may legitimately move here is last_event_id, which
+// moves on every out-of-order re-fold by construction. Asserting the exact expected slice,
+// rather than only NotContains("attributes"), also guards against horopter.refold.moved
+// going silent: moved stays nil if the attribute is never emitted, and nil fails this
+// equality where it would have passed a bare NotContains.
+func TestARefoldWithUnchangedIntAttributesDoesNotReportAttributesMoved(t *testing.T) {
 	rec, restore := recordSpans(t)
 	defer restore()
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
@@ -438,14 +449,10 @@ func TestARefoldWithUnchangedNonStringAttributesIsNotCountedAsAltered(t *testing
 			}
 		}
 	}
-	assert.NotContains(t, moved, "attributes",
-		"both fold orders agree on attributes; a JSONB round-trip reporting an int as a "+
-			"float64 must not make this look like a move")
-
-	counts := refoldCounts(t, reader)
-	assert.Equal(t, int64(1), counts["false"],
-		"a re-fold that moved only last_event_id must not be counted as altering")
-	assert.Zero(t, counts["true"])
+	assert.Equal(t, []string{"last_event_id"}, moved,
+		"last_event_id moves on every out-of-order re-fold by construction; attributes "+
+			"must not, since both fold orders agree on it — the JSONB int/float64 mismatch "+
+			"sameAttributes exists to prevent")
 }
 
 // TestARefoldThatMovesOnlyTheEndTimeIsCountedAsAltered catches a regression in
@@ -489,6 +496,62 @@ func TestARefoldThatMovesOnlyTheEndTimeIsCountedAsAltered(t *testing.T) {
 			"re-closes the change, overwriting End with its own timestamp")
 	assert.Equal(t, int64(1), refoldCounts(t, reader)["true"],
 		"the end time moved, which is a recorded fact and must be counted as altering")
+}
+
+// TestARefoldThatOnlyLosesSubMicrosecondEndPrecisionIsNotCountedAsAltered pins
+// sameInstant's precision fix. Only ONE terminal event exists on this ref — unlike
+// TestARefoldThatMovesOnlyTheEndTimeIsCountedAsAltered above, there is no second terminal
+// event whose timestamp could legitimately win the overwrite instead. folded.End and
+// refolded.End are therefore both derived from completed's own OccurredAt; the only thing
+// that can make them differ is precision loss between the two paths that read it.
+//
+// completed.OccurredAt carries 789 sub-microsecond nanoseconds. folded.End comes from
+// core.Fold applied to the event as AppendEvent received it — still holding those 789ns.
+// refolded.End comes from refoldRef reading completed back from the event table's
+// occurred_at column, a timestamptz that pgx's binary wire encoding has already truncated
+// to microseconds on insert, discarding all 789 of them. Comparing the two at Go's full
+// nanosecond precision reports "end" moved on a ref whose End was set by exactly one
+// event and never disagreed about anything Postgres can actually store.
+func TestARefoldThatOnlyLosesSubMicrosecondEndPrecisionIsNotCountedAsAltered(t *testing.T) {
+	reader := recordMetrics(t)
+	rec, restore := recordSpans(t)
+	defer restore()
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+
+	// completed's id must be generated first, so it sorts lower: started is appended
+	// first (in order, since the ref is new) and completed second, out of order.
+	completed := mkEvent(tn, eventID(t, "completed"), "k2", "d1", "deployment.completed",
+		at.Add(20*time.Minute).Add(789*time.Nanosecond))
+	started := mkEvent(tn, eventID(t, "started"), "k1", "d1", "deployment.started", at)
+	require.Less(t, completed.ID, started.ID,
+		"fixture: completed's own append must be the out-of-order one")
+
+	_, _, err := s.AppendEvent(ctx, started)
+	require.NoError(t, err)
+	_, _, err = s.AppendEvent(ctx, completed)
+	require.NoError(t, err)
+
+	var moved []string
+	for _, span := range rec.Ended() {
+		if span.Name() != "AppendEvent" {
+			continue
+		}
+		for _, kv := range span.Attributes() {
+			if string(kv.Key) == "horopter.refold.moved" {
+				moved = kv.Value.AsStringSlice()
+			}
+		}
+	}
+	assert.NotContains(t, moved, "end",
+		"completed's End is the same instant on both fold paths down to the microsecond "+
+			"Postgres can store; only sub-microsecond noise pgx truncates away on insert "+
+			"differs, and that is not a move")
+
+	counts := refoldCounts(t, reader)
+	assert.Zero(t, counts["true"],
+		"a re-fold that only lost sub-microsecond End precision must not be counted as "+
+			"altering")
 }
 
 // TestRefoldRefDeletesAChangeWhoseEventsAreGone catches a regression that returns before
