@@ -59,6 +59,21 @@ fails against mutation 9 with the expected message. The brief's `at` assertion w
 passed under the *mutated* code as well as the correct code (both leave `End` non-nil), so
 it would not have caught anything — see the mutation 9 row below.
 
+## Fix wave 2 (2026-09-29) — mutation 12
+
+The branch's final fix wave, reviewing the tree at `7349754`, found
+`TestARetriedOutOfOrderAppendDoesNotRefoldAgain` (`refold_test.go:183-219`) to be exactly
+this battery's subject matter: its only post-retry assertions were `assert.False(created)`
+and `assert.Equal(before, after)` on the projection row, neither of which distinguishes
+"the dedupe path returned before `applyToProjection` ran" (what the test's name and
+comment claim) from "the dedupe path re-folded an unchanged event set, which is
+idempotent and so left the row byte-identical anyway." Mutation 12 below is that gap, made
+concrete: it moves the `applyToProjection` call onto the dedupe path, and the two original
+assertions both still pass under it. The fix strengthened the test with a third span
+assertion on `horopter.fold.out_of_order` — set only inside `applyToProjection`, so it can
+tell the two cases apart where the projection-equality assertion cannot — and confirmed
+against the mutation below before reverting it.
+
 ## Mutation table
 
 | # | file | edit | predicted catcher | actual outcome |
@@ -74,11 +89,12 @@ it would not have caught anything — see the mutation 9 row below.
 | 9 | `refold.go`, `alteredFields` | compare `end` by `(before.End == nil) != (after.End == nil)` instead of `!sameInstant(...)` | none — predicted to survive | **survived; new test `TestARefoldThatMovesOnlyTheEndTimeIsCountedAsAltered` added (corrected per 1(b)) and confirmed to catch it** |
 | 10 | `outcome.go`, `metricAttributes` | add `attribute.StringSlice("horopter.refold.moved", o.refoldMoved)` | none — predicted to survive | **caught immediately by six existing tests** — see note. **This is a decoy: it targets the wrong counter. The real cardinality gap is row 11.** |
 | 11 | `append.go`, `AppendEvent`'s deferred metrics (`s.refolds.Add`) | add `attribute.StringSlice("horopter.refold.moved", out.refoldMoved)` to the inline attribute set, alongside `horopter.refold.altered` | none — this is the corrected mutation 10, applied to its actual target | **survived; new test `TestRefoldCountsOnlyTheAlteredBoolean` added and confirmed to catch it** |
+| 12 | `append.go`, `AppendEvent`'s dedupe branch (`writeEvent`'s sibling, `if found { ... }`) | run `applyToProjection(ctx, tx, ev, &out)` before returning `existing, false, tx.Commit(ctx)` on the dedupe path | none — predicted to survive against the suite as it stood | **survived against the two original assertions; new span assertion added to `TestARetriedOutOfOrderAppendDoesNotRefoldAgain` and confirmed to catch it** |
 
-All eleven mutations are caught in the final state of the tree (six by pre-existing tests
-unchanged, one by a pre-existing test per correction 1(a), three by tests added across this
-task and its first fix round, one by pre-existing tests contrary to its "predicted to
-survive" label).
+All twelve mutations are caught in the final state of the tree (six by pre-existing tests
+unchanged, one by a pre-existing test per correction 1(a), four by tests added or
+strengthened across this task and its two fix rounds, one by pre-existing tests contrary to
+its "predicted to survive" label).
 
 ## Exact edits, catchers and failure messages
 
@@ -431,6 +447,68 @@ worst case.
 Reverted with `git checkout -- internal/store/postgres/append.go`; `git status --porcelain`
 confirmed only `refold_test.go` (the new test) remained changed.
 
+### Mutation 12 — re-fold on the dedupe path
+
+`internal/store/postgres/append.go`, `AppendEvent`:
+
+```diff
+ 	if found {
+ 		out.dedupePath = dedupeLookup
++		if err := applyToProjection(ctx, tx, ev, &out); err != nil {
++			return core.Event{}, false, err
++		}
+ 		return existing, false, tx.Commit(ctx)
+ 	}
+```
+
+First, confirmed the suite as it stood (`TestARetriedOutOfOrderAppendDoesNotRefoldAgain`
+before it was strengthened) does not catch this:
+
+```
+$ task test -- ./internal/store/postgres/ -run TestARetriedOutOfOrderAppendDoesNotRefoldAgain -v
+=== RUN   TestARetriedOutOfOrderAppendDoesNotRefoldAgain
+--- PASS: TestARetriedOutOfOrderAppendDoesNotRefoldAgain (...)
+PASS
+```
+
+`created` is still `false` (the dedupe lookup still finds the existing row and still
+returns it) and the projection row is still byte-identical before and after the retry — a
+re-fold over an event set the retry did not change is idempotent, so it reproduces the same
+row. Both of the test's original assertions pass under the mutation, which is exactly the
+gap the fix wave closed.
+
+**New assertion added** to `TestARetriedOutOfOrderAppendDoesNotRefoldAgain`: a third
+`horopter.fold.out_of_order` span reading, taken after the retry. That attribute is set
+only inside `applyToProjection` (`out.outOfOrder = found && ev.ID < cur.LastEventID`) and
+stays at its zero value, `false`, on any path that never reaches it — so it is what can
+tell "returned early" apart from "ran and reproduced the same answer," where the
+projection-equality assertion cannot. Re-applying the mutation against the strengthened
+test:
+
+```
+$ task test -- ./internal/store/postgres/ -run TestARetriedOutOfOrderAppendDoesNotRefoldAgain -v
+=== RUN   TestARetriedOutOfOrderAppendDoesNotRefoldAgain
+    refold_test.go:227:
+        	Error Trace:	.../internal/store/postgres/refold_test.go:227
+        	Error:      	Not equal:
+        	            	expected: []string{"false", "true", "false"}
+        	            	actual  : []string{"false", "true", "true"}
+        	Test:       	TestARetriedOutOfOrderAppendDoesNotRefoldAgain
+        	Messages:   	the deduplicated retry must return before applyToProjection runs at all
+--- FAIL: TestARetriedOutOfOrderAppendDoesNotRefoldAgain (...)
+FAIL
+```
+
+`out.outOfOrder` reads `true` on the retry because the retried event (`started`, the lower
+id) is once again folded against the change's current watermark (`completed`'s higher id,
+unchanged since the ref converged on the first, non-retry append) and is still, correctly,
+below it — the mutation's re-fold recomputes the same answer, but it does recompute it,
+which the third span reading now catches where byte-equality on the row could not.
+
+Reverted; `git diff internal/store/postgres/append.go` confirmed empty before the next
+step, and `git status --porcelain` showed only `refold_test.go`'s strengthened assertion
+remaining.
+
 ## Mutations 8, 9 and 11, and the "predicted to survive" label
 
 Mutations 8, 9 and 11 (11 being the corrected form of 10 — see above) were each caught by
@@ -489,15 +567,22 @@ pass and the fix-round-1 addition of mutation 11:
 
 ## Conclusion
 
-All eleven mutations are caught in the tree's final state. Seven behave as the brief (and
+All twelve mutations are caught in the tree's final state. Seven behave as the brief (and
 its corrections) predicted, one row's predicted catcher was wrong but a different
 pre-existing test caught it anyway (mutation 2), one row's predicted catcher caught it
 alongside far more collateral damage than its description implies (mutation 3), mutation
 10's "predicted to survive" label does not hold as specified — it is already caught, by
-tests written for a different purpose, because it targets the wrong counter — and mutation
-11, its corrected form applied to the counter the underlying concern actually names,
-genuinely survived until this fix round and is now pinned. Three real gaps (mutations 6, 9
-and 11) were confirmed empirically before being closed with new tests, each re-run against
-its mutation to confirm the new test — not something else — is what catches it. Row 10 is
-kept rather than rewritten: a plausible-looking mutation aimed at the wrong site is itself
-a finding worth a permanent record, not an error to erase once the right site is found.
+tests written for a different purpose, because it targets the wrong counter — and mutations
+11 and 12 each genuinely survived until the fix round that added them and are now pinned.
+Four real gaps (mutations 6, 9, 11 and 12) were confirmed empirically before being closed
+with new or strengthened tests, each re-run against its mutation to confirm the new
+assertion — not something else already in the test — is what catches it. Row 10 is kept
+rather than rewritten: a plausible-looking mutation aimed at the wrong site is itself a
+finding worth a permanent record, not an error to erase once the right site is found.
+
+Mutation 12 (2026-09-29, fix wave 2) is this battery's own subject matter recurring one
+level up: `TestARetriedOutOfOrderAppendDoesNotRefoldAgain`'s two original assertions
+(`created=false`, byte-identical row) could not tell "the dedupe path returned before
+`applyToProjection` ran" from "it ran and reproduced the same answer," because a re-fold
+over an unchanged event set is idempotent. The same shape as mutations 6 and 9: a property
+the test's name and comment claimed, that nothing in its assertions actually observed.

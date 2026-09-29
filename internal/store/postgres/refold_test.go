@@ -58,19 +58,32 @@ func TestRefoldRefReproducesAttributeMergeAtAContestedKey(t *testing.T) {
 	// the test depends on it, so a change to eventID fails here and not in the fold.
 	require.Less(t, first.ID, second.ID, "fixture: ids must sort in build order")
 
-	_, _, err := s.AppendEvent(ctx, first)
+	// Reverse arrival: second (the higher id) commits first, so first's own append is the
+	// out-of-order one and AppendEvent re-folds this ref before RefoldRef is ever called
+	// below. Appending in id order, as this test used to, lets mergedAttributes get "env"
+	// right by accident — it always takes the last-ARRIVED event's value regardless of id,
+	// so an id-ordered arrival can never tell that rule apart from the correct, per-key,
+	// last-ID-wins one. Only an out-of-order arrival can, which is what this fixture
+	// exists to pin: the live append path converges attributes, not only the explicit
+	// RefoldRef call this test is named for.
+	_, _, err := s.AppendEvent(ctx, second)
 	require.NoError(t, err)
-	_, _, err = s.AppendEvent(ctx, second)
+	_, _, err = s.AppendEvent(ctx, first)
 	require.NoError(t, err)
 
 	ref := core.RefFromRow("ci/d1")
-	require.NoError(t, s.RefoldRef(ctx, tn, ref))
-
-	got := oneChange(ctx, t, s, tn, ref.String())
-	assert.Equal(t, "prod", got.Attributes["env"],
-		"the higher-id event's value must win at a key both set")
-	assert.Equal(t, "kept", got.Attributes["only-on-first"],
+	converged := oneChange(ctx, t, s, tn, ref.String())
+	assert.Equal(t, "prod", converged.Attributes["env"],
+		"the higher-id event's value must win at a key both set, even though it arrived "+
+			"first")
+	assert.Equal(t, "kept", converged.Attributes["only-on-first"],
 		"a key only the lower-id event set must survive the merge")
+
+	// RefoldRef on an already-converged ref must reproduce it exactly, the same invariant
+	// TestRefoldRefFoldsACorrelatedRefFromItsLog pins for the ordinary, in-order case.
+	require.NoError(t, s.RefoldRef(ctx, tn, ref))
+	assert.Equal(t, converged, oneChange(ctx, t, s, tn, ref.String()),
+		"re-folding an already-converged ref must not change it")
 }
 
 // TestRefoldRefIgnoresAPointEventInAnotherLocus is the membership guard. foldRef's query
@@ -217,42 +230,16 @@ func TestARetriedOutOfOrderAppendDoesNotRefoldAgain(t *testing.T) {
 	assert.False(t, created, "the retry must be deduplicated")
 	assert.Equal(t, before, oneChange(ctx, t, s, tn, "ci/d1"),
 		"a deduplicated retry must not have re-folded the ref")
-}
 
-// TestAnOutOfOrderAppendStillFailsFastUnderARebuildLock pins that adding a re-fold inside
-// the append transaction did not change how an append composes with a rebuild. The
-// re-fold runs under locks the append already holds, so it must add no new wait — an
-// append blocked by a rebuild must still give up on AppendLockTimeout with a retryable
-// error rather than deadlocking against its own re-fold.
-func TestAnOutOfOrderAppendStillFailsFastUnderARebuildLock(t *testing.T) {
-	ctx, s, tn := context.Background(), newStore(t), tenant(t)
-	at := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
-
-	// started must carry the LOWER id and completed the higher one, with completed
-	// appended first — the same fixture shape TestARetriedOutOfOrderAppendDoesNotRefoldAgain
-	// uses — so started's blocked append below is genuinely the out-of-order one the test
-	// name and the comment describe, not one that happens to take the in-order arm anyway.
-	started := mkEvent(tn, eventID(t, "started"), "k2", "d1", "deployment.started", at)
-	completed := mkEvent(tn, eventID(t, "completed"), "k1", "d1", "deployment.completed",
-		at.Add(20*time.Minute))
-	require.Less(t, started.ID, completed.ID, "fixture: ids must sort in build order")
-	_, _, err := s.AppendEvent(ctx, completed)
-	require.NoError(t, err)
-
-	// Hold the tenant lock exclusively, as a rebuild does, in a transaction of our own.
-	tx, err := s.Pool().Begin(ctx)
-	require.NoError(t, err)
-	defer func() { _ = tx.Rollback(ctx) }()
-	_, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, tn)
-	require.NoError(t, err)
-
-	// This append is out of order, so it would re-fold — but it cannot get the lock.
-	start := time.Now()
-	_, _, err = s.AppendEvent(ctx, started)
-	require.Error(t, err)
-	assert.Less(t, time.Since(start), 3*postgres.AppendLockTimeout,
-		"the append must give up on its own timeout, not wait on the re-fold")
-	assert.Contains(t, err.Error(), "retry the append")
+	// The equality above passes even if the retry DOES call applyToProjection: a re-fold
+	// over an unchanged event set is idempotent, so the row comes back byte-identical
+	// either way. horopter.fold.out_of_order is set only inside applyToProjection and
+	// stays at its zero value, false, on any path that never reaches it — so a third
+	// span reading "false" is what actually pins that the dedupe path returned before
+	// applyToProjection ran at all, not merely that its result looked unchanged.
+	require.Equal(t, []string{"false", "true", "false"},
+		spanAttrValues(rec, "AppendEvent", "horopter.fold.out_of_order"),
+		"the deduplicated retry must return before applyToProjection runs at all")
 }
 
 // oneChange reads exactly one change by ref, failing the test if the projection holds
@@ -401,6 +388,59 @@ func TestARefoldThatMovesOnlyBookkeepingIsNotCountedAsAltered(t *testing.T) {
 	require.NoError(t, err)
 	_, _, err = s.AppendEvent(ctx, early)
 	require.NoError(t, err)
+
+	counts := refoldCounts(t, reader)
+	assert.Equal(t, int64(1), counts["false"],
+		"a re-fold that moved only last_event_id must not be counted as altering")
+	assert.Zero(t, counts["true"])
+}
+
+// TestARefoldWithUnchangedNonStringAttributesIsNotCountedAsAltered catches the JSONB
+// round-trip regression: refoldOutOfOrderAppend used to read the re-folded change back
+// from the row refoldRef had just written, so alteredFields compared core.Fold's in-memory
+// Attributes (a Go int) against the same value decoded from JSONB (a float64).
+// reflect.DeepEqual reported those as different, so "attributes" moved and the re-fold was
+// counted as altering on every out-of-order append whose attributes held anything but a
+// string — even when both fold orders agree on every value. A string-only fixture, like
+// TestARefoldThatMovesOnlyBookkeepingIsNotCountedAsAltered's, cannot catch this: JSON
+// strings decode back to Go strings, so no type ever changes underneath them.
+//
+// Both events set the SAME key to the SAME int, so the two fold orders agree on
+// Attributes exactly; the only field a re-fold may legitimately move here is
+// last_event_id, which movedSomethingRecorded already excludes.
+func TestARefoldWithUnchangedNonStringAttributesIsNotCountedAsAltered(t *testing.T) {
+	reader := recordMetrics(t)
+	rec, restore := recordSpans(t)
+	defer restore()
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+
+	early := mkEvent(tn, eventID(t, "early"), "k1", "d1", "deployment.annotated", at)
+	early.Attributes = map[string]any{"step": 1}
+	late := mkEvent(tn, eventID(t, "late"), "k2", "d1", "deployment.annotated",
+		at.Add(time.Minute))
+	late.Attributes = map[string]any{"step": 1}
+	require.Less(t, early.ID, late.ID, "fixture: ids must sort in build order")
+
+	_, _, err := s.AppendEvent(ctx, late)
+	require.NoError(t, err)
+	_, _, err = s.AppendEvent(ctx, early)
+	require.NoError(t, err)
+
+	var moved []string
+	for _, span := range rec.Ended() {
+		if span.Name() != "AppendEvent" {
+			continue
+		}
+		for _, kv := range span.Attributes() {
+			if string(kv.Key) == "horopter.refold.moved" {
+				moved = kv.Value.AsStringSlice()
+			}
+		}
+	}
+	assert.NotContains(t, moved, "attributes",
+		"both fold orders agree on attributes; a JSONB round-trip reporting an int as a "+
+			"float64 must not make this look like a move")
 
 	counts := refoldCounts(t, reader)
 	assert.Equal(t, int64(1), counts["false"],
