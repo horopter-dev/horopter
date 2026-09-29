@@ -105,6 +105,9 @@ func newIngressFixtureOpts(
 	// entropy would give two same-test events an arbitrary relative id order — the exact
 	// condition applyToProjection now treats as an out-of-order append. See
 	// internal/store/postgres/append_test.go's monotonicEntropy for the identical hazard.
+	// This one is a fresh ulid.Monotonic built per fixture, not a package-level variable
+	// shared across goroutines, so monotonicEntropy's own concurrent-use caveat does not
+	// carry over: two ingress fixtures never share this instance.
 	srv, err := ingress.New(s, clock, ulid.Monotonic(rand.Reader, 0), authn, srvOpts...)
 	require.NoError(t, err)
 

@@ -353,9 +353,18 @@ What is recorded:
   attempt has already committed.
 - `horopter_refold_total` — refs recomputed from the log because an event arrived with an
   id below the change's watermark, labelled with `horopter_refold_altered` — whether the
-  recomputation moved the change's recorded status. `horopter_refold_altered="true"` is the
-  rate at which late arrivals are changing recorded outcomes, which is the number worth an
-  alert; the unlabelled total is the out-of-order rate itself.
+  recomputation moved the change's recorded outcome, Status or End.
+  `horopter_refold_altered="true"` is the rate at which late arrivals are changing recorded
+  outcomes, which is the number worth an alert; a re-fold that moved only Subject, Type,
+  Title, Actor, Attributes or `last_event_id` is not counted here, however often it fires —
+  that detail is on the append span's `horopter.refold.moved` attribute instead. The
+  unlabelled total is the out-of-order rate itself. Every re-fold reads the ref's whole
+  event history inside the append's own transaction, under the ref-exclusive and
+  tenant-shared locks `AppendEvent` already holds, so `horopter_refold_total`'s rate
+  multiplied by the affected refs' event counts is the append latency this adds — a
+  long-lived, frequently-out-of-order ref pays for a full re-read on every such append, and
+  holding the tenant-shared lock for longer is also more of what `RebuildProjection` waits
+  out against `RebuildLockTimeout`.
 - `horopter_read_admission_limit` and `horopter_read_admission_in_flight` — `horopter-egress`'s
   read concurrency limit, and the reads holding a place under it;
   `horopter_read_memory_reserved_bytes` and `horopter_read_memory_capacity_bytes` — its read
@@ -415,6 +424,17 @@ Run one to completion against the database before starting any daemon at the new
 each daemon asserts the recorded schema version at startup and refuses to run against one it
 does not understand, so a skewed rollout fails loudly rather than corrupting data quietly.
 
+Every pending migration file runs inside one transaction (`postgres.Migrate`), so a lock any
+one of them takes is held until the whole batch commits, not just for its own statement.
+Migration `0009` rebuilds an index on `event` — the largest table, and the only one every
+append writes to — and is the first migration since `0001` to touch it: its `DROP INDEX`
+takes an `ACCESS EXCLUSIVE` lock on `event` that, because of the shared transaction, is then
+held for as long as the `CREATE INDEX` that follows takes to build plus however long any
+migration files after it take to run, blocking every append and read against `event` for the
+whole of that window. On a database with a large event history, size `0009`'s downtime before
+running it in production; every earlier migration's locking was cheap enough not to need
+this note.
+
 ### Rebuilding a tenant's projection
 
     horopter-migrate --rebuild-tenant=<tenant-id>
@@ -454,7 +474,11 @@ hold a watermark below its real maximum, so a later append whose id is above the
 but below that maximum still takes the ordinary incremental path, and the old drift
 survives it. `--rebuild-tenant` still corrects such a ref — a rebuild always replays the
 whole log in id order regardless of what the stored watermark says — so it remains the
-remedy for data that predates this version.
+remedy for data that predates this version. "Corrects" can still mean what it always did:
+for such a ref the rebuild can change the recorded Status, End, Type, Title, Actor or
+attributes, so a change your dashboard shows as `completed` can read `failed` afterward.
+Read `GET /v1/events?ref=<ref>` before and after a rebuild for any ref you need to explain
+that change on, the same as before this version.
 
 This makes the system self-consistent, not causally correct: event ids are minted from
 receipt time with `crypto/rand` entropy, so two events minted in the same millisecond have

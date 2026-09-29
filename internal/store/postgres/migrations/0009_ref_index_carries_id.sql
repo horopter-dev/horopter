@@ -1,11 +1,24 @@
--- The per-ref re-fold reads a ref's events in id order on the append hot path. Carrying
--- id in the index lets that read come back ordered instead of sorting a handful of rows
--- inside the append's transaction, while it holds the ref's advisory lock.
+-- The per-ref re-fold reads a ref's events in id order on the append hot path.
+--
+-- CORRECTED 2026-09-29: this migration originally claimed that carrying id in the index
+-- lets that read come back ordered instead of sorting a handful of rows. Verified with
+-- EXPLAIN ANALYZE against a seeded dev database and found false: foldRef's predicate is
+-- `tenant = $1 AND (correlation_ref = $2 OR (correlation_ref = '' AND id = $3))`, an OR
+-- across two different index-backed conditions, which Postgres always plans as a BitmapOr
+-- of two Bitmap Index Scans feeding one Bitmap Heap Scan — Sort -> Bitmap Heap Scan ->
+-- BitmapOr. A bitmap heap scan returns rows in physical (heap) order, not index order, so
+-- `ORDER BY id ASC` still needs an explicit Sort on top regardless of what columns this
+-- index carries. The plan was identical in shape and cost whether this index was
+-- (tenant, correlation_ref) or (tenant, correlation_ref, id); forcing
+-- enable_bitmapscan=off gave Sort -> Seq Scan instead, never an ordered Index Scan — the
+-- OR is what forces the Sort, not a missing column. Carrying id has no demonstrated
+-- benefit for any query this codebase issues today: a bitmap index scan returns only a
+-- TID list, so it does not make the scan index-only either, since foldRef selects columns
+-- (occurred_at, attributes, ...) the index does not carry.
 --
 -- decisions/2026-09-16-out-of-order-handling-belongs-in-the-projection.md records this as
--- "an optimisation, not a prerequisite"; it became worth taking when the re-fold stopped
--- being a background operation.
---
--- The old index is a strict prefix of the new one, so nothing that used it loses a plan.
+-- "an optimisation, not a prerequisite"; on the evidence above it bought nothing, but it
+-- is kept because it is harmless — the old index is a strict prefix of the new one, so
+-- nothing that used it loses a plan.
 DROP INDEX IF EXISTS ix_event_tenant_corr;
 CREATE INDEX ix_event_tenant_corr ON event (tenant, correlation_ref, id);
