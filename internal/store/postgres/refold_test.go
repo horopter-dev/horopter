@@ -3,6 +3,9 @@ package postgres_test
 import (
 	"context"
 	"fmt"
+	"math/rand"
+	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -191,6 +194,121 @@ func TestAConvergedRefEqualsAWholeTenantRebuild(t *testing.T) {
 
 	assert.Equal(t, live, rebuilt,
 		"a rebuild found something to change, so live folding is still not id-ordered")
+}
+
+// refoldFuzzSeedEnv overrides the shuffle seed
+// TestAConvergedRefEqualsARandomlyOrderedRebuild uses. Export it (a base-10 int64) to
+// replay one run's exact orderings; left unset, the seed is derived from the wall clock so
+// distinct runs explore distinct permutations. Either way, the seed actually in force is
+// logged with t.Logf on every run: a property test whose failure cannot be replayed from
+// its own output is not worth having.
+const refoldFuzzSeedEnv = "HOROPTER_REFOLD_FUZZ_SEED"
+
+// refoldFuzzIterations bounds TestAConvergedRefEqualsARandomlyOrderedRebuild's cost. Each
+// iteration appends len(refoldFuzzRecipe) = 6 events, one append transaction each, plus one
+// whole-tenant RebuildProjection. Measured against the real suite (task test --
+// ./internal/store/postgres/...): the package took 10.95s before this test existed and
+// 11.89s with it at 24 iterations, so 24 iterations cost about 0.94s, or roughly 40ms per
+// iteration — seconds, not minutes, added to an ~11s suite.
+const refoldFuzzIterations = 24
+
+// refoldFuzzRecipe is TestAConvergedRefEqualsARandomlyOrderedRebuild's event set. It starts
+// from TestAConvergedRefEqualsAWholeTenantRebuild's six events and its two terminals
+// (failed, completed — core.Fold's stateClosed/assertsTerminal cell in
+// internal/core/fold.go is {setAsserted, setsEnd: true, commutative: false}, so whichever
+// terminal folds LAST overwrites Status and End) but adds two axes that fixture left
+// unexercised: a per-event Title and Actor (last-NON-EMPTY-wins) and a "shared" attribute
+// key set to a distinct value by every event (last-wins per key, empty value or not). A
+// reordering can now move three independent recorded fields — Status/End, Title or Actor,
+// and Attributes["shared"] — instead of only one, which is why the mutation proof (see the
+// report) still finds a divergent ordering even on iterations whose two terminals happen to
+// keep their original relative order.
+var refoldFuzzRecipe = []struct{ typ, title, actor, shared string }{
+	{"deployment.started", "deploy started", "alice", "v1"},
+	{"deployment.annotated", "", "", "v2"},
+	{"deployment.annotated", "annotated by bob", "bob", "v3"},
+	{"deployment.failed", "deploy failed", "carol", "v4"},
+	{"deployment.annotated", "", "dave", "v5"},
+	{"deployment.completed", "deploy completed", "eve", "v6"},
+}
+
+// refoldFuzzFixtureRef is the producer ref every event in refoldFuzzRecipe targets.
+const refoldFuzzFixtureRef = "d1"
+
+// refoldFuzzSeed resolves the seed TestAConvergedRefEqualsARandomlyOrderedRebuild shuffles
+// with: refoldFuzzSeedEnv when it is set and parses, the current time otherwise.
+func refoldFuzzSeed(t *testing.T) int64 {
+	t.Helper()
+	if v := os.Getenv(refoldFuzzSeedEnv); v != "" {
+		seed, err := strconv.ParseInt(v, 10, 64)
+		require.NoError(t, err, "%s must be a base-10 int64", refoldFuzzSeedEnv)
+		return seed
+	}
+	return time.Now().UnixNano()
+}
+
+// buildRefoldFuzzEvents builds one fresh copy of refoldFuzzRecipe's events for tenant tn,
+// each under its own event id — assigned in recipe order, so ids sort in that order — and
+// its own idempotency key.
+func buildRefoldFuzzEvents(t *testing.T, tn string, at time.Time) []core.Event {
+	t.Helper()
+	built := make([]core.Event, len(refoldFuzzRecipe))
+	for i, r := range refoldFuzzRecipe {
+		ev := mkEvent(tn, eventID(t, r.typ), uniqueToken(), refoldFuzzFixtureRef, r.typ,
+			at.Add(time.Duration(i)*time.Minute))
+		ev.Title = r.title
+		ev.Actor = r.actor
+		ev.Attributes = map[string]any{"shared": r.shared}
+		built[i] = ev
+	}
+	return built
+}
+
+// TestAConvergedRefEqualsARandomlyOrderedRebuild generalises
+// TestAConvergedRefEqualsAWholeTenantRebuild into the property the design spec calls the
+// entire claim of this change (2026-09-29-per-ref-refold plan, quoting spec §7): "For a set
+// of events appended in an arbitrary commit order, the live projection must equal
+// foldEventLog's answer over the same log. Generating orderings and asserting that equality
+// is the entire claim of this change; every other test is a detail." The test above is one
+// sample of that claim — six events in the single hard-coded scramble
+// []int{3, 0, 5, 1, 4, 2}. This generates the scramble instead of enumerating one instance
+// of it.
+//
+// TENANT. Each iteration runs in its own t.Run subtest and calls tenant(t) there. tenant(t)
+// names the tenant after t.Name(), which already differs per subtest (.…/iter0, .…/iter1,
+// …); tenant(t) also appends its own uniqueToken() suffix regardless, so the fresh-tenant
+// requirement holds twice over even though only one mechanism is required to hold it once.
+func TestAConvergedRefEqualsARandomlyOrderedRebuild(t *testing.T) {
+	seed := refoldFuzzSeed(t)
+	t.Logf("shuffle seed %d (export %s=%d to replay this run's exact orderings)",
+		seed, refoldFuzzSeedEnv, seed)
+	//nolint:gosec // G404: shuffling append order for a property test, not a cryptographic
+	// use; the seed is what makes a failure replayable, which crypto/rand would defeat.
+	rng := rand.New(rand.NewSource(seed))
+	at := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	ref := "ci/" + refoldFuzzFixtureRef
+
+	for iter := range refoldFuzzIterations {
+		order := rng.Perm(len(refoldFuzzRecipe))
+		t.Run(fmt.Sprintf("iter%d", iter), func(t *testing.T) {
+			t.Logf("append order %v", order)
+			ctx, s, tn := context.Background(), newStore(t), tenant(t)
+			built := buildRefoldFuzzEvents(t, tn, at)
+
+			for _, i := range order {
+				_, _, err := s.AppendEvent(ctx, built[i])
+				require.NoError(t, err)
+			}
+
+			live := oneChange(ctx, t, s, tn, ref)
+			require.NoError(t, s.RebuildProjection(ctx, tn))
+			rebuilt := oneChange(ctx, t, s, tn, ref)
+
+			assert.Equal(t, live, rebuilt,
+				"order %v: a rebuild found something to change, so live folding is still "+
+					"not id-ordered", order)
+		})
+	}
 }
 
 // TestARetriedOutOfOrderAppendDoesNotRefoldAgain pins that the dedupe path still returns

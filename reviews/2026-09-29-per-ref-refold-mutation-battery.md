@@ -585,3 +585,58 @@ level up: `TestARetriedOutOfOrderAppendDoesNotRefoldAgain`'s two original assert
 `applyToProjection` ran" from "it ran and reproduced the same answer," because a re-fold
 over an unchanged event set is idempotent. The same shape as mutations 6 and 9: a property
 the test's name and comment claimed, that nothing in its assertions actually observed.
+
+## Addendum (2026-09-29) — a generative catcher for mutation 4
+
+Row 4 above names `TestAnOutOfOrderAppendConvergesTheRefToIDOrder` as the catcher, with
+`TestAConvergedRefEqualsAWholeTenantRebuild` also listed as catching it collaterally. That
+content stands unchanged above — this addendum records a new, stronger catcher added for
+the same mutation, not a correction to it.
+
+Both existing catchers pin exactly one hand-picked ordering each. A fix that special-cased
+those two specific fixtures while leaving the general "live equals an id-ordered rebuild
+for ANY commit order" claim broken would satisfy both without satisfying the design spec,
+which states that generated-orderings property as the entire claim of this change (plan
+`2026-09-29-per-ref-refold`, quoting spec §7). `TestAConvergedRefEqualsARandomlyOrderedRebuild`
+(`internal/store/postgres/refold_test.go`) is that generator: `refoldFuzzIterations` (24)
+random permutations of a six-event, two-terminal fixture, each appended to a fresh tenant
+and checked against `RebuildProjection`, with the shuffle seed logged via `t.Logf` and
+overridable through `HOROPTER_REFOLD_FUZZ_SEED` for replay.
+
+Re-run against mutation 4's exact edit (`if !out.outOfOrder` → `if true` in
+`applyToProjection`, `internal/store/postgres/append.go`):
+
+```
+task test -- -run TestAConvergedRefEqualsARandomlyOrderedRebuild -v ./internal/store/postgres/...
+```
+
+Seed `1790714783045686000` (logged on this run) produced 20 of 24 subtests failing,
+starting at `iter0` (append order `[4 0 2 5 3 1]`):
+
+```
+Error:      	Not equal:
+            	expected: core.Change{... Type:"deployment.annotated", Title:"deploy failed",
+            	  Actor:"carol", ... Status:"failed", Attributes:map[string]interface {}{"shared":"v2"},
+            	  LastEventID:"01M3QEP9BMCNQKNQN33H99CFCH", ...}
+            	actual  : core.Change{... Type:"deployment.completed", Title:"deploy completed",
+            	  Actor:"eve", ... Status:"completed", Attributes:map[string]interface {}{"shared":"v6"},
+            	  LastEventID:"01M3QEP9BMCNQKNQN33S3DBQNN", ...}
+Test:       	TestAConvergedRefEqualsARandomlyOrderedRebuild/iter0
+Messages:   	order [4 0 2 5 3 1]: a rebuild found something to change, so live folding is
+              still not id-ordered
+```
+
+4 of 24 iterations (`iter2`, `iter3`, `iter16`, `iter20`) passed even under the mutation —
+those particular permutations happened to append the higher-id terminal last anyway, which
+mutation 4 cannot break since there is then nothing for the disabled re-fold to have fixed.
+That 4-in-24 pass rate is the flakiness the task brief warned a fixed iteration count could
+introduce; at 24 iterations the chance of a fully-clean run (no divergent ordering at all)
+is low enough in practice — 20 of 24 diverged on the first try — that this is not treated as
+a live concern, and the seed log makes any future all-green run reproducible for inspection
+rather than silently trusted.
+
+The mutation was reverted immediately after this run; `git status --porcelain` was clean on
+`internal/store/postgres/append.go` before the next step, and the full package suite
+(`task test -- ./internal/store/postgres/...`) passed afterward. Full detail, including the
+before/after suite timing and the event-set design, is in
+`.superpowers/sdd/2026-09-29-per-ref-refold/generative-test-report.md`.
