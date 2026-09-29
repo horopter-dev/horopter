@@ -394,9 +394,8 @@ moving on," and mutation 10, as specified, was never actually run against the co
 own motivating comment names. This row is that correction, applied to its real target and
 actually run — not merely reasoned about.
 
-`internal/store/postgres/append.go`, `recordAppendOutcome` — the
-`s.refolds.Add` call itself, which builds its attribute set inline rather than through
-`outcome.go`:
+`internal/store/postgres/append.go`, `recordAppendOutcome` — the `s.refolds.Add` call
+itself, which builds its attribute set inline rather than through `outcome.go`:
 
 ```diff
  		s.refolds.Add(ctx, 1, metric.WithAttributeSet(attribute.NewSet(

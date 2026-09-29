@@ -428,17 +428,24 @@ Every pending migration file runs inside one transaction (`postgres.Migrate`), s
 one of them takes is held until the whole batch commits, not just for its own statement.
 Migration `0009` rebuilds an index on `event` — the largest table, and the only one every
 append writes to. It is not the first migration since `0001` to touch `event`, and not the
-heaviest: `0005` adds a foreign key (an `ACCESS EXCLUSIVE` lock plus a validation scan),
-`0006` rewrites every row (`ADD COLUMN`, two full-table `UPDATE`s, then `SET NOT NULL` and
-two `CHECK` constraints), and `0008` adds a column under another `CHECK` constraint —
-`0006` alone is strictly heavier than `0009`'s index build. `0009` gets its own note
-because, unlike those, it buys nothing: it costs a full index rebuild on `event` for no
-measured gain (see its own comment for the `EXPLAIN` evidence), and it is kept rather than
-reverted only because reverting it would cost a second rebuild. Its `DROP INDEX` takes an
-`ACCESS EXCLUSIVE` lock on `event` that, because of the shared transaction, is held for as
-long as the `CREATE INDEX` that follows takes to build, blocking every append and read
-against `event` for the whole of that window. On a database with a large event history,
-size `0009`'s downtime before running it in production.
+heaviest: `0004` backfills `tenant` on every row via an `UPDATE ... FROM tenant`, then a
+second `UPDATE` prefixes every correlated event's `correlation_ref` with `legacy/` — two
+full-table passes, the second over rows the first already rewrote — under a validating
+`CHECK` on `origin`; `0005` adds a foreign key (an `ACCESS EXCLUSIVE` lock plus a
+validation scan); `0006` also rewrites every row (`ADD COLUMN`, two full-table `UPDATE`s
+that between them cover every row exactly once, then `SET NOT NULL` and two `CHECK`
+constraints); and `0008` adds a column under another `CHECK` constraint. `0004`'s two
+passes touch more total rows than any of the others — `0006`'s two `UPDATE`s partition the
+table without overlap, `0004`'s second one revisits what the first already rewrote — so
+`0004`, not `0006`, is the comparator strictly heavier than `0009`'s index build. `0009`
+gets its own note because, unlike those, it buys nothing: it costs a full index rebuild on
+`event` for no measured gain (see its own comment for the `EXPLAIN` evidence), and it is
+kept rather than reverted only because reverting it would cost a second rebuild. Its
+`DROP INDEX` takes an `ACCESS EXCLUSIVE` lock on `event` that, because of the shared
+transaction, is held for as long as the `CREATE INDEX` that follows takes to build,
+blocking every append and read against `event` for the whole of that window. On a
+database with a large event history, size `0009`'s downtime before running it in
+production.
 
 ### Rebuilding a tenant's projection
 
