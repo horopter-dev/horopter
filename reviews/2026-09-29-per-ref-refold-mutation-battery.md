@@ -27,6 +27,9 @@ by hand from this document alone rather than from a session transcript.
    re-applied and re-reverted to confirm the new test is what catches them.
 6. At the end: `task check` (`gofmt -l .`, `golangci-lint run ./...`,
    `go test -race -count=1 ./...`) run once more against the untouched tree.
+7. Fix round 1 of review added mutation 11 (see its own section below) after the initial
+   ten-row pass, following the identical apply/run/revert method, with the corrected
+   mutation actually run before any conclusion about it was drawn.
 
 ## Correction 1(b) — deriving the correct `End` assertion
 
@@ -69,11 +72,13 @@ it would not have caught anything — see the mutation 9 row below.
 | 7 | `refold.go`, `foldRef` | pass `ref.String()` where `ref.ProducerRef()` is expected | `TestRefoldRefFoldsAPointRefFromItsOwnEvent` | **caught, as predicted** |
 | 8 | `append.go`, `AppendEvent`'s deferred metrics | `len(out.refoldMoved) > 0` instead of `movedSomethingRecorded(out.refoldMoved)` | `TestARefoldThatMovesOnlyBookkeepingIsNotCountedAsAltered` | **caught, as predicted** |
 | 9 | `refold.go`, `alteredFields` | compare `end` by `(before.End == nil) != (after.End == nil)` instead of `!sameInstant(...)` | none — predicted to survive | **survived; new test `TestARefoldThatMovesOnlyTheEndTimeIsCountedAsAltered` added (corrected per 1(b)) and confirmed to catch it** |
-| 10 | `outcome.go`, `metricAttributes` | add `attribute.StringSlice("horopter.refold.moved", o.refoldMoved)` | none — predicted to survive | **caught immediately by six existing tests** — see note; no new test needed |
+| 10 | `outcome.go`, `metricAttributes` | add `attribute.StringSlice("horopter.refold.moved", o.refoldMoved)` | none — predicted to survive | **caught immediately by six existing tests** — see note. **This is a decoy: it targets the wrong counter. The real cardinality gap is row 11.** |
+| 11 | `append.go`, `AppendEvent`'s deferred metrics (`s.refolds.Add`) | add `attribute.StringSlice("horopter.refold.moved", out.refoldMoved)` to the inline attribute set, alongside `horopter.refold.altered` | none — this is the corrected mutation 10, applied to its actual target | **survived; new test `TestRefoldCountsOnlyTheAlteredBoolean` added and confirmed to catch it** |
 
-All ten mutations are caught in the final state of the tree (six by pre-existing tests
-unchanged, one by a pre-existing test per correction 1(a), two by tests added this task,
-one by pre-existing tests contrary to its "predicted to survive" label).
+All eleven mutations are caught in the final state of the tree (six by pre-existing tests
+unchanged, one by a pre-existing test per correction 1(a), three by tests added across this
+task and its first fix round, one by pre-existing tests contrary to its "predicted to
+survive" label).
 
 ## Exact edits, catchers and failure messages
 
@@ -359,11 +364,78 @@ Also caught by `TestConcurrentDuplicateIdempotencyKeyReturnsTheOriginal`,
 `TestAppendCountsATransientFailure` and `TestAppendRefusesAnEventOverTheAttributeCap`. No
 new test was needed.
 
-## Mutations 8, 9 and 10, and the "predicted to survive" label
+**This row is a decoy, kept because it is a true and useful record in its own right**:
+it documents that a plausible-looking mutation aimed at the wrong site proves nothing about
+the site it was meant to test. The real cardinality gap `outcome.go`'s comment and this
+row's motivating concern point at is on `horopter.refold`, not `horopter.event.appends` —
+see mutation 11.
 
-Mutations 8, 9 and 10 were each caught by review — of the plan, or of a prior task's
-review — rather than by running code, and each targets a place where a signal that looks
-informative would in fact carry no information:
+### Mutation 11 — feed the field-name list into `horopter.refold` itself
+
+Fix round 1 of Task 7's review reversed the earlier call to leave this as a residual: the
+brief's own rule is "a mutation nothing catches is a missing test, write the test before
+moving on," and mutation 10, as specified, was never actually run against the counter its
+own motivating comment names. This row is that correction, applied to its real target and
+actually run — not merely reasoned about.
+
+`internal/store/postgres/append.go`, `AppendEvent`'s deferred metrics block — the
+`s.refolds.Add` call itself, which builds its attribute set inline rather than through
+`outcome.go`:
+
+```diff
+ 			s.refolds.Add(ctx, 1, metric.WithAttributeSet(attribute.NewSet(
+ 				attribute.Bool("horopter.refold.altered",
+-					movedSomethingRecorded(out.refoldMoved)))))
++					movedSomethingRecorded(out.refoldMoved)),
++				attribute.StringSlice("horopter.refold.moved", out.refoldMoved))))
+```
+
+**Survived** `task test -- ./internal/store/postgres/` run against the full package (not
+a narrowed `-run`), confirmed before writing anything:
+
+```
+$ git diff internal/store/postgres/append.go   # mutation applied, shown above
+$ task test -- ./internal/store/postgres/
+task: [test] go test -race -count=1 ./internal/store/postgres/
+ok  	horopter.dev/horopter/internal/store/postgres	13.855s
+```
+
+Every existing test passed, including all six `appendCounts`-based tests that caught
+mutation 10 — because none of them read `horopter.refold` at all, and `refoldCounts`
+(`refold_test.go`) reads only the `horopter.refold.altered` attribute by name, blind to any
+other key riding along on the same data point. This is the real version of the risk
+`outcome.go`'s and `append.go`'s own comments warn about — "eight field names would give it
+256" — and, unlike mutation 10, it actually reaches the counter those comments describe.
+
+**New test added**, `TestRefoldCountsOnlyTheAlteredBoolean` in
+`internal/store/postgres/refold_test.go`, modeled directly on `appendCounts`'s
+exact-map-equality guard: a new helper `refoldAttributeSets` returns `horopter.refold`'s
+data points keyed by their full attribute-set encoding (not just the `altered` value), and
+the test asserts the result equals `map[string]int64{"horopter.refold.altered=true": 1}`
+for the same two-terminal-event fixture `TestARefoldThatMovesAnOutcomeIsCountedAsAltered`
+uses. Re-applying the mutation against the new test:
+
+```
+Error:      	Not equal:
+            	expected: map[string]int64{"horopter.refold.altered=true":1}
+            	actual  : map[string]int64{"horopter.refold.altered=true,horopter.refold.moved=[\"type\",\"title\",\"last_event_id\",\"status\",\"end\"]":1}
+Test:       	TestRefoldCountsOnlyTheAlteredBoolean
+Messages:   	horopter.refold must carry only horopter.refold.altered; any other key is a cardinality regression only an exact-set assertion like this one catches
+```
+
+That single fixture alone carries five moved fields (`type`, `title`, `last_event_id`,
+`status`, `end`), so the mutated counter would already be emitting one series out of the up
+to 256 the eight-field power set allows, on ordinary test traffic — not a hypothetical
+worst case.
+
+Reverted with `git checkout -- internal/store/postgres/append.go`; `git status --porcelain`
+confirmed only `refold_test.go` (the new test) remained changed.
+
+## Mutations 8, 9 and 11, and the "predicted to survive" label
+
+Mutations 8, 9 and 11 (11 being the corrected form of 10 — see above) were each caught by
+review — of the plan, or of a prior task's review — rather than by running code, and each
+targets a place where a signal that looks informative would in fact carry no information:
 
 - **Mutation 8** would make `horopter.refold.altered` **always true**. `refoldMoved`
   contains `last_event_id` on every out-of-order re-fold by construction (`core.Fold`
@@ -373,52 +445,59 @@ informative would in fact carry no information:
 - **Mutation 9** would make `horopter.refold.altered` **silently false** for a re-fold
   that moves a completion time — the case decisions/2026-09-16 exists to handle, and the
   one the fixture and the corrected assertion above pin directly.
-- **Mutation 10** would give `horopter.event.appends` up to **256 series** per the
-  eight-field power set `refoldMoved` can hold (the same "eight field names would give it
-  256" the code comment on the `horopter.refold` counter already warns about), turning a
-  bounded, low-cardinality counter into an effectively unbounded one.
+- **Mutation 11** would give `horopter.refold` up to **256 series** per the eight-field
+  power set `refoldMoved` can hold (the same "eight field names would give it 256" the code
+  comment on the `s.refolds.Add` call already warns about), turning a bounded,
+  two-series counter into one where a single ordinary fixture already produces distinct
+  series per combination of moved fields — demonstrated above with five fields moving on
+  one append.
 
-Only mutations 8 and 9 were genuinely undetected by the suite before this task; both are
-now pinned. **Mutation 10's "predicted to survive" label does not hold** in this
-repository: `appendCounts`' hand-written constants in `append_test.go` are an explicit,
-already-shipped cardinality guard on `horopter.event.appends`, and they catch this
-mutation on six different tests without any new code. The correction's own justification
-for predicting survival — "`refoldCounts` in `refold_test.go` reads one attribute key and
-never asserts the metric's attribute set" — is about the wrong counter: `refoldCounts`
-reads `horopter.refold` (the `s.refolds` counter, built inline in `AppendEvent`'s deferred
-closure with a single hand-written `attribute.Bool`, never through `metricAttributes`),
-while the edit specified for mutation 10 is in `outcome.go`'s `metricAttributes()`, which
-feeds `horopter.event.appends` (`s.appends`) exclusively. The named cardinality risk — a
-counter carrying the field list instead of a boolean — is real and worth watching, but it
-sits on `horopter.refold`, which has no attribute-set assertion analogous to
-`appendCounts`' and would not have caught the literal edit `attribute.StringSlice(...)`
-added there instead. As written and run, mutation 10's actual edit lands on the counter
-that already guards against exactly this regression.
+All three were genuinely undetected by the suite as it stood; all three are now pinned.
+**Mutation 10's "predicted to survive" label does not hold**, but not because the
+cardinality risk it names is imaginary — because mutation 10, as specified, targets the
+wrong counter. `appendCounts`' hand-written constants in `append_test.go` are an explicit,
+already-shipped cardinality guard on `horopter.event.appends`, and they catch mutation 10
+on six different tests without any new code. The correction's own justification for
+predicting survival — "`refoldCounts` in `refold_test.go` reads one attribute key and
+never asserts the metric's attribute set" — is about `horopter.refold`, not
+`horopter.event.appends`: `refoldCounts` reads `horopter.refold` (the `s.refolds` counter,
+built inline in `AppendEvent`'s deferred closure with a single hand-written
+`attribute.Bool`, never through `metricAttributes`), while mutation 10's edit is in
+`outcome.go`'s `metricAttributes()`, which feeds `horopter.event.appends` (`s.appends`)
+exclusively. Mutation 11 is that same edit relocated to the counter the reasoning actually
+describes, and it survives exactly as originally predicted — confirmed by running it, not
+assumed, per the brief's own rule that an uncaught mutation is a missing test to write
+before moving on. `TestRefoldCountsOnlyTheAlteredBoolean` closes the gap mutation 11
+demonstrates.
 
 ## Verification of the environment
 
-Before the first mutation and after the last revert:
+Before the first mutation and after the last revert, across both the initial ten-mutation
+pass and the fix-round-1 addition of mutation 11:
 
-- `git status --porcelain`: clean before the first mutation.
-- `task test -- ./internal/store/postgres/`: green after adding the two new tests, with no
-  mutation applied.
+- `git status --porcelain`: clean before the first mutation, and before mutation 11.
+- `task test -- ./internal/store/postgres/`: green after adding all three new tests, with
+  no mutation applied.
 - `task check` (`gofmt -l .`, `golangci-lint run ./...`,
   `go test -race -count=1 ./...`): fmt clean, lint 0 issues, all packages pass, 0 skipped.
 - `git status --porcelain` after the final `task check`:
   ```
    M internal/store/postgres/refold_test.go
   ```
-  the only change is the two added tests; every mutation to production code was reverted
-  before the next row and confirmed clean before this report was written.
+  the only change is the three added tests; every mutation to production code was
+  reverted before the next row and confirmed clean before this report was written.
 
 ## Conclusion
 
-All ten mutations are caught in the tree's final state. Seven behave as the brief (and its
-corrections) predicted, one row's predicted catcher was wrong but a different pre-existing
-test caught it anyway (mutation 2), one row's predicted catcher caught it alongside far
-more collateral damage than its description implies (mutation 3), and mutation 10's
-"predicted to survive" label does not hold — it is already caught, by tests written for a
-different purpose, and the correction's own reasoning for predicting survival names the
-wrong counter. Two real gaps (mutations 6 and 9) were confirmed empirically before being
-closed with new tests, each re-run against its mutation to confirm the new test — not
-something else — is what catches it.
+All eleven mutations are caught in the tree's final state. Seven behave as the brief (and
+its corrections) predicted, one row's predicted catcher was wrong but a different
+pre-existing test caught it anyway (mutation 2), one row's predicted catcher caught it
+alongside far more collateral damage than its description implies (mutation 3), mutation
+10's "predicted to survive" label does not hold as specified — it is already caught, by
+tests written for a different purpose, because it targets the wrong counter — and mutation
+11, its corrected form applied to the counter the underlying concern actually names,
+genuinely survived until this fix round and is now pinned. Three real gaps (mutations 6, 9
+and 11) were confirmed empirically before being closed with new tests, each re-run against
+its mutation to confirm the new test — not something else — is what catches it. Row 10 is
+kept rather than rewritten: a plausible-looking mutation aimed at the wrong site is itself
+a finding worth a permanent record, not an error to erase once the right site is found.

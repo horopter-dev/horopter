@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"horopter.dev/horopter/internal/core"
@@ -474,6 +475,63 @@ func TestRefoldRefDeletesAChangeWhoseEventsAreGone(t *testing.T) {
 	got, _, err := s.QueryChanges(ctx, q)
 	require.NoError(t, err)
 	assert.Empty(t, got, "a ref with no events must leave no change behind")
+}
+
+// refoldAltered is the attribute set horopter.refold carries when a re-fold altered the
+// change, written out by hand — the same guard appendCounts's constants give
+// horopter.event.appends in append_test.go. An assertion against this fails if a key is
+// added, which is what makes it the cardinality guard as well: refoldCounts, by design,
+// reads only the horopter.refold.altered VALUE and cannot tell "the counter carries
+// exactly this boolean" from "the counter carries this boolean plus something else too".
+const refoldAltered = "horopter.refold.altered=true"
+
+// TestRefoldCountsOnlyTheAlteredBoolean pins horopter.refold's attribute set by EXACT
+// match, the way appendCounts-based tests already pin horopter.event.appends's. The code
+// comment on the s.refolds.Add call warns that eight field names would give the counter
+// 256 series; this is the test that would actually catch feeding refoldMoved's field-name
+// list into that counter instead of only the boolean movedSomethingRecorded computes.
+// refoldCounts alone cannot: it reads one attribute key by name and stays silent about
+// any other key riding along on the same data point.
+func TestRefoldCountsOnlyTheAlteredBoolean(t *testing.T) {
+	reader := recordMetrics(t)
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+
+	completed := mkEvent(tn, eventID(t, "completed"), "k2", "d1", "deployment.completed",
+		at.Add(20*time.Minute))
+	failed := mkEvent(tn, eventID(t, "failed"), "k1", "d1", "deployment.failed", at)
+	require.Less(t, completed.ID, failed.ID, "fixture: ids must sort in build order")
+
+	_, _, err := s.AppendEvent(ctx, failed)
+	require.NoError(t, err)
+	_, _, err = s.AppendEvent(ctx, completed)
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string]int64{refoldAltered: 1}, refoldAttributeSets(t, reader),
+		"horopter.refold must carry only horopter.refold.altered; any other key is a "+
+			"cardinality regression only an exact-set assertion like this one catches")
+}
+
+// refoldAttributeSets returns horopter.refold's count for each attribute set, keyed by
+// the set's encoding — the same shape appendCounts returns for horopter.event.appends.
+func refoldAttributeSets(t *testing.T, reader *sdkmetric.ManualReader) map[string]int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	out := map[string]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "horopter.refold" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok, "horopter.refold should be an int64 sum")
+			for _, dp := range sum.DataPoints {
+				out[dp.Attributes.Encoded(attribute.DefaultEncoder())] += dp.Value
+			}
+		}
+	}
+	return out
 }
 
 // refoldCounts sums horopter.refold by its horopter.refold.altered label.
