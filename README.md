@@ -435,30 +435,15 @@ exactly what the previous model destroyed. The migration records `first_seen_at 
 and `started_at = NULL`, meaning "we do not know". A rebuild is what replaces that with the
 real values from the event log.
 
-**A rebuild can change a change's recorded outcome.** It replays the log in event-id
-order, while live appends folded it in commit order, and the two differ whenever a
-same-ref event committed before another that carries a lower id. That needs no unusual
-timing: an id is minted on the ingress replica that received the request, before its
-append starts, so with more than one replica the window is the clock skew between them,
-and even with one replica an append that minted a lower id can lose the race for the
-per-ref lock. Every field whose rule is "last event wins" — `last_event_id`, `type` and
-`subject` — can come back different. So can `title` and `actor`, which follow the slightly
-narrower "last *non-empty* event wins": a reorder still moves them between two events that
-both carry one, but an event carrying none cannot blank what an earlier event recorded.
-Attributes merge, so no reorder ever loses or gains a key — but where two events set the
-*same* key, the value follows last-wins, so a query filtering on `attr.<key>` can match a
-different set of changes afterwards. `status` and `end` follow the narrowest rule, "last
-*terminal* event wins", so a `deployment.completed` and a `deployment.failed` on one ref can
-swap, but nothing that arrives later can reopen a change that has already closed. `start`,
-`started_at` and `first_seen_at` cannot: they are minima, so replay order does not reach
-them. `sources` cannot either: it is a union, so it survives a rebuild unchanged whatever
-order the log replays in. Rebuilding twice gives the same answer both times — it is the live
-projection the replay may disagree with, not itself. If a change's outcome matters to you,
-read `GET /v1/events?ref=<stored-ref>` (the log is immutable and is never reordered) before
-and after.
-`<stored-ref>` is the ref as stored, which is what `GET /v1/changes` returns — `<locus>/<ref>`,
-where the locus is `legacy` for anything the locus migrations could not recover (see "Refs
-written before the locus migrations", below) and the appending credential's locus otherwise.
+Live appends and a rebuild now agree. An append whose event id sorts below the change's
+current watermark re-folds that ref from the log, so the projection equals a fold of the
+ref's events in id order regardless of the order they arrived in. A rebuild replays the
+same log in the same order and finds nothing to change.
+
+This makes the system self-consistent, not causally correct: event ids are minted from
+receipt time with `crypto/rand` entropy, so two events minted in the same millisecond have
+an arbitrary relative order, and a producer that emits events in the wrong order is beyond
+anything the store can repair.
 
 ### Refs written before the locus migrations carry a `legacy/` prefix
 

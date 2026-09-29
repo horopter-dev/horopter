@@ -361,15 +361,41 @@ func applyToProjection(ctx context.Context, tx pgx.Tx, ev core.Event, out *appen
 		prev = &cur
 	}
 	folded := core.Fold(prev, ev)
-	out.foldStatus = folded.Status
-	out.foldClosed = folded.End != nil
 	// ev.ID sorting below the change's current watermark is exactly the condition under
-	// which a rebuild diverges from the live projection — the hazard RebuildProjection
-	// documents and defers fixing. Recording it turns a known-possible, never-measured
-	// risk into a rate that can be graphed, which is what decides whether fixing it is
-	// worth doing.
+	// which an incremental fold and an id-ordered fold disagree — the divergence
+	// RebuildProjection documents. decisions/2026-09-16 resolves it here, by recomputing
+	// the ref from the log rather than by trying to patch the incremental rule, which is
+	// not achievable for attributes.
 	out.outOfOrder = found && ev.ID < cur.LastEventID
-	return upsertChange(ctx, tx, folded)
+	if !out.outOfOrder {
+		out.foldStatus = folded.Status
+		out.foldClosed = folded.End != nil
+		return upsertChange(ctx, tx, folded)
+	}
+	return refoldOutOfOrderAppend(ctx, tx, ev, ref, out)
+}
+
+// refoldOutOfOrderAppend recomputes ref from the log after an out-of-order append and
+// records the re-folded change's status on out. Split out of applyToProjection to keep its
+// branching within the complexity limit.
+//
+// It reads back from the re-folded change, NOT from the incremental fold
+// applyToProjection already computed and rejected: reporting that answer would put the
+// wrong status on the span and the metric for exactly the appends this code exists to
+// handle.
+func refoldOutOfOrderAppend(
+	ctx context.Context, tx pgx.Tx, ev core.Event, ref string, out *appendOutcome,
+) error {
+	if _, err := refoldRef(ctx, tx, ev.Tenant, core.RefFor(ev)); err != nil {
+		return err
+	}
+	refolded, _, err := lockAndLoadChange(ctx, tx, ev.Tenant, ref)
+	if err != nil {
+		return err
+	}
+	out.foldStatus = refolded.Status
+	out.foldClosed = refolded.End != nil
+	return nil
 }
 
 // lockProjectionWrite takes, in one round trip, the two advisory locks an append needs

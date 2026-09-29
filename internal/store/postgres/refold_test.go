@@ -102,6 +102,136 @@ func TestRefoldRefIgnoresAPointEventInAnotherLocus(t *testing.T) {
 		"folding the point in would have closed the change as an occurred point")
 }
 
+// TestAnOutOfOrderAppendConvergesTheRefToIDOrder is the whole point of this work, and it
+// uses the one fixture where the two fold orders give different ANSWERS rather than
+// different bookkeeping.
+//
+// TWO TERMINAL EVENTS. core.Fold's terminal cell is deliberately non-commutative — see
+// stateClosed/assertsTerminal in internal/core/fold.go's transitions table — so whichever
+// terminal event a ref folds LAST overwrites the status; nothing guards a second terminal
+// event from re-closing an already-closed change. completed carries the LOWER id and
+// failed the HIGHER, but failed arrives FIRST:
+//
+//   - incremental: failed closes the change; completed then folds last and overwrites it.
+//     Answer: completed.
+//   - id-ordered: completed folds first (lower id); failed then folds last and overwrites
+//     it. Answer: failed.
+//
+// This is exactly the flip RebuildProjection's doc comment warns an operator about, and
+// asserting on it is what makes this test fail when the re-fold is removed. A
+// started/completed fixture would NOT: a late start cannot reopen a closed change under
+// either order, so its status assertion passes whether the re-fold runs or not.
+func TestAnOutOfOrderAppendConvergesTheRefToIDOrder(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+
+	completed := mkEvent(tn, eventID(t, "completed"), "k2", "d1", "deployment.completed",
+		at.Add(20*time.Minute))
+	failed := mkEvent(tn, eventID(t, "failed"), "k1", "d1", "deployment.failed", at)
+	require.Less(t, completed.ID, failed.ID, "fixture: ids must sort in build order")
+
+	// Reverse arrival: the HIGHER-id failure commits first.
+	_, _, err := s.AppendEvent(ctx, failed)
+	require.NoError(t, err)
+	_, _, err = s.AppendEvent(ctx, completed)
+	require.NoError(t, err)
+
+	got := oneChange(ctx, t, s, tn, "ci/d1")
+	assert.Equal(t, core.StatusFailed, got.Status,
+		"id order closes on failed; without the re-fold this is completed")
+	assert.Equal(t, failed.ID, got.LastEventID,
+		"last_event_id must be the highest id folded, not the last one to arrive")
+	assert.True(t, got.Start.Equal(at), "start is a minimum and must be the earlier time")
+}
+
+// TestAConvergedRefEqualsAWholeTenantRebuild is the invariant stated as an equality
+// rather than as a list of fields. Whatever the two orders disagree about, they must not
+// disagree after this change: a rebuild replays the same log in the same id order, so it
+// must find nothing to alter.
+func TestAConvergedRefEqualsAWholeTenantRebuild(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+
+	built := make([]core.Event, 0, 6)
+	for i, typ := range []string{
+		"deployment.started", "deployment.annotated", "deployment.annotated",
+		"deployment.failed", "deployment.annotated", "deployment.completed",
+	} {
+		ev := mkEvent(tn, eventID(t, typ), uniqueToken(), "d1", typ,
+			at.Add(time.Duration(i)*time.Minute))
+		ev.Attributes = map[string]any{"step": i, "shared": typ}
+		built = append(built, ev)
+	}
+
+	// Append in an order that disagrees with id order at several points.
+	for _, i := range []int{3, 0, 5, 1, 4, 2} {
+		_, _, err := s.AppendEvent(ctx, built[i])
+		require.NoError(t, err)
+	}
+
+	live := oneChange(ctx, t, s, tn, "ci/d1")
+	require.NoError(t, s.RebuildProjection(ctx, tn))
+	rebuilt := oneChange(ctx, t, s, tn, "ci/d1")
+
+	assert.Equal(t, live, rebuilt,
+		"a rebuild found something to change, so live folding is still not id-ordered")
+}
+
+// TestARetriedOutOfOrderAppendDoesNotRefoldAgain pins that the dedupe path still returns
+// before the projection is touched. A producer retrying a late event must not pay for a
+// second re-fold, and must not be able to move the projection by retrying.
+func TestARetriedOutOfOrderAppendDoesNotRefoldAgain(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+
+	completed := mkEvent(tn, eventID(t, "completed"), "k1", "d1", "deployment.completed",
+		at.Add(20*time.Minute))
+	started := mkEvent(tn, eventID(t, "started"), "k2", "d1", "deployment.started", at)
+	_, _, err := s.AppendEvent(ctx, completed)
+	require.NoError(t, err)
+	_, created, err := s.AppendEvent(ctx, started)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	before := oneChange(ctx, t, s, tn, "ci/d1")
+	_, created, err = s.AppendEvent(ctx, started)
+	require.NoError(t, err)
+	assert.False(t, created, "the retry must be deduplicated")
+	assert.Equal(t, before, oneChange(ctx, t, s, tn, "ci/d1"),
+		"a deduplicated retry must not have re-folded the ref")
+}
+
+// TestAnOutOfOrderAppendStillFailsFastUnderARebuildLock pins that adding a re-fold inside
+// the append transaction did not change how an append composes with a rebuild. The
+// re-fold runs under locks the append already holds, so it must add no new wait — an
+// append blocked by a rebuild must still give up on AppendLockTimeout with a retryable
+// error rather than deadlocking against its own re-fold.
+func TestAnOutOfOrderAppendStillFailsFastUnderARebuildLock(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+
+	completed := mkEvent(tn, eventID(t, "completed"), "k1", "d1", "deployment.completed",
+		at.Add(20*time.Minute))
+	started := mkEvent(tn, eventID(t, "started"), "k2", "d1", "deployment.started", at)
+	_, _, err := s.AppendEvent(ctx, completed)
+	require.NoError(t, err)
+
+	// Hold the tenant lock exclusively, as a rebuild does, in a transaction of our own.
+	tx, err := s.Pool().Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, tn)
+	require.NoError(t, err)
+
+	// This append is out of order, so it would re-fold — but it cannot get the lock.
+	start := time.Now()
+	_, _, err = s.AppendEvent(ctx, started)
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), 3*postgres.AppendLockTimeout,
+		"the append must give up on its own timeout, not wait on the re-fold")
+	assert.Contains(t, err.Error(), "retry the append")
+}
+
 // oneChange reads exactly one change by ref, failing the test if the projection holds
 // any other number.
 func oneChange(ctx context.Context, t *testing.T, s *postgres.Store, tn, ref string) core.Change {
