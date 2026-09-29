@@ -351,6 +351,11 @@ What is recorded:
   `horopter_append_dedupe_path="unique_violation"` counts concurrent retries of one
   idempotency key racing each other, as distinct from a retry that lands after the first
   attempt has already committed.
+- `horopter_refold_total` — refs recomputed from the log because an event arrived with an
+  id below the change's watermark, labelled with `horopter_refold_altered` — whether the
+  recomputation moved the change's recorded status. `horopter_refold_altered="true"` is the
+  rate at which late arrivals are changing recorded outcomes, which is the number worth an
+  alert; the unlabelled total is the out-of-order rate itself.
 - `horopter_read_admission_limit` and `horopter_read_admission_in_flight` — `horopter-egress`'s
   read concurrency limit, and the reads holding a place under it;
   `horopter_read_memory_reserved_bytes` and `horopter_read_memory_capacity_bytes` — its read

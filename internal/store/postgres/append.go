@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"horopter.dev/horopter/internal/core"
@@ -95,6 +96,13 @@ func (s *Store) AppendEvent(
 		out.errKind = errKindOf(err)
 		span.SetAttributes(out.attributes(submitted)...)
 		s.appends.Add(ctx, 1, metric.WithAttributeSet(out.metricAttributes()))
+		if out.outOfOrder {
+			// Boolean, not the field list: a counter keeps a series per distinct
+			// attribute set, and eight field names would give it 256.
+			s.refolds.Add(ctx, 1, metric.WithAttributeSet(attribute.NewSet(
+				attribute.Bool("horopter.refold.altered",
+					movedSomethingRecorded(out.refoldMoved)))))
+		}
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, out.errKind)
@@ -372,29 +380,43 @@ func applyToProjection(ctx context.Context, tx pgx.Tx, ev core.Event, out *appen
 		out.foldClosed = folded.End != nil
 		return upsertChange(ctx, tx, folded)
 	}
-	return refoldOutOfOrderAppend(ctx, tx, ev, ref, out)
+	return refoldOutOfOrderAppend(ctx, tx, ev, folded, out)
 }
 
 // refoldOutOfOrderAppend recomputes ref from the log after an out-of-order append and
 // records the re-folded change's status on out. Split out of applyToProjection to keep its
 // branching within the complexity limit.
 //
-// It reads back from the re-folded change, NOT from the incremental fold
-// applyToProjection already computed and rejected: reporting that answer would put the
-// wrong status on the span and the metric for exactly the appends this code exists to
-// handle.
+// folded is the incremental fold applyToProjection already computed and is about to
+// reject; it is passed in, rather than recomputed, so this function can report what the
+// re-fold actually moved. ref is recomputed from ev rather than threaded as a sixth
+// parameter — core.RefFor is a pure string composition, not a lookup — to stay within the
+// project's five-positional-parameter limit.
 func refoldOutOfOrderAppend(
-	ctx context.Context, tx pgx.Tx, ev core.Event, ref string, out *appendOutcome,
+	ctx context.Context, tx pgx.Tx, ev core.Event, folded core.Change, out *appendOutcome,
 ) error {
-	if _, err := refoldRef(ctx, tx, ev.Tenant, core.RefFor(ev)); err != nil {
+	refRef := core.RefFor(ev)
+	ref := refRef.String()
+	if _, err := refoldRef(ctx, tx, ev.Tenant, refRef); err != nil {
 		return err
 	}
+	// Read back from the re-folded change, NOT from folded: the incremental answer is the
+	// one this branch has just rejected, and reporting it would put the wrong status on
+	// the span and the metric for exactly the appends this code exists to handle.
 	refolded, _, err := lockAndLoadChange(ctx, tx, ev.Tenant, ref)
 	if err != nil {
 		return err
 	}
 	out.foldStatus = refolded.Status
 	out.foldClosed = refolded.End != nil
+	out.refoldMoved = alteredFields(folded, refolded)
+	// Status and End are the pair that changes what the log SAYS HAPPENED, as against
+	// which of two titles it kept. That is the one an operator wants without tracing on.
+	if refolded.Status != folded.Status || !sameInstant(folded.End, refolded.End) {
+		slog.WarnContext(ctx, "a re-fold moved a recorded outcome",
+			"tenant", ev.Tenant, "ref", ref,
+			"was", string(folded.Status), "now", string(refolded.Status))
+	}
 	return nil
 }
 

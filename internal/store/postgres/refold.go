@@ -3,11 +3,32 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"reflect"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"horopter.dev/horopter/internal/core"
+	"horopter.dev/horopter/internal/telemetry"
 )
+
+// refoldCounter creates horopter.refold. It counts refs recomputed from the log, labelled
+// by whether the recomputation altered the stored change — which is the difference
+// between "the log arrived out of order" and "a recorded outcome moved".
+func refoldCounter() metric.Int64Counter {
+	counter, err := otel.Meter(telemetry.StoreScope).Int64Counter("horopter.refold",
+		metric.WithUnit("{refold}"),
+		metric.WithDescription("Refs recomputed from the log, by whether the change changed"))
+	if err != nil {
+		// The SDK returns a working instrument alongside a name-validation error, so the
+		// store opens either way. The error means this call is wrong, not the environment.
+		slog.Error("create the horopter.refold counter", "error", err)
+	}
+	return counter
+}
 
 // foldColumns names only the columns core.Fold reads, which is why origin and edited are
 // absent — but locus is NOT one of those omissions. core.RefFor composes a point change's
@@ -192,4 +213,70 @@ func (s *Store) RefoldRef(ctx context.Context, tenantID string, ref core.Ref) (e
 		return fmt.Errorf("commit re-fold of %q in tenant %q: %w", ref, tenantID, err)
 	}
 	return nil
+}
+
+// alteredFields names the fields a re-fold moved. They are exactly the eight whose fold
+// rules are not commutative, listed in RebuildProjection's doc comment: assigned
+// unconditionally (Subject, Type, LastEventID), guarded non-empty (Title, Actor), merged
+// last-wins per key (Attributes), and guarded on End (Status, End). The commutative
+// fields — Start, StartedAt, FirstSeenAt, Sources — cannot differ between two orders and
+// are deliberately absent.
+//
+// A table rather than a chain of ifs: eight branches would put this function over the
+// project's cyclomatic limit of 8 on its own.
+func alteredFields(before, after core.Change) []string {
+	checks := []struct {
+		name    string
+		differs bool
+	}{
+		{"subject", before.Subject != after.Subject},
+		{"type", before.Type != after.Type},
+		{"title", before.Title != after.Title},
+		{"actor", before.Actor != after.Actor},
+		{"last_event_id", before.LastEventID != after.LastEventID},
+		{"status", before.Status != after.Status},
+		{"end", !sameInstant(before.End, after.End)},
+		{"attributes", !reflect.DeepEqual(before.Attributes, after.Attributes)},
+	}
+	moved := make([]string, 0, len(checks))
+	for _, c := range checks {
+		if c.differs {
+			moved = append(moved, c.name)
+		}
+	}
+	return moved
+}
+
+// sameInstant compares two optional timestamps by VALUE, not by presence.
+//
+// Comparing only nil-ness hides a real move: two terminal events of the same type folded
+// onto one ref, in different orders, both leave End non-nil — core.Fold's terminal cell
+// overwrites End every time it fires, so whichever terminal event folds LAST sets it,
+// and the incremental and re-folded answers can carry different timestamps while every
+// other field agrees. Clock skew across ingress replicas is exactly what makes two
+// terminal events on one ref reachable, and is the whole premise of this work. That is a
+// change to when the log says the work finished, and it must not be invisible.
+func sameInstant(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Equal(*b)
+}
+
+// movedSomethingRecorded reports whether a re-fold changed anything an operator would
+// call a fact, as against bookkeeping.
+//
+// last_event_id is excluded because it moves on EVERY out-of-order re-fold, by
+// construction: core.Fold assigns it unconditionally, so the incremental answer is always
+// the arriving event's own id — the lower one, since that is what put this append on the
+// re-fold branch — while the re-folded answer is always the ref's id-ordered maximum. The
+// two can never be equal here. Counting it would make horopter.refold.altered true for
+// every re-fold, which is the one thing the label exists not to do.
+func movedSomethingRecorded(moved []string) bool {
+	for _, field := range moved {
+		if field != "last_event_id" {
+			return true
+		}
+	}
+	return false
 }

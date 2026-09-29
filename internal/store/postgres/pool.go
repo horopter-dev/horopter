@@ -10,11 +10,11 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 )
 
-// storeFromPool wraps an open pool and applies opts. The append counter is created here, from
-// the global meter provider as it stands when the store opens — which is why every binary
-// calls telemetry.Setup before opening a store.
+// storeFromPool wraps an open pool and applies opts. The append and refold counters are
+// created here, from the global meter provider as it stands when the store opens — which
+// is why every binary calls telemetry.Setup before opening a store.
 func storeFromPool(pool *pgxpool.Pool, opts []Option) *Store {
-	s := &Store{pool: pool, appends: appendCounter()}
+	s := &Store{pool: pool, appends: appendCounter(), refolds: refoldCounter()}
 	for _, opt := range opts {
 		opt(s)
 	}

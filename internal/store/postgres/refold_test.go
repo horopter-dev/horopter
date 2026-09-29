@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"horopter.dev/horopter/internal/core"
 	"horopter.dev/horopter/internal/store/postgres"
 )
@@ -352,4 +354,77 @@ func TestRefoldRefReadsOnlyItsOwnRef(t *testing.T) {
 		"the re-fold folded events from another ref into this change")
 	assert.Equal(t, core.StatusInProgress, got.Status,
 		"a terminal event from another ref would have closed this change")
+}
+
+// TestARefoldThatMovesAnOutcomeIsCountedAsAltered pins the half of the label that says a
+// recorded fact moved. Same two-terminal-event fixture as
+// TestAnOutOfOrderAppendConvergesTheRefToIDOrder: completed takes the lower id and failed
+// the higher one, with failed appended first, so arrival order yields completed and id
+// order yields failed — the re-fold moves the recorded status.
+func TestARefoldThatMovesAnOutcomeIsCountedAsAltered(t *testing.T) {
+	reader := recordMetrics(t)
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+
+	completed := mkEvent(tn, eventID(t, "completed"), "k2", "d1", "deployment.completed",
+		at.Add(20*time.Minute))
+	failed := mkEvent(tn, eventID(t, "failed"), "k1", "d1", "deployment.failed", at)
+	require.Less(t, completed.ID, failed.ID, "fixture: ids must sort in build order")
+
+	_, _, err := s.AppendEvent(ctx, failed)
+	require.NoError(t, err)
+	_, _, err = s.AppendEvent(ctx, completed)
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(1), refoldCounts(t, reader)["true"],
+		"a re-fold that changed the recorded status must be counted as altering")
+}
+
+// TestARefoldThatMovesOnlyBookkeepingIsNotCountedAsAltered is the test that makes the
+// label worth reading. Two annotations identical in every field core.Fold reads, appended
+// out of order: the re-fold moves last_event_id — it always does, since core.Fold assigns
+// it unconditionally and the arriving event is by definition the lower id — and nothing
+// else. Counting that as "altered" would make the label true for every re-fold and the
+// README's claim about it false.
+func TestARefoldThatMovesOnlyBookkeepingIsNotCountedAsAltered(t *testing.T) {
+	reader := recordMetrics(t)
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+
+	early := mkEvent(tn, eventID(t, "early"), "k1", "d1", "deployment.annotated", at)
+	late := mkEvent(tn, eventID(t, "late"), "k2", "d1", "deployment.annotated",
+		at.Add(time.Minute))
+	require.Less(t, early.ID, late.ID, "fixture: ids must sort in build order")
+
+	_, _, err := s.AppendEvent(ctx, late)
+	require.NoError(t, err)
+	_, _, err = s.AppendEvent(ctx, early)
+	require.NoError(t, err)
+
+	counts := refoldCounts(t, reader)
+	assert.Equal(t, int64(1), counts["false"],
+		"a re-fold that moved only last_event_id must not be counted as altering")
+	assert.Zero(t, counts["true"])
+}
+
+// refoldCounts sums horopter.refold by its horopter.refold.altered label.
+func refoldCounts(t *testing.T, reader *sdkmetric.ManualReader) map[string]int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	out := map[string]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "horopter.refold" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok, "horopter.refold should be an int64 sum")
+			for _, dp := range sum.DataPoints {
+				v, _ := dp.Attributes.Value("horopter.refold.altered")
+				out[v.String()] += dp.Value
+			}
+		}
+	}
+	return out
 }
