@@ -427,13 +427,18 @@ does not understand, so a skewed rollout fails loudly rather than corrupting dat
 Every pending migration file runs inside one transaction (`postgres.Migrate`), so a lock any
 one of them takes is held until the whole batch commits, not just for its own statement.
 Migration `0009` rebuilds an index on `event` — the largest table, and the only one every
-append writes to — and is the first migration since `0001` to touch it: its `DROP INDEX`
-takes an `ACCESS EXCLUSIVE` lock on `event` that, because of the shared transaction, is then
-held for as long as the `CREATE INDEX` that follows takes to build plus however long any
-migration files after it take to run, blocking every append and read against `event` for the
-whole of that window. On a database with a large event history, size `0009`'s downtime before
-running it in production; every earlier migration's locking was cheap enough not to need
-this note.
+append writes to. It is not the first migration since `0001` to touch `event`, and not the
+heaviest: `0005` adds a foreign key (an `ACCESS EXCLUSIVE` lock plus a validation scan),
+`0006` rewrites every row (`ADD COLUMN`, two full-table `UPDATE`s, then `SET NOT NULL` and
+two `CHECK` constraints), and `0008` adds a column under another `CHECK` constraint —
+`0006` alone is strictly heavier than `0009`'s index build. `0009` gets its own note
+because, unlike those, it buys nothing: it costs a full index rebuild on `event` for no
+measured gain (see its own comment for the `EXPLAIN` evidence), and it is kept rather than
+reverted only because reverting it would cost a second rebuild. Its `DROP INDEX` takes an
+`ACCESS EXCLUSIVE` lock on `event` that, because of the shared transaction, is held for as
+long as the `CREATE INDEX` that follows takes to build, blocking every append and read
+against `event` for the whole of that window. On a database with a large event history,
+size `0009`'s downtime before running it in production.
 
 ### Rebuilding a tenant's projection
 
@@ -475,8 +480,9 @@ but below that maximum still takes the ordinary incremental path, and the old dr
 survives it. `--rebuild-tenant` still corrects such a ref — a rebuild always replays the
 whole log in id order regardless of what the stored watermark says — so it remains the
 remedy for data that predates this version. "Corrects" can still mean what it always did:
-for such a ref the rebuild can change the recorded Status, End, Type, Title, Actor or
-attributes, so a change your dashboard shows as `completed` can read `failed` afterward.
+for such a ref the rebuild can change the recorded Subject, Type, Title, Actor, attributes,
+`last_event_id`, End or Status, so a change your dashboard shows as `completed` can read
+`failed` afterward.
 Read `GET /v1/events?ref=<ref>` before and after a rebuild for any ref you need to explain
 that change on, the same as before this version.
 
