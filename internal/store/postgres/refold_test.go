@@ -543,12 +543,18 @@ func TestARefoldThatOnlyLosesSubMicrosecondEndPrecisionIsNotCountedAsAltered(t *
 			}
 		}
 	}
-	assert.NotContains(t, moved, "end",
+	assert.Equal(t, []string{"type", "title", "last_event_id"}, moved,
 		"completed's End is the same instant on both fold paths down to the microsecond "+
 			"Postgres can store; only sub-microsecond noise pgx truncates away on insert "+
-			"differs, and that is not a move")
+			"differs, and that is not a move — type, title and last_event_id move for "+
+			"unrelated reasons (started and completed carry different event types) and "+
+			"are asserted here only so a silent horopter.refold.moved is not mistaken for "+
+			"absence of the end move")
 
 	counts := refoldCounts(t, reader)
+	require.Equal(t, int64(1), counts["false"],
+		"fixture: the re-fold must have been counted at all before the next assertion "+
+			"can mean anything")
 	assert.Zero(t, counts["true"],
 		"a re-fold that only lost sub-microsecond End precision must not be counted as "+
 			"altering")

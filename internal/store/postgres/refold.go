@@ -276,7 +276,11 @@ func alteredFields(before, after core.Change) []string {
 // out-of-order append — whether or not the recorded outcome actually changed. Truncating
 // both sides to the granularity Postgres actually stores is sameAttributes's fix applied
 // to the same class of problem: compare at the representation the two paths can agree on,
-// not at whichever one happens to carry more precision.
+// not at whichever one happens to carry more precision. What this gives up is bounded and
+// unobservable: the largest real move it can now fail to report is 999ns, and only when
+// two in-memory nanosecond values fall in the same microsecond bucket — refolded.End
+// always comes from occurred_at at microsecond precision, so no difference the log
+// actually stores is ever hidden by this.
 func sameInstant(a, b *time.Time) bool {
 	if a == nil || b == nil {
 		return a == b
