@@ -24,6 +24,11 @@ repos:
         entry: task test
         language: system
         pass_filenames: false
+        # Without this the suite runs on every commit, and `task test` needs the Postgres
+        # container up -- so a docs- or Taskfile-only commit fails on a precondition it
+        # cannot affect. pass_filenames stays false: the trigger is narrowed, the run is
+        # still the whole suite.
+        files: (\.go$|^go\.(mod|sum)$)
         stages: [pre-commit]
       - id: go-fmt
         name: gofmt
