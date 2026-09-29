@@ -3,7 +3,7 @@ tasks:
   default:
     desc: List available tasks
     cmds:
-      - task --list
+      - task --list-all
     silent: true
   db:up:
     desc: Start the Postgres container
