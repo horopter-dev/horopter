@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oklog/ulid/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -99,7 +100,12 @@ func newIngressFixtureOpts(
 
 	clock := func() time.Time { return fixed }
 	authn := auth.New(auth.NewStore(s.Pool()), clock, auth.DefaultOptions())
-	srv, err := ingress.New(s, clock, rand.Reader, authn, srvOpts...)
+	// Monotonic entropy, not rand.Reader directly: clock is frozen at fixed, so every
+	// event a test appends shares one ULID timestamp prefix, and plain crypto/rand
+	// entropy would give two same-test events an arbitrary relative id order — the exact
+	// condition applyToProjection now treats as an out-of-order append. See
+	// internal/store/postgres/append_test.go's monotonicEntropy for the identical hazard.
+	srv, err := ingress.New(s, clock, ulid.Monotonic(rand.Reader, 0), authn, srvOpts...)
 	require.NoError(t, err)
 
 	producerTenant, producerKey := seedCredential(t, s, "github", "")
