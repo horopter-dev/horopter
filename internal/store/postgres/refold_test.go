@@ -220,15 +220,18 @@ const refoldFuzzIterations = 24
 // (last-NON-EMPTY-wins) plus a "shared" attribute key set to a distinct value by every
 // event (merged last-wins per key).
 //
-// WHY A DRAW DIVERGES UNDER THE DISABLED-REFOLD MUTATION. core.Fold assigns Type and
-// LastEventID UNCONDITIONALLY on every fold (out.Type = ev.Type; out.LastEventID = ev.ID —
-// no guard, in this fixture and in its unmodified predecessor alike), so whichever event
-// folds LAST always sets both. Ids are assigned in recipe order (buildRefoldFuzzEvents), so
-// index 5 ("deployment.completed") always carries the highest id and is always folded last
-// under id order; it is also the only event whose Type string is unique in this recipe.
-// Live, under the mutation, folds in ARRIVAL order — so live matches rebuilt on Type, and
-// this fixture shows no divergence, if and only if the drawn permutation's LAST element is
-// index 5: 1 of 6 possible positions. That makes P(diverge) = 5/6 exactly and
+// WHY A DRAW DIVERGES UNDER THE DISABLED-REFOLD MUTATION. core.Fold assigns LastEventID
+// UNCONDITIONALLY on every fold (out.LastEventID = ev.ID — no guard), so whichever event
+// folds LAST always sets it. Event ids are ULIDs assigned in recipe order
+// (buildRefoldFuzzEvents) from a monotonic source, so they are pairwise distinct and
+// increase with recipe index: index 5 ("deployment.completed") always carries the highest
+// id, so id order always folds it last. Live, under the mutation, folds in ARRIVAL order
+// instead, and since ids are pairwise distinct, live.LastEventID can equal rebuilt's only
+// if the two folded the SAME event last — which happens if and only if the drawn
+// permutation's LAST element is index 5: 1 of 6 possible positions. Type is assigned the
+// same unconditional way (out.Type = ev.Type, no guard) and so moves in lockstep with
+// LastEventID for the same reason, with no need for any of the recipe's six types to be
+// distinct from each other. That makes P(diverge) = 5/6 exactly and
 // E[failures in refoldFuzzIterations=24] = 20 — precisely the 20/24 the mutation proof
 // observed (see the report), not approximately, and not because of Title, Actor or shared.
 //

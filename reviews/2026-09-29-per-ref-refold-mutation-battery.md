@@ -630,21 +630,31 @@ Messages:   	order [4 0 2 5 3 1]: a rebuild found something to change, so live f
 **Corrected mechanism** (a review of commit `1ad9678` verified this by independently
 replaying the logged seed): the condition is not "the two terminals kept their relative
 order" — it is that the drawn permutation's LAST-appended element was recipe index 5
-(`deployment.completed`). `core.Fold` assigns `Type` and `LastEventID` *unconditionally* on
-every fold, so whichever event folds last always sets both; index 5 carries the highest id
-by construction (ids are assigned in recipe order) and is the only event with a unique
-`Type` string in this six-event recipe, so id order always folds it last and live (under
-the mutation, folding in arrival order) can only match it there. That index also happening
-to be a terminal event is incidental to this mechanism, not its cause. `P(last element =
-index 5) = 1/6`, hence `P(diverge) = 5/6` exactly and `E[failures in 24] = 20` — precisely
-what was observed, not approximately.
+(`deployment.completed`). `core.Fold` assigns `LastEventID` *unconditionally* on every
+fold (`out.LastEventID = ev.ID`, no guard), so whichever event folds last always sets it.
+Event ids are ULIDs assigned in recipe order, hence pairwise distinct and increasing with
+index, so index 5 carries the highest id and id order always folds it last; live, folding
+in arrival order under the mutation, can match that `LastEventID` only if it too folded
+index 5 last, since ids are pairwise distinct. `Type` is assigned the same unconditional
+way and so moves in lockstep with `LastEventID`, needing no claim that any of the recipe's
+six types are distinct from each other. (An earlier version of this note claimed index 5
+was "the only event with a unique `Type` string in this recipe" — false: indices 0
+(`started`) and 3 (`failed`) are singleton types too. The derivation above does not depend
+on that claim and stands without it.) That index also happening to be a terminal event is
+incidental to this mechanism, not its cause. `P(last element = index 5) = 1/6`, hence
+`P(diverge) = 5/6` exactly and `E[failures in 24] = 20` — precisely what was observed, not
+approximately.
 
 This pass rate is not flakiness. `P(a 24-iteration run has zero divergent draws) =
-(1/6)^24 ≈ 5×10⁻¹⁹` — a computed bound, not a judgement call — and under *unmutated* code
-the pass rate is 24/24 by design (that invariant is the entire point of this branch), so
-there is no pass/fail boundary this test could land on either side of against correct code.
-The 4/24 observed here is a property of the mutation, not of the test. The seed log above
-makes this exact 20/24 split replayable if it ever needs re-checking.
+(1/6)^24`. `6^24 = 4,738,381,338,321,616,896` (verified independently, not copied from the
+review that first raised this figure), so `(1/6)^24 ≈ 2.11×10⁻¹⁹` — a computed bound, not
+a judgement call. (An earlier version of this note gave `5×10⁻¹⁹`, which was arithmetically
+wrong by a factor of about 2.4 and was itself copied without recomputation; corrected here.)
+Under *unmutated* code the pass rate is 24/24 by design (that invariant is the entire point
+of this branch), so there is no pass/fail boundary this test could land on either side of
+against correct code. The 4/24 observed here is a property of the mutation, not of the
+test. The seed log above makes this exact 20/24 split replayable if it ever needs
+re-checking.
 
 **Scope, stated precisely.** `live` and `rebuilt` both fold every event through the same
 `core.Fold`, via `foldRows` — reached from `foldRef` on the live/refold path and from
