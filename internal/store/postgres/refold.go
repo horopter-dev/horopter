@@ -2,9 +2,9 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
-	"reflect"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -142,7 +142,9 @@ func foldRef(
 }
 
 // refoldRef recomputes one ref's change from the log and writes the result, deleting the
-// change row when the ref folds to nothing. It returns the number of events folded.
+// change row when the ref folds to nothing. It returns the folded ref it wrote, so a
+// caller that needs the change — refoldOutOfOrderAppend does — has it in memory rather
+// than reading it back from the row this call just wrote.
 //
 // The caller holds the locks. On the append path that is lockProjectionWrite, already
 // taken; a standalone caller takes the same pair before calling this.
@@ -155,24 +157,24 @@ func foldRef(
 // subject-level bulk erasure deferred with retention and compaction.
 func refoldRef(
 	ctx context.Context, tx pgx.Tx, tenantID string, ref core.Ref,
-) (int, error) {
+) (foldedRef, error) {
 	folded, err := foldRef(ctx, tx, tenantID, ref)
 	if err != nil {
-		return 0, err
+		return foldedRef{}, err
 	}
 	if folded.events == 0 {
 		if _, err := tx.Exec(ctx,
 			`DELETE FROM change WHERE tenant = $1 AND ref = $2`,
 			tenantID, ref.String()); err != nil {
-			return 0, fmt.Errorf(
+			return foldedRef{}, fmt.Errorf(
 				"clear change %q in tenant %q: %w", ref, tenantID, err)
 		}
-		return 0, nil
+		return foldedRef{}, nil
 	}
 	if err := upsertChange(ctx, tx, folded.change); err != nil {
-		return 0, err
+		return foldedRef{}, err
 	}
-	return folded.events, nil
+	return folded, nil
 }
 
 // RefoldRef recomputes one ref's change from the log in its own transaction, taking the
@@ -200,14 +202,14 @@ func (s *Store) RefoldRef(ctx context.Context, tenantID string, ref core.Ref) (e
 	if err := lockProjectionWrite(ctx, tx, tenantID, ref.String(), &out); err != nil {
 		return err
 	}
-	events, err := refoldRef(ctx, tx, tenantID, ref)
+	folded, err := refoldRef(ctx, tx, tenantID, ref)
 	if err != nil {
 		return err
 	}
 	span.SetAttributes(
 		attribute.String("horopter.tenant", tenantID),
 		attribute.String("horopter.event.ref", ref.String()),
-		attribute.Int("horopter.refold.events", events),
+		attribute.Int("horopter.refold.events", folded.events),
 	)
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit re-fold of %q in tenant %q: %w", ref, tenantID, err)
@@ -236,7 +238,7 @@ func alteredFields(before, after core.Change) []string {
 		{"last_event_id", before.LastEventID != after.LastEventID},
 		{"status", before.Status != after.Status},
 		{"end", !sameInstant(before.End, after.End)},
-		{"attributes", !reflect.DeepEqual(before.Attributes, after.Attributes)},
+		{"attributes", !sameAttributes(before.Attributes, after.Attributes)},
 	}
 	moved := make([]string, 0, len(checks))
 	for _, c := range checks {
@@ -263,18 +265,54 @@ func sameInstant(a, b *time.Time) bool {
 	return a.Equal(*b)
 }
 
-// movedSomethingRecorded reports whether a re-fold changed anything an operator would
-// call a fact, as against bookkeeping.
+// sameAttributes compares two attribute maps by the JSON value they encode, not by their Go
+// representation.
 //
-// last_event_id is excluded because it moves on EVERY out-of-order re-fold, by
-// construction: core.Fold assigns it unconditionally, so the incremental answer is always
-// the arriving event's own id — the lower one, since that is what put this append on the
-// re-fold branch — while the re-folded answer is always the ref's id-ordered maximum. The
-// two can never be equal here. Counting it would make horopter.refold.altered true for
-// every re-fold, which is the one thing the label exists not to do.
+// The two sides of alteredFields's comparison do not share one path to their Go values.
+// applyToProjection's incremental fold takes an out-of-order event's OWN attribute values
+// straight from the request — a Go int stays an int — for any key that event itself sets,
+// while every value refoldRef reports came from foldRows scanning the event table's jsonb
+// column, where a JSON number always decodes as float64. reflect.DeepEqual(1, 1.0) is
+// false, so that difference alone reported "attributes" moved on every out-of-order append
+// whose contested key held a JSON number, whether or not the recorded value had actually
+// changed. Comparing compact JSON encodings sidesteps the Go type entirely: both sides
+// render a JSON number the same way regardless of whether the value on either side is an
+// int, an int64 or a float64, and encoding/json.Marshal sorts map keys, so key order cannot
+// cause a false difference either.
+//
+// A marshal error is treated as a difference rather than swallowed. It is not expected to
+// happen: insertEvent already bound this event's attributes to the jsonb column before
+// applyToProjection ever runs, so anything unmarshalable would have failed there first.
+func sameAttributes(a, b map[string]any) bool {
+	ja, aErr := json.Marshal(a)
+	jb, bErr := json.Marshal(b)
+	if aErr != nil || bErr != nil {
+		return false
+	}
+	return string(ja) == string(jb)
+}
+
+// movedSomethingRecorded reports whether a re-fold changed the change's recorded outcome —
+// Status or End — as against everything else a re-fold can move.
+//
+// Narrowed to those two fields so the counter agrees with the warn log two lines above its
+// only caller: slog.WarnContext there is titled "a re-fold moved a recorded outcome" and
+// fires on that identical condition, Status or End moving. README.md documents
+// horopter_refold_altered="true" as "the rate at which late arrivals are changing recorded
+// outcomes, which is the number worth an alert" — Subject, Type, Title, Actor and
+// Attributes are real moves alteredFields still names in horopter.refold.moved on the
+// append span, but none of them is what the log said HAPPENED, and counting one here would
+// teach an operator paging on this label to ignore it.
+//
+// last_event_id would need excluding regardless: it moves on EVERY out-of-order re-fold, by
+// construction — core.Fold assigns it unconditionally, so the incremental answer is always
+// the arriving event's own id (the lower one, since that is what put this append on the
+// re-fold branch) while the re-folded answer is always the ref's id-ordered maximum, and the
+// two can never be equal here — but it is excluded by the same allowlist as every other
+// non-outcome field, not as a special case.
 func movedSomethingRecorded(moved []string) bool {
 	for _, field := range moved {
-		if field != "last_event_id" {
+		if field == "status" || field == "end" {
 			return true
 		}
 	}

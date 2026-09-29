@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 	"horopter.dev/horopter/internal/core"
 	"horopter.dev/horopter/internal/telemetry"
 )
@@ -94,19 +95,7 @@ func (s *Store) AppendEvent(
 	defer func() {
 		out.created = created
 		out.errKind = errKindOf(err)
-		span.SetAttributes(out.attributes(submitted)...)
-		s.appends.Add(ctx, 1, metric.WithAttributeSet(out.metricAttributes()))
-		if out.outOfOrder {
-			// Boolean, not the field list: a counter keeps a series per distinct
-			// attribute set, and eight field names would give it 256.
-			s.refolds.Add(ctx, 1, metric.WithAttributeSet(attribute.NewSet(
-				attribute.Bool("horopter.refold.altered",
-					movedSomethingRecorded(out.refoldMoved)))))
-		}
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, out.errKind)
-		}
+		s.recordAppendOutcome(ctx, span, out, submitted, err)
 	}()
 
 	ev, err = prepareEvent(ev, s.maxAttributeBytes)
@@ -133,6 +122,36 @@ func (s *Store) AppendEvent(
 		return existing, false, tx.Commit(ctx)
 	}
 	return s.writeEvent(ctx, tx, ev, &out)
+}
+
+// recordAppendOutcome emits AppendEvent's span attributes and counters, and marks the span
+// failed when err is non-nil. Split out of AppendEvent's own deferred closure to keep
+// AppendEvent within the project's cyclomatic complexity limit — the branch that gates
+// horopter.refold on err == nil, as well as on out.outOfOrder, pushed it over on its own.
+func (s *Store) recordAppendOutcome(
+	ctx context.Context, span trace.Span, out appendOutcome, submitted core.Event, err error,
+) {
+	span.SetAttributes(out.attributes(submitted)...)
+	s.appends.Add(ctx, 1, metric.WithAttributeSet(out.metricAttributes()))
+	// Gated on err == nil as well as out.outOfOrder: applyToProjection sets out.outOfOrder
+	// before it hands off to refoldOutOfOrderAppend, so a re-fold that ERRORS there still
+	// reaches this call with out.outOfOrder true and out.refoldMoved at its zero value,
+	// nil — movedSomethingRecorded(nil) is false, which would otherwise count a re-fold
+	// that never finished as "recomputed from the log, nothing moved." s.appends has an
+	// outcome=failed label for exactly this distinction; horopter.refold does not, and
+	// gating the Add is the simpler way to stay honest without giving it one — see the
+	// cardinality warning just below.
+	if out.outOfOrder && err == nil {
+		// Boolean, not the field list: a counter keeps a series per distinct attribute
+		// set, and eight field names would give it 256.
+		s.refolds.Add(ctx, 1, metric.WithAttributeSet(attribute.NewSet(
+			attribute.Bool("horopter.refold.altered",
+				movedSomethingRecorded(out.refoldMoved)))))
+	}
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, out.errKind)
+	}
 }
 
 // prepareEvent validates the event and normalises the fields the schema constrains.
@@ -396,17 +415,14 @@ func refoldOutOfOrderAppend(
 	ctx context.Context, tx pgx.Tx, ev core.Event, folded core.Change, out *appendOutcome,
 ) error {
 	refRef := core.RefFor(ev)
-	ref := refRef.String()
-	if _, err := refoldRef(ctx, tx, ev.Tenant, refRef); err != nil {
-		return err
-	}
-	// Read back from the re-folded change, NOT from folded: the incremental answer is the
-	// one this branch has just rejected, and reporting it would put the wrong status on
-	// the span and the metric for exactly the appends this code exists to handle.
-	refolded, _, err := lockAndLoadChange(ctx, tx, ev.Tenant, ref)
+	reref, err := refoldRef(ctx, tx, ev.Tenant, refRef)
 	if err != nil {
 		return err
 	}
+	// refoldRef already returns the change it wrote, so there is no second read here: no
+	// second SELECT ... FOR UPDATE issued on the change row while this transaction already
+	// holds it under the ref-exclusive advisory lock lockProjectionWrite took above.
+	refolded := reref.change
 	out.foldStatus = refolded.Status
 	out.foldClosed = refolded.End != nil
 	out.refoldMoved = alteredFields(folded, refolded)
@@ -414,8 +430,9 @@ func refoldOutOfOrderAppend(
 	// which of two titles it kept. That is the one an operator wants without tracing on.
 	if refolded.Status != folded.Status || !sameInstant(folded.End, refolded.End) {
 		slog.WarnContext(ctx, "a re-fold moved a recorded outcome",
-			"tenant", ev.Tenant, "ref", ref,
-			"was", string(folded.Status), "now", string(refolded.Status))
+			"tenant", ev.Tenant, "ref", refRef.String(),
+			"was", string(folded.Status), "now", string(refolded.Status),
+			"moved", out.refoldMoved)
 	}
 	return nil
 }
