@@ -517,8 +517,8 @@ func TestAppendCountsCreatedAndDeduplicatedEvents(t *testing.T) {
 		appendCounts(t, reader))
 }
 
-// TestAppendCountsOutOfOrderEvents measures the rate the out-of-order decision says has
-// never been observed. Ids are minted fresh and ordered, as TestAppendRecordsAnOutOfOrderFold
+// TestAppendCountsOutOfOrderEvents measures how often an append triggers the inline
+// per-ref re-fold. Ids are minted fresh and ordered, as TestAppendRecordsAnOutOfOrderFold
 // explains, because this suite never truncates its database.
 func TestAppendCountsOutOfOrderEvents(t *testing.T) {
 	reader := recordMetrics(t)
@@ -616,6 +616,43 @@ func TestAppendRecordsAnOutOfOrderFold(t *testing.T) {
 	flags := spanAttrValues(rec, "AppendEvent", "horopter.fold.out_of_order")
 	assert.Equal(t, []string{"false", "true"}, flags,
 		"the second append carries a lower id than the change's watermark")
+}
+
+// TestAppendRecordsTheReFoldedStatusNotTheIncrementalOne pins that
+// refoldOutOfOrderAppend's span attribute comes from the re-folded change, not from the
+// incremental fold applyToProjection computed and rejected — regressing that read-back to
+// read folded.Status instead of refolded.Status is exactly the bug the code comment on
+// refoldOutOfOrderAppend exists to prevent.
+//
+// TestAppendRecordsAnOutOfOrderFold's started/completed fixture cannot catch that
+// regression: a non-terminal event never moves Status once a change is closed, under
+// either fold order, so the incremental and re-folded answers agree there regardless of
+// which one the code reads. This needs the two-terminal fixture
+// TestAnOutOfOrderAppendConvergesTheRefToIDOrder uses — completed carries the lower id and
+// is appended second, failed the higher id and is appended first — so the incremental
+// answer (completed folds last in arrival order) and the re-folded answer (failed folds
+// last in id order) genuinely differ.
+func TestAppendRecordsTheReFoldedStatusNotTheIncrementalOne(t *testing.T) {
+	rec, restore := recordSpans(t)
+	defer restore()
+
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
+
+	completed := mkEvent(tn, eventID(t, "completed"), "k1", "dep-5", "deployment.completed",
+		at.Add(20*time.Minute))
+	failed := mkEvent(tn, eventID(t, "failed"), "k2", "dep-5", "deployment.failed", at)
+	require.Less(t, completed.ID, failed.ID, "fixture: ids must sort in build order")
+
+	_, _, err := s.AppendEvent(ctx, failed)
+	require.NoError(t, err)
+	_, _, err = s.AppendEvent(ctx, completed)
+	require.NoError(t, err)
+
+	statuses := spanAttrValues(rec, "AppendEvent", "horopter.fold.status")
+	assert.Equal(t, []string{"failed", "failed"}, statuses,
+		"the second append's incremental fold would have said completed; the span must "+
+			"carry the re-folded answer, failed")
 }
 
 func TestAppendRecordsTheErrorKindOnAFailure(t *testing.T) {

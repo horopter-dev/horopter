@@ -346,10 +346,25 @@ What is recorded:
   `horopter_fold_out_of_order` — whether the event arrived with an id below the latest one
   already folded into its change. It answers whether ingress is accepting, deduplicating or
   rejecting events, without tracing turned on. `horopter_fold_out_of_order="true"` is the
-  out-of-order rate, the measurement the projection re-fold decision is waiting on.
+  rate at which an append triggers the inline per-ref re-fold that keeps the projection
+  converged to id order — see "Rebuilding a tenant's projection" below.
   `horopter_append_dedupe_path="unique_violation"` counts concurrent retries of one
   idempotency key racing each other, as distinct from a retry that lands after the first
   attempt has already committed.
+- `horopter_refold_total` — refs recomputed from the log because an event arrived with an
+  id below the change's watermark, labelled with `horopter_refold_altered` — whether the
+  recomputation moved the change's recorded outcome, Status or End.
+  `horopter_refold_altered="true"` is the rate at which late arrivals are changing recorded
+  outcomes, which is the number worth an alert; a re-fold that moved only Subject, Type,
+  Title, Actor, Attributes or `last_event_id` is not counted here, however often it fires —
+  that detail is on the append span's `horopter.refold.moved` attribute instead. The
+  unlabelled total is the out-of-order rate itself. Every re-fold reads the ref's whole
+  event history inside the append's own transaction, under the ref-exclusive and
+  tenant-shared locks `AppendEvent` already holds, so `horopter_refold_total`'s rate
+  multiplied by the affected refs' event counts is the append latency this adds — a
+  long-lived, frequently-out-of-order ref pays for a full re-read on every such append, and
+  holding the tenant-shared lock for longer is also more of what `RebuildProjection` waits
+  out against `RebuildLockTimeout`.
 - `horopter_read_admission_limit` and `horopter_read_admission_in_flight` — `horopter-egress`'s
   read concurrency limit, and the reads holding a place under it;
   `horopter_read_memory_reserved_bytes` and `horopter_read_memory_capacity_bytes` — its read
@@ -409,6 +424,29 @@ Run one to completion against the database before starting any daemon at the new
 each daemon asserts the recorded schema version at startup and refuses to run against one it
 does not understand, so a skewed rollout fails loudly rather than corrupting data quietly.
 
+Every pending migration file runs inside one transaction (`postgres.Migrate`), so a lock any
+one of them takes is held until the whole batch commits, not just for its own statement.
+Migration `0009` rebuilds an index on `event` — the largest table, and the only one every
+append writes to. It is not the first migration since `0001` to touch `event`, and not the
+heaviest: `0004` backfills `tenant` on every row via an `UPDATE ... FROM tenant`, then a
+second `UPDATE` prefixes every correlated event's `correlation_ref` with `legacy/` — two
+full-table passes, the second over rows the first already rewrote — under a validating
+`CHECK` on `origin`; `0005` adds a foreign key (an `ACCESS EXCLUSIVE` lock plus a
+validation scan); `0006` also rewrites every row (`ADD COLUMN`, two full-table `UPDATE`s
+that between them cover every row exactly once, then `SET NOT NULL` and two `CHECK`
+constraints); and `0008` adds a column under another `CHECK` constraint. `0004`'s two
+passes touch more total rows than any of the others — `0006`'s two `UPDATE`s partition the
+table without overlap, `0004`'s second one revisits what the first already rewrote — so
+`0004`, not `0006`, is the comparator strictly heavier than `0009`'s index build. `0009`
+gets its own note because, unlike those, it buys nothing: it costs a full index rebuild on
+`event` for no measured gain (see its own comment for the `EXPLAIN` evidence), and it is
+kept rather than reverted only because reverting it would cost a second rebuild. Its
+`DROP INDEX` takes an `ACCESS EXCLUSIVE` lock on `event` that, because of the shared
+transaction, is held for as long as the `CREATE INDEX` that follows takes to build,
+blocking every append and read against `event` for the whole of that window. On a
+database with a large event history, size `0009`'s downtime before running it in
+production.
+
 ### Rebuilding a tenant's projection
 
     horopter-migrate --rebuild-tenant=<tenant-id>
@@ -435,30 +473,30 @@ exactly what the previous model destroyed. The migration records `first_seen_at 
 and `started_at = NULL`, meaning "we do not know". A rebuild is what replaces that with the
 real values from the event log.
 
-**A rebuild can change a change's recorded outcome.** It replays the log in event-id
-order, while live appends folded it in commit order, and the two differ whenever a
-same-ref event committed before another that carries a lower id. That needs no unusual
-timing: an id is minted on the ingress replica that received the request, before its
-append starts, so with more than one replica the window is the clock skew between them,
-and even with one replica an append that minted a lower id can lose the race for the
-per-ref lock. Every field whose rule is "last event wins" — `last_event_id`, `type` and
-`subject` — can come back different. So can `title` and `actor`, which follow the slightly
-narrower "last *non-empty* event wins": a reorder still moves them between two events that
-both carry one, but an event carrying none cannot blank what an earlier event recorded.
-Attributes merge, so no reorder ever loses or gains a key — but where two events set the
-*same* key, the value follows last-wins, so a query filtering on `attr.<key>` can match a
-different set of changes afterwards. `status` and `end` follow the narrowest rule, "last
-*terminal* event wins", so a `deployment.completed` and a `deployment.failed` on one ref can
-swap, but nothing that arrives later can reopen a change that has already closed. `start`,
-`started_at` and `first_seen_at` cannot: they are minima, so replay order does not reach
-them. `sources` cannot either: it is a union, so it survives a rebuild unchanged whatever
-order the log replays in. Rebuilding twice gives the same answer both times — it is the live
-projection the replay may disagree with, not itself. If a change's outcome matters to you,
-read `GET /v1/events?ref=<stored-ref>` (the log is immutable and is never reordered) before
-and after.
-`<stored-ref>` is the ref as stored, which is what `GET /v1/changes` returns — `<locus>/<ref>`,
-where the locus is `legacy` for anything the locus migrations could not recover (see "Refs
-written before the locus migrations", below) and the appending credential's locus otherwise.
+Live appends and a rebuild now agree, from this version forward. An append whose event id
+sorts below the change's current watermark re-folds that ref from the log, so the
+projection equals a fold of the ref's events in id order regardless of the order they
+arrived in, and a rebuild replaying the same log in the same order finds nothing left to
+change.
+
+That guarantee needs a ref that has never drifted: the watermark it checks, the change's
+stored `last_event_id`, is the ref's true maximum id only if the ref has always folded in
+id order. A ref whose live projection had already diverged before this version shipped can
+hold a watermark below its real maximum, so a later append whose id is above the watermark
+but below that maximum still takes the ordinary incremental path, and the old drift
+survives it. `--rebuild-tenant` still corrects such a ref — a rebuild always replays the
+whole log in id order regardless of what the stored watermark says — so it remains the
+remedy for data that predates this version. "Corrects" can still mean what it always did:
+for such a ref the rebuild can change the recorded Subject, Type, Title, Actor, attributes,
+`last_event_id`, End or Status, so a change your dashboard shows as `completed` can read
+`failed` afterward.
+Read `GET /v1/events?ref=<ref>` before and after a rebuild for any ref you need to explain
+that change on, the same as before this version.
+
+This makes the system self-consistent, not causally correct: event ids are minted from
+receipt time with `crypto/rand` entropy, so two events minted in the same millisecond have
+an arbitrary relative order, and a producer that emits events in the wrong order is beyond
+anything the store can repair.
 
 ### Refs written before the locus migrations carry a `legacy/` prefix
 

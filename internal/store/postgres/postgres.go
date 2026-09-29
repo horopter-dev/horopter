@@ -26,6 +26,7 @@ type querier interface {
 type Store struct {
 	pool              *pgxpool.Pool
 	appends           metric.Int64Counter
+	refolds           metric.Int64Counter
 	maxAttributeBytes int
 	appliedMigrations []string
 }

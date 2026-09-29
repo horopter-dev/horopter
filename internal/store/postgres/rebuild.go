@@ -61,13 +61,15 @@ func lockRebuildWrite(ctx context.Context, tx pgx.Tx, tenantID string) error {
 // here because a rebuild touches refs no appender is holding, including refs that do
 // not exist yet; see lockProjectionWrite for how the two locks compose.
 //
-// What it reproduces is the id-ordered fold, which is not always the projection
-// production holds. Live appends fold in COMMIT order — the order in which append
-// transactions take the per-ref advisory lock — and a rebuild folds in id order. The two
-// diverge for ANY pair of same-ref events whose commit order differs from their id order.
-// No sub-millisecond coincidence is needed for that, because an event's id is minted from
-// s.clock() on the receiving ingress replica BEFORE its append transaction starts, and
-// nothing afterwards keeps the two orders aligned:
+// What it reproduces is the id-ordered fold. From this version on, that is also what a
+// live append converges to: applyToProjection (append.go) detects an event whose id sorts
+// below the change's current watermark and re-folds that ref from the log instead of
+// folding the event in incrementally, so a rebuild finds nothing left to change for any
+// ref appended to entirely under this version.
+//
+// An append still arrives out of order for the same reasons it always could — an event's
+// id is minted from s.clock() on the receiving ingress replica BEFORE its append
+// transaction starts, and nothing afterwards keeps the two orders aligned:
 //
 //   - Across replicas the divergence window is the CLOCK SKEW between them, not one
 //     millisecond. A deployment.completed handled by replica B can carry a lower id than a
@@ -81,18 +83,30 @@ func lockRebuildWrite(ctx context.Context, tx pgx.Tx, tenantID string) error {
 //     from crypto/rand rather than ulid.MonotonicEntropy, so two ids minted inside one
 //     millisecond do not even tie-break by generation order.
 //
-// A rebuild can therefore produce a different Subject, Type, Title, Actor, attribute set,
-// LastEventID, End or Status than the one live folding produced, under four different
-// rules. Subject, Type and LastEventID are assigned unconditionally: "the last event
-// folded wins". Title and Actor are guarded non-empty, so their rule is "the last
-// NON-EMPTY event folded wins" — a reorder still moves them between two events that both
-// carry one, but an event carrying none cannot blank what a previous event recorded,
-// which is why the guard exists. Attributes MERGE, so the set of keys is a union and
-// commutative — no reorder loses or gains one — while the value at a key that two events
-// both set follows last-wins like the first group; a query filtering on such a key can
-// therefore match a different set of changes afterwards. End and Status follow the
-// fourth — core.Fold guards both on End being nil, so once a change has closed only a
-// terminal event moves them: "the last TERMINAL event folded wins".
+// What changed is the consequence, not the frequency: an out-of-order append now re-folds
+// its ref instead of letting the incremental answer stand, so live folding and a rebuild
+// agree for any ref appended to entirely under this version.
+//
+// The watermark the out-of-order check compares against, cur.LastEventID, is the ref's
+// true maximum id only if the ref has never folded out of id order before. A ref whose
+// drift predates this version holds a watermark below its real maximum, so a later append
+// whose id sits above the watermark but below that true maximum still takes the in-order
+// arm, and the pre-existing divergence survives untouched. --rebuild-tenant remains the
+// remedy for that case: a rebuild always replays the whole log in id order regardless of
+// what the watermark says.
+//
+// For a ref whose drift predates this version, a rebuild can still produce a different
+// Subject, Type, Title, Actor, attribute set, LastEventID, End or Status than what live
+// folding holds, under four different rules. Subject, Type and LastEventID are assigned
+// unconditionally: "the last event folded wins". Title and Actor are guarded non-empty, so
+// their rule is "the last NON-EMPTY event folded wins" — a reorder still moves them
+// between two events that both carry one, but an event carrying none cannot blank what a
+// previous event recorded, which is why the guard exists. Attributes MERGE, so the set of
+// keys is a union and commutative — no reorder loses or gains one — while the value at a
+// key that two events both set follows last-wins like the first group; a query filtering
+// on such a key can therefore match a different set of changes afterwards. End and Status
+// follow the fourth — core.Fold guards both on End being nil, so once a change has closed
+// only a terminal event moves them: "the last TERMINAL event folded wins".
 // Reordering two terminal events swaps the recorded outcome; a late annotation cannot
 // reopen a change that already closed. Start, StartedAt, FirstSeenAt and the source set are
 // NOT in that set: both start facts are minima (migration 0003, core.Fold) and the source
@@ -101,13 +115,8 @@ func lockRebuildWrite(ctx context.Context, tx pgx.Tx, tenantID string) error {
 // again gives the same answer — but "reproduces the projection exactly" is only true up to
 // that ordering.
 //
-// This is reachable by following the documentation: --rebuild-tenant is the README's
-// stated remedy for migration 0003, so an operator running it can flip a change's recorded
-// outcome from completed to failed, or back. The remedy, deferred to v0.2 and deliberately
-// not attempted here, is to make every field's rule commutative or to detect ev.ID <
-// cur.LastEventID during an append and re-fold that ref from the log. Until then the
-// README's rebuild section carries the same caveat, where an operator will actually meet
-// it.
+// See README.md's "Rebuilding a tenant's projection" section for what an operator meets
+// today.
 //
 // Operational exposure, which v0.1 does not remove: the exclusive lock blocks every
 // append for this tenant for the rebuild's whole duration. Blocked appends fail after
@@ -182,9 +191,12 @@ func (s *Store) RebuildProjection(ctx context.Context, tenantID string) (err err
 func replayProjection(
 	ctx context.Context, tx pgx.Tx, tenantID string,
 ) (events, refs int, err error) {
-	acc, events, err := foldEventLog(ctx, tx, tenantID)
+	acc, err := foldEventLog(ctx, tx, tenantID)
 	if err != nil {
 		return 0, 0, err
+	}
+	for _, f := range acc {
+		events += f.events
 	}
 	if err := writeProjection(ctx, tx, acc); err != nil {
 		return 0, 0, err
@@ -205,66 +217,28 @@ func clearProjection(ctx context.Context, tx pgx.Tx, tenantID string) error {
 }
 
 // foldEventLog replays a tenant's event log in ULID order and returns the projection it
-// implies, keyed by ref, together with the number of events it read to build it.
-//
-// Folding inside the scan loop, rather than materialising the whole log into a slice
-// first, keeps peak memory proportional to the number of distinct refs rather than the
-// total number of events replayed.
-//
-// The accumulator passes a nil *core.Change for the first event of each ref, matching how
-// AppendEvent applies events incrementally; core.Fold is written so both spellings
-// converge.
-//
-// The SELECT names only the columns Fold reads, which is why origin and edited are absent
-// — but locus is NOT one of those omissions. core.RefFor composes a point change's ref
-// from it, so dropping it from this list rebuilds every point change under "/<id>" and
-// silently diverges from the projection AppendEvent wrote, which is the shape of the bug
-// 0004 shipped.
+// implies, keyed by ref, each entry carrying the change folded for that ref together with
+// the number of events that produced it.
 func foldEventLog(
 	ctx context.Context, tx pgx.Tx, tenantID string,
-) (map[core.Ref]core.Change, int, error) {
-	rows, err := tx.Query(ctx, `
-		SELECT id, tenant, schema_version, source, type, subject, actor, title,
-		       occurred_at, received_at, correlation_ref, attributes, locus, lifecycle
-		FROM event WHERE tenant = $1 ORDER BY id ASC`, tenantID)
+) (map[core.Ref]foldedRef, error) {
+	rows, err := tx.Query(ctx, foldEventQuery(`tenant = $1`), tenantID)
 	if err != nil {
-		return nil, 0, fmt.Errorf("read event log for tenant %q: %w", tenantID, err)
+		return nil, fmt.Errorf("read event log for tenant %q: %w", tenantID, err)
 	}
 	defer rows.Close()
 
-	acc := map[core.Ref]core.Change{}
-	events := 0
-	for rows.Next() {
-		var (
-			ev    core.Event
-			corr  string
-			locus string
-		)
-		if err := rows.Scan(&ev.ID, &ev.Tenant, &ev.SchemaVersion, &ev.Source, &ev.Type,
-			&ev.Subject, &ev.Actor, &ev.Title, &ev.OccurredAt, &ev.ReceivedAt,
-			&corr, &ev.Attributes, &locus, &ev.Lifecycle); err != nil {
-			return nil, 0, fmt.Errorf("scan event row for tenant %q: %w", tenantID, err)
-		}
-		ev.CorrelationRef = core.RefFromRow(corr)
-		ev.Locus = core.LocusFromRow(locus)
-		events++
-		ref := core.RefFor(ev)
-		var prev *core.Change
-		if c, ok := acc[ref]; ok {
-			prev = &c
-		}
-		acc[ref] = core.Fold(prev, ev)
+	acc, err := foldRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("fold event log for tenant %q: %w", tenantID, err)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("iterate event log for tenant %q: %w", tenantID, err)
-	}
-	return acc, events, nil
+	return acc, nil
 }
 
 // writeProjection inserts every rebuilt change.
-func writeProjection(ctx context.Context, tx pgx.Tx, acc map[core.Ref]core.Change) error {
-	for _, c := range acc {
-		if err := upsertChange(ctx, tx, c); err != nil {
+func writeProjection(ctx context.Context, tx pgx.Tx, acc map[core.Ref]foldedRef) error {
+	for _, f := range acc {
+		if err := upsertChange(ctx, tx, f.change); err != nil {
 			return err
 		}
 	}

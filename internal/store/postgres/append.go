@@ -11,8 +11,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 	"horopter.dev/horopter/internal/core"
 	"horopter.dev/horopter/internal/telemetry"
 )
@@ -93,12 +95,7 @@ func (s *Store) AppendEvent(
 	defer func() {
 		out.created = created
 		out.errKind = errKindOf(err)
-		span.SetAttributes(out.attributes(submitted)...)
-		s.appends.Add(ctx, 1, metric.WithAttributeSet(out.metricAttributes()))
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, out.errKind)
-		}
+		s.recordAppendOutcome(ctx, span, out, submitted, err)
 	}()
 
 	ev, err = prepareEvent(ev, s.maxAttributeBytes)
@@ -125,6 +122,36 @@ func (s *Store) AppendEvent(
 		return existing, false, tx.Commit(ctx)
 	}
 	return s.writeEvent(ctx, tx, ev, &out)
+}
+
+// recordAppendOutcome emits AppendEvent's span attributes and counters, and marks the span
+// failed when err is non-nil. Split out of AppendEvent's own deferred closure to keep
+// AppendEvent within the project's cyclomatic complexity limit — the branch that gates
+// horopter.refold on err == nil, as well as on out.outOfOrder, pushed it over on its own.
+func (s *Store) recordAppendOutcome(
+	ctx context.Context, span trace.Span, out appendOutcome, submitted core.Event, err error,
+) {
+	span.SetAttributes(out.attributes(submitted)...)
+	s.appends.Add(ctx, 1, metric.WithAttributeSet(out.metricAttributes()))
+	// Gated on err == nil as well as out.outOfOrder: applyToProjection sets out.outOfOrder
+	// before it hands off to refoldOutOfOrderAppend, so a re-fold that ERRORS there still
+	// reaches this call with out.outOfOrder true and out.refoldMoved at its zero value,
+	// nil — movedSomethingRecorded(nil) is false, which would otherwise count a re-fold
+	// that never finished as "recomputed from the log, nothing moved." s.appends has an
+	// outcome=failed label for exactly this distinction; horopter.refold does not, and
+	// gating the Add is the simpler way to stay honest without giving it one — see the
+	// cardinality warning just below.
+	if out.outOfOrder && err == nil {
+		// Boolean, not the field list: a counter keeps a series per distinct attribute
+		// set, and eight field names would give it 256.
+		s.refolds.Add(ctx, 1, metric.WithAttributeSet(attribute.NewSet(
+			attribute.Bool("horopter.refold.altered",
+				movedSomethingRecorded(out.refoldMoved)))))
+	}
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, out.errKind)
+	}
 }
 
 // prepareEvent validates the event and normalises the fields the schema constrains.
@@ -361,15 +388,56 @@ func applyToProjection(ctx context.Context, tx pgx.Tx, ev core.Event, out *appen
 		prev = &cur
 	}
 	folded := core.Fold(prev, ev)
-	out.foldStatus = folded.Status
-	out.foldClosed = folded.End != nil
 	// ev.ID sorting below the change's current watermark is exactly the condition under
-	// which a rebuild diverges from the live projection — the hazard RebuildProjection
-	// documents and defers fixing. Recording it turns a known-possible, never-measured
-	// risk into a rate that can be graphed, which is what decides whether fixing it is
-	// worth doing.
+	// which an incremental fold and an id-ordered fold disagree — the divergence
+	// RebuildProjection documents. decisions/2026-09-16 resolves it here, by recomputing
+	// the ref from the log rather than by trying to patch the incremental rule, which is
+	// not achievable for attributes.
 	out.outOfOrder = found && ev.ID < cur.LastEventID
-	return upsertChange(ctx, tx, folded)
+	if !out.outOfOrder {
+		out.foldStatus = folded.Status
+		out.foldClosed = folded.End != nil
+		return upsertChange(ctx, tx, folded)
+	}
+	return refoldOutOfOrderAppend(ctx, tx, ev, folded, out)
+}
+
+// refoldOutOfOrderAppend recomputes ref from the log after an out-of-order append and
+// records the re-folded change's status on out. Split out of applyToProjection to keep its
+// branching within the complexity limit.
+//
+// folded is the incremental fold applyToProjection already computed and is about to
+// reject; it is passed in, rather than recomputed, so this function can report what the
+// re-fold actually moved. ref is recomputed from ev rather than threaded as a sixth
+// parameter — core.RefFor is a pure string composition, not a lookup — to stay within the
+// project's five-positional-parameter limit.
+func refoldOutOfOrderAppend(
+	ctx context.Context, tx pgx.Tx, ev core.Event, folded core.Change, out *appendOutcome,
+) error {
+	refRef := core.RefFor(ev)
+	reref, err := refoldRef(ctx, tx, ev.Tenant, refRef)
+	if err != nil {
+		return err
+	}
+	// refoldRef already returns the change it wrote, so there is no second read here: no
+	// second SELECT ... FOR UPDATE issued on the change row while this transaction already
+	// holds it under the ref-exclusive advisory lock lockProjectionWrite took above.
+	refolded := reref.change
+	out.foldStatus = refolded.Status
+	out.foldClosed = refolded.End != nil
+	out.refoldMoved = alteredFields(folded, refolded)
+	// Status and End are the pair that changes what the log SAYS HAPPENED, as against
+	// which of two titles it kept. That is the one an operator wants without tracing on.
+	// movedSomethingRecorded, not a second inline re-derivation of the same condition:
+	// two independent expressions of "Status or End moved" is how they went out of sync
+	// before.
+	if movedSomethingRecorded(out.refoldMoved) {
+		slog.WarnContext(ctx, "a re-fold moved a recorded outcome",
+			"tenant", ev.Tenant, "ref", refRef.String(),
+			"was", string(folded.Status), "now", string(refolded.Status),
+			"moved", out.refoldMoved)
+	}
+	return nil
 }
 
 // lockProjectionWrite takes, in one round trip, the two advisory locks an append needs

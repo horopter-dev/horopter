@@ -32,6 +32,7 @@ type appendOutcome struct {
 	foldStatus  core.Status
 	foldClosed  bool
 	outOfOrder  bool
+	refoldMoved []string
 	errKind     string
 }
 
@@ -130,5 +131,6 @@ func (o appendOutcome) baseAttributes(ev core.Event) []attribute.KeyValue {
 		attribute.String("horopter.fold.status", string(o.foldStatus)),
 		attribute.Bool("horopter.fold.closed", o.foldClosed),
 		attribute.Bool("horopter.fold.out_of_order", o.outOfOrder),
+		attribute.StringSlice("horopter.refold.moved", o.refoldMoved),
 	}
 }
