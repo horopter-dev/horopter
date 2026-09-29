@@ -216,13 +216,28 @@ const refoldFuzzIterations = 24
 // from TestAConvergedRefEqualsAWholeTenantRebuild's six events and its two terminals
 // (failed, completed — core.Fold's stateClosed/assertsTerminal cell in
 // internal/core/fold.go is {setAsserted, setsEnd: true, commutative: false}, so whichever
-// terminal folds LAST overwrites Status and End) but adds two axes that fixture left
-// unexercised: a per-event Title and Actor (last-NON-EMPTY-wins) and a "shared" attribute
-// key set to a distinct value by every event (last-wins per key, empty value or not). A
-// reordering can now move three independent recorded fields — Status/End, Title or Actor,
-// and Attributes["shared"] — instead of only one, which is why the mutation proof (see the
-// report) still finds a divergent ordering even on iterations whose two terminals happen to
-// keep their original relative order.
+// terminal folds LAST overwrites Status and End), and adds a per-event Title and Actor
+// (last-NON-EMPTY-wins) plus a "shared" attribute key set to a distinct value by every
+// event (merged last-wins per key).
+//
+// WHY A DRAW DIVERGES UNDER THE DISABLED-REFOLD MUTATION. core.Fold assigns Type and
+// LastEventID UNCONDITIONALLY on every fold (out.Type = ev.Type; out.LastEventID = ev.ID —
+// no guard, in this fixture and in its unmodified predecessor alike), so whichever event
+// folds LAST always sets both. Ids are assigned in recipe order (buildRefoldFuzzEvents), so
+// index 5 ("deployment.completed") always carries the highest id and is always folded last
+// under id order; it is also the only event whose Type string is unique in this recipe.
+// Live, under the mutation, folds in ARRIVAL order — so live matches rebuilt on Type, and
+// this fixture shows no divergence, if and only if the drawn permutation's LAST element is
+// index 5: 1 of 6 possible positions. That makes P(diverge) = 5/6 exactly and
+// E[failures in refoldFuzzIterations=24] = 20 — precisely the 20/24 the mutation proof
+// observed (see the report), not approximately, and not because of Title, Actor or shared.
+//
+// WHAT TITLE, ACTOR AND SHARED ADD. They do not change WHICH draws diverge — Type and
+// LastEventID already force that on the same 5/6 of draws, and did so in the unmodified
+// predecessor fixture too. They widen what a divergent draw's failure output SHOWS: Title
+// and Actor exercise the guarded-non-empty rule, and the shared key exercises per-key
+// last-wins on Attributes, so a failing assert.Equal diff carries more of the fields
+// alteredFields (refold.go) tracks, not only Type and LastEventID.
 var refoldFuzzRecipe = []struct{ typ, title, actor, shared string }{
 	{"deployment.started", "deploy started", "alice", "v1"},
 	{"deployment.annotated", "", "", "v2"},
@@ -236,25 +251,30 @@ var refoldFuzzRecipe = []struct{ typ, title, actor, shared string }{
 const refoldFuzzFixtureRef = "d1"
 
 // refoldFuzzSeed resolves the seed TestAConvergedRefEqualsARandomlyOrderedRebuild shuffles
-// with: refoldFuzzSeedEnv when it is set and parses, the current time otherwise.
-func refoldFuzzSeed(t *testing.T) int64 {
+// with: refoldFuzzSeedEnv when it is set and parses, the current time otherwise. fromEnv
+// reports which one, so the caller can log a replay hint only when the seed was not
+// already supplied by a replay.
+func refoldFuzzSeed(t *testing.T) (seed int64, fromEnv bool) {
 	t.Helper()
 	if v := os.Getenv(refoldFuzzSeedEnv); v != "" {
 		seed, err := strconv.ParseInt(v, 10, 64)
 		require.NoError(t, err, "%s must be a base-10 int64", refoldFuzzSeedEnv)
-		return seed
+		return seed, true
 	}
-	return time.Now().UnixNano()
+	return time.Now().UnixNano(), false
 }
 
 // buildRefoldFuzzEvents builds one fresh copy of refoldFuzzRecipe's events for tenant tn,
 // each under its own event id — assigned in recipe order, so ids sort in that order — and
-// its own idempotency key.
+// its own idempotency key. The index is folded into the eventID suffix, not just the type,
+// because three recipe entries share the type "deployment.annotated" and an eventID log
+// line naming only the type cannot tell those three apart.
 func buildRefoldFuzzEvents(t *testing.T, tn string, at time.Time) []core.Event {
 	t.Helper()
 	built := make([]core.Event, len(refoldFuzzRecipe))
 	for i, r := range refoldFuzzRecipe {
-		ev := mkEvent(tn, eventID(t, r.typ), uniqueToken(), refoldFuzzFixtureRef, r.typ,
+		suffix := fmt.Sprintf("%d-%s", i, r.typ)
+		ev := mkEvent(tn, eventID(t, suffix), uniqueToken(), refoldFuzzFixtureRef, r.typ,
 			at.Add(time.Duration(i)*time.Minute))
 		ev.Title = r.title
 		ev.Actor = r.actor
@@ -278,10 +298,28 @@ func buildRefoldFuzzEvents(t *testing.T, tn string, at time.Time) []core.Event {
 // names the tenant after t.Name(), which already differs per subtest (.…/iter0, .…/iter1,
 // …); tenant(t) also appends its own uniqueToken() suffix regardless, so the fresh-tenant
 // requirement holds twice over even though only one mechanism is required to hold it once.
+//
+// WHAT THE EQUALITY PINS. live is written by applyToProjection's in-order arm ->
+// upsertChange, or — on the out-of-order arm this whole change adds — by refoldRef ->
+// foldRef -> foldRows -> upsertChange. rebuilt is written by RebuildProjection ->
+// replayProjection -> foldEventLog -> foldRows -> upsertChange. Both foldRows call sites
+// fold events through the SAME core.Fold, so a bug confined to one of Fold's field-level
+// rules (say, a broken last-non-empty-wins for Title) moves live and rebuilt identically
+// and this assertion cannot see it; internal/core/fold_test.go owns those rules directly.
+// What this assertion pins is agreement between the two DRIVERS that decide which code
+// path runs at all — the shape of the regression applyToProjection (append.go) introduces
+// when its out-of-order arm is skipped. The absolute id-ordered answer for a specific
+// fixture is pinned separately, by TestAnOutOfOrderAppendConvergesTheRefToIDOrder. This is
+// inherited from TestAConvergedRefEqualsAWholeTenantRebuild above, not new here, but a
+// reader is more likely to land on this test, so it is recorded here too.
 func TestAConvergedRefEqualsARandomlyOrderedRebuild(t *testing.T) {
-	seed := refoldFuzzSeed(t)
-	t.Logf("shuffle seed %d (export %s=%d to replay this run's exact orderings)",
-		seed, refoldFuzzSeedEnv, seed)
+	seed, fromEnv := refoldFuzzSeed(t)
+	if fromEnv {
+		t.Logf("shuffle seed %d (from %s)", seed, refoldFuzzSeedEnv)
+	} else {
+		t.Logf("shuffle seed %d (export %s=%d to replay this run's exact orderings)",
+			seed, refoldFuzzSeedEnv, seed)
+	}
 	//nolint:gosec // G404: shuffling append order for a property test, not a cryptographic
 	// use; the seed is what makes a failure replayable, which crypto/rand would defeat.
 	rng := rand.New(rand.NewSource(seed))

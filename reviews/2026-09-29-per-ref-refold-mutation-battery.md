@@ -626,14 +626,33 @@ Messages:   	order [4 0 2 5 3 1]: a rebuild found something to change, so live f
               still not id-ordered
 ```
 
-4 of 24 iterations (`iter2`, `iter3`, `iter16`, `iter20`) passed even under the mutation —
-those particular permutations happened to append the higher-id terminal last anyway, which
-mutation 4 cannot break since there is then nothing for the disabled re-fold to have fixed.
-That 4-in-24 pass rate is the flakiness the task brief warned a fixed iteration count could
-introduce; at 24 iterations the chance of a fully-clean run (no divergent ordering at all)
-is low enough in practice — 20 of 24 diverged on the first try — that this is not treated as
-a live concern, and the seed log makes any future all-green run reproducible for inspection
-rather than silently trusted.
+4 of 24 iterations (`iter2`, `iter3`, `iter16`, `iter20`) passed even under the mutation.
+**Corrected mechanism** (a review of commit `1ad9678` verified this by independently
+replaying the logged seed): the condition is not "the two terminals kept their relative
+order" — it is that the drawn permutation's LAST-appended element was recipe index 5
+(`deployment.completed`). `core.Fold` assigns `Type` and `LastEventID` *unconditionally* on
+every fold, so whichever event folds last always sets both; index 5 carries the highest id
+by construction (ids are assigned in recipe order) and is the only event with a unique
+`Type` string in this six-event recipe, so id order always folds it last and live (under
+the mutation, folding in arrival order) can only match it there. That index also happening
+to be a terminal event is incidental to this mechanism, not its cause. `P(last element =
+index 5) = 1/6`, hence `P(diverge) = 5/6` exactly and `E[failures in 24] = 20` — precisely
+what was observed, not approximately.
+
+This pass rate is not flakiness. `P(a 24-iteration run has zero divergent draws) =
+(1/6)^24 ≈ 5×10⁻¹⁹` — a computed bound, not a judgement call — and under *unmutated* code
+the pass rate is 24/24 by design (that invariant is the entire point of this branch), so
+there is no pass/fail boundary this test could land on either side of against correct code.
+The 4/24 observed here is a property of the mutation, not of the test. The seed log above
+makes this exact 20/24 split replayable if it ever needs re-checking.
+
+**Scope, stated precisely.** `live` and `rebuilt` both fold every event through the same
+`core.Fold`, via `foldRows` — reached from `foldRef` on the live/refold path and from
+`foldEventLog` on the rebuild path. A bug confined to one of `Fold`'s field-level rules
+(e.g. a broken last-non-empty-wins for `Title`) would move `live` and `rebuilt` identically
+and this test cannot see it; `internal/core/fold_test.go` owns those rules. What this test
+pins — like its hard-coded predecessor — is agreement between the two *drivers* that decide
+which code path runs at all, which is exactly mutation 4's shape.
 
 The mutation was reverted immediately after this run; `git status --porcelain` was clean on
 `internal/store/postgres/append.go` before the next step, and the full package suite
