@@ -147,6 +147,11 @@ func TestRefoldRefFoldsAPointRefFromItsOwnEvent(t *testing.T) {
 // rather than an error or an empty row. Under the decided mechanisms an events count of
 // zero means exactly one thing — the ref has never existed — so there is nothing for the
 // store to decide and nothing for it to write.
+//
+// The real catcher is the require.NoError on RefoldRef, not the assert.Empty below it: if
+// refoldRef dropped its events == 0 branch and called upsertChange unconditionally on a
+// zero-value foldedRef.change, the write would fail the tenant foreign key, and that
+// failure would surface at the require.NoError. Do not simplify that call away.
 func TestRefoldRefOnAnUnknownRefWritesNothing(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 
@@ -160,10 +165,17 @@ func TestRefoldRefOnAnUnknownRefWritesNothing(t *testing.T) {
 	assert.Empty(t, got, "an unknown ref must leave the projection alone")
 }
 
-// TestRefoldRefReadsOnlyItsOwnRef pins the cost claim the spec makes: a re-fold is
-// bounded by one ref's events, not by the tenant's log. It is asserted through behaviour
-// rather than through timing — the ref's change must be correct while a far larger log
-// for the same tenant is present, and a whole-log fold would fold those in too.
+// TestRefoldRefReadsOnlyItsOwnRef pins ref scoping by correctness, not by cost: events
+// belonging to other refs of the same tenant must not reach this change, even while a
+// far larger log for the same tenant is present. It does NOT pin the spec's cost claim
+// that a re-fold reads only one ref's events — if foldRef's predicate regressed to
+// `WHERE tenant = $1`, scanning the whole tenant log, foldRows would still bucket the
+// noise events under their own refs (ci/other-0 .. ci/other-5) and acc["ci/d1"] would be
+// byte-identical, so this test would pass unchanged. What it does catch is a predicate
+// that matches the wrong rows or none: that drives folded.events to 0, takes the delete
+// branch, and fails oneChange's require.Len. The cost bound is left unasserted on
+// purpose — a timing assertion in a suite that shares one database is a flake waiting to
+// happen.
 func TestRefoldRefReadsOnlyItsOwnRef(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
