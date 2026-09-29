@@ -182,9 +182,12 @@ func (s *Store) RebuildProjection(ctx context.Context, tenantID string) (err err
 func replayProjection(
 	ctx context.Context, tx pgx.Tx, tenantID string,
 ) (events, refs int, err error) {
-	acc, events, err := foldEventLog(ctx, tx, tenantID)
+	acc, err := foldEventLog(ctx, tx, tenantID)
 	if err != nil {
 		return 0, 0, err
+	}
+	for _, f := range acc {
+		events += f.events
 	}
 	if err := writeProjection(ctx, tx, acc); err != nil {
 		return 0, 0, err
@@ -214,57 +217,26 @@ func clearProjection(ctx context.Context, tx pgx.Tx, tenantID string) error {
 // The accumulator passes a nil *core.Change for the first event of each ref, matching how
 // AppendEvent applies events incrementally; core.Fold is written so both spellings
 // converge.
-//
-// The SELECT names only the columns Fold reads, which is why origin and edited are absent
-// — but locus is NOT one of those omissions. core.RefFor composes a point change's ref
-// from it, so dropping it from this list rebuilds every point change under "/<id>" and
-// silently diverges from the projection AppendEvent wrote, which is the shape of the bug
-// 0004 shipped.
 func foldEventLog(
 	ctx context.Context, tx pgx.Tx, tenantID string,
-) (map[core.Ref]core.Change, int, error) {
-	rows, err := tx.Query(ctx, `
-		SELECT id, tenant, schema_version, source, type, subject, actor, title,
-		       occurred_at, received_at, correlation_ref, attributes, locus, lifecycle
-		FROM event WHERE tenant = $1 ORDER BY id ASC`, tenantID)
+) (map[core.Ref]foldedRef, error) {
+	rows, err := tx.Query(ctx, foldEventQuery(`tenant = $1`), tenantID)
 	if err != nil {
-		return nil, 0, fmt.Errorf("read event log for tenant %q: %w", tenantID, err)
+		return nil, fmt.Errorf("read event log for tenant %q: %w", tenantID, err)
 	}
 	defer rows.Close()
 
-	acc := map[core.Ref]core.Change{}
-	events := 0
-	for rows.Next() {
-		var (
-			ev    core.Event
-			corr  string
-			locus string
-		)
-		if err := rows.Scan(&ev.ID, &ev.Tenant, &ev.SchemaVersion, &ev.Source, &ev.Type,
-			&ev.Subject, &ev.Actor, &ev.Title, &ev.OccurredAt, &ev.ReceivedAt,
-			&corr, &ev.Attributes, &locus, &ev.Lifecycle); err != nil {
-			return nil, 0, fmt.Errorf("scan event row for tenant %q: %w", tenantID, err)
-		}
-		ev.CorrelationRef = core.RefFromRow(corr)
-		ev.Locus = core.LocusFromRow(locus)
-		events++
-		ref := core.RefFor(ev)
-		var prev *core.Change
-		if c, ok := acc[ref]; ok {
-			prev = &c
-		}
-		acc[ref] = core.Fold(prev, ev)
+	acc, err := foldRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("fold event log for tenant %q: %w", tenantID, err)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("iterate event log for tenant %q: %w", tenantID, err)
-	}
-	return acc, events, nil
+	return acc, nil
 }
 
 // writeProjection inserts every rebuilt change.
-func writeProjection(ctx context.Context, tx pgx.Tx, acc map[core.Ref]core.Change) error {
-	for _, c := range acc {
-		if err := upsertChange(ctx, tx, c); err != nil {
+func writeProjection(ctx context.Context, tx pgx.Tx, acc map[core.Ref]foldedRef) error {
+	for _, f := range acc {
+		if err := upsertChange(ctx, tx, f.change); err != nil {
 			return err
 		}
 	}
