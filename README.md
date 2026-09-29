@@ -346,7 +346,8 @@ What is recorded:
   `horopter_fold_out_of_order` — whether the event arrived with an id below the latest one
   already folded into its change. It answers whether ingress is accepting, deduplicating or
   rejecting events, without tracing turned on. `horopter_fold_out_of_order="true"` is the
-  out-of-order rate, the measurement the projection re-fold decision is waiting on.
+  rate at which an append triggers the inline per-ref re-fold that keeps the projection
+  converged to id order — see "Rebuilding a tenant's projection" below.
   `horopter_append_dedupe_path="unique_violation"` counts concurrent retries of one
   idempotency key racing each other, as distinct from a retry that lands after the first
   attempt has already committed.
@@ -435,10 +436,20 @@ exactly what the previous model destroyed. The migration records `first_seen_at 
 and `started_at = NULL`, meaning "we do not know". A rebuild is what replaces that with the
 real values from the event log.
 
-Live appends and a rebuild now agree. An append whose event id sorts below the change's
-current watermark re-folds that ref from the log, so the projection equals a fold of the
-ref's events in id order regardless of the order they arrived in. A rebuild replays the
-same log in the same order and finds nothing to change.
+Live appends and a rebuild now agree, from this version forward. An append whose event id
+sorts below the change's current watermark re-folds that ref from the log, so the
+projection equals a fold of the ref's events in id order regardless of the order they
+arrived in, and a rebuild replaying the same log in the same order finds nothing left to
+change.
+
+That guarantee needs a ref that has never drifted: the watermark it checks, the change's
+stored `last_event_id`, is the ref's true maximum id only if the ref has always folded in
+id order. A ref whose live projection had already diverged before this version shipped can
+hold a watermark below its real maximum, so a later append whose id is above the watermark
+but below that maximum still takes the ordinary incremental path, and the old drift
+survives it. `--rebuild-tenant` still corrects such a ref — a rebuild always replays the
+whole log in id order regardless of what the stored watermark says — so it remains the
+remedy for data that predates this version.
 
 This makes the system self-consistent, not causally correct: event ids are minted from
 receipt time with `crypto/rand` entropy, so two events minted in the same millisecond have

@@ -180,18 +180,33 @@ func TestAConvergedRefEqualsAWholeTenantRebuild(t *testing.T) {
 // TestARetriedOutOfOrderAppendDoesNotRefoldAgain pins that the dedupe path still returns
 // before the projection is touched. A producer retrying a late event must not pay for a
 // second re-fold, and must not be able to move the projection by retrying.
+//
+// started must carry the LOWER id and completed the higher one, with completed appended
+// first: that is what makes started's own (first, non-retry) append the out-of-order one.
+// The fold.out_of_order assertion below checks that directly rather than assuming it —
+// with the ids the other way around, started's append is in order, refoldRef is never
+// called even once, and the test would pass without exercising the dedupe/re-fold
+// interaction its name promises.
 func TestARetriedOutOfOrderAppendDoesNotRefoldAgain(t *testing.T) {
+	rec, restore := recordSpans(t)
+	defer restore()
+
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
 
+	started := mkEvent(tn, eventID(t, "started"), "k2", "d1", "deployment.started", at)
 	completed := mkEvent(tn, eventID(t, "completed"), "k1", "d1", "deployment.completed",
 		at.Add(20*time.Minute))
-	started := mkEvent(tn, eventID(t, "started"), "k2", "d1", "deployment.started", at)
+	require.Less(t, started.ID, completed.ID, "fixture: ids must sort in build order")
+
 	_, _, err := s.AppendEvent(ctx, completed)
 	require.NoError(t, err)
 	_, created, err := s.AppendEvent(ctx, started)
 	require.NoError(t, err)
 	require.True(t, created)
+	require.Equal(t, []string{"false", "true"},
+		spanAttrValues(rec, "AppendEvent", "horopter.fold.out_of_order"),
+		"fixture: started's own append must be the one that takes the re-fold arm")
 
 	before := oneChange(ctx, t, s, tn, "ci/d1")
 	_, created, err = s.AppendEvent(ctx, started)
@@ -210,9 +225,14 @@ func TestAnOutOfOrderAppendStillFailsFastUnderARebuildLock(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
 
+	// started must carry the LOWER id and completed the higher one, with completed
+	// appended first — the same fixture shape TestARetriedOutOfOrderAppendDoesNotRefoldAgain
+	// uses — so started's blocked append below is genuinely the out-of-order one the test
+	// name and the comment describe, not one that happens to take the in-order arm anyway.
+	started := mkEvent(tn, eventID(t, "started"), "k2", "d1", "deployment.started", at)
 	completed := mkEvent(tn, eventID(t, "completed"), "k1", "d1", "deployment.completed",
 		at.Add(20*time.Minute))
-	started := mkEvent(tn, eventID(t, "started"), "k2", "d1", "deployment.started", at)
+	require.Less(t, started.ID, completed.ID, "fixture: ids must sort in build order")
 	_, _, err := s.AppendEvent(ctx, completed)
 	require.NoError(t, err)
 
