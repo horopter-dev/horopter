@@ -407,6 +407,75 @@ func TestARefoldThatMovesOnlyBookkeepingIsNotCountedAsAltered(t *testing.T) {
 	assert.Zero(t, counts["true"])
 }
 
+// TestARefoldThatMovesOnlyTheEndTimeIsCountedAsAltered catches a regression in
+// alteredFields that compares End by nil-ness instead of by VALUE.
+//
+// TWO TERMINAL EVENTS OF THE SAME TYPE. Status, Subject, Type, Title, Actor and
+// Attributes are identical on both sides, so the only recorded fact that moves is WHEN
+// the change finished.
+//
+// core.Fold's terminal cell OVERWRITES End every time it fires — see
+// stateClosed/assertsTerminal in internal/core/fold.go's transitions table — so whichever
+// terminal event folds LAST sets End, regardless of what closed the change first. Id order
+// folds early first: the change is open, so early's terminal cell closes it and sets
+// End = early's timestamp. Id order then folds late second: the change is now closed, and
+// late is ALSO terminal, so its cell fires again and overwrites End with late's timestamp.
+// The re-folded (id-ordered) End is therefore late's timestamp — the LATER one — not
+// early's, which is what an incremental, arrival-order-only fold would have left behind
+// had late arrived first and early folded onto it last instead.
+//
+// Comparing End by presence rather than by value reports nothing moved, and a change to
+// when the log says work finished becomes invisible to both the counter and the warn log.
+func TestARefoldThatMovesOnlyTheEndTimeIsCountedAsAltered(t *testing.T) {
+	reader := recordMetrics(t)
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+
+	early := mkEvent(tn, eventID(t, "early"), "k1", "d1", "deployment.completed", at)
+	late := mkEvent(tn, eventID(t, "late"), "k2", "d1", "deployment.completed",
+		at.Add(20*time.Minute))
+	require.Less(t, early.ID, late.ID, "fixture: ids must sort in build order")
+
+	_, _, err := s.AppendEvent(ctx, late)
+	require.NoError(t, err)
+	_, _, err = s.AppendEvent(ctx, early)
+	require.NoError(t, err)
+
+	got := oneChange(ctx, t, s, tn, "ci/d1")
+	require.NotNil(t, got.End)
+	assert.True(t, got.End.Equal(at.Add(20*time.Minute)),
+		"id order folds early first and late second; late is also terminal and "+
+			"re-closes the change, overwriting End with its own timestamp")
+	assert.Equal(t, int64(1), refoldCounts(t, reader)["true"],
+		"the end time moved, which is a recorded fact and must be counted as altering")
+}
+
+// TestRefoldRefDeletesAChangeWhoseEventsAreGone catches a regression that returns before
+// refoldRef's DELETE when folded.events == 0. The delete branch is unreachable through the
+// store's own API — nothing deletes an event — so the events are removed directly here.
+// Without the branch a per-ref re-fold and a whole-tenant rebuild disagree about such a
+// ref, which is the equivalence the branch exists to hold.
+func TestRefoldRefDeletesAChangeWhoseEventsAreGone(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+
+	ev := mkEvent(tn, eventID(t, "only"), "k1", "d1", "deployment.started", at)
+	_, _, err := s.AppendEvent(ctx, ev)
+	require.NoError(t, err)
+	require.NotEmpty(t, oneChange(ctx, t, s, tn, "ci/d1"))
+
+	_, err = s.Pool().Exec(ctx, `DELETE FROM event WHERE tenant = $1`, tn)
+	require.NoError(t, err)
+
+	require.NoError(t, s.RefoldRef(ctx, tn, core.RefFromRow("ci/d1")))
+
+	q := changeQuery(t, tn, time.Time{}, time.Time{}, 0, nil)
+	q.Ref = "ci/d1"
+	got, _, err := s.QueryChanges(ctx, q)
+	require.NoError(t, err)
+	assert.Empty(t, got, "a ref with no events must leave no change behind")
+}
+
 // refoldCounts sums horopter.refold by its horopter.refold.altered label.
 func refoldCounts(t *testing.T, reader *sdkmetric.ManualReader) map[string]int64 {
 	t.Helper()
