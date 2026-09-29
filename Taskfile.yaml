@@ -7,10 +7,20 @@ tasks:
       - task --list-all
   db:up:
     desc: Start the Postgres container
+    summary: >-
+      Starts just the Postgres container from docker-compose, without the rest of the stack —
+      which is all `task test` needs. The compose project name comes from the directory, so a
+      second checkout of this repo gets its own container name and collides on port 5432 with the
+      first one still running.
     cmds:
       - docker compose up -d db
   test:
     desc: Run the Go tests against the local database
+    summary: >-
+      Runs the Go tests with -race and -count=1, so nothing is served from the test cache, against
+      the local Postgres over HOROPTER_TEST_DSN. It refuses to start with a readable message if
+      the database is unreachable rather than failing deep in a test. Pass a package to narrow it:
+      `task test -- ./udap/...`; the default is ./...
     preconditions:
       - sh: 'docker compose exec -T db pg_isready -U horopter'
         msg: 'the database is not reachable; start it with `task db:up` and retry'
@@ -20,10 +30,16 @@ tasks:
       - go test -race -count=1 {{.CLI_ARGS | default "./..."}}
   lint:
     desc: Run golangci-lint
+    summary: >-
+      golangci-lint over the whole module. Reports only; it fixes nothing.
     cmds:
       - golangci-lint run ./...
   build:
     desc: Build the ingress, egress, horopter-migrate and horoctl binaries into dist/
+    summary: >-
+      Builds all four binaries into dist/: horopter-ingress, horopter-egress, horopter-migrate and
+      horoctl. Plain `go build` with no version stamping — the release builds do that, so a binary
+      from here reports no version.
     cmds:
       - go build -o dist/horopter-ingress ./cmd/horopter-ingress
       - go build -o dist/horopter-egress ./cmd/horopter-egress
@@ -31,11 +47,18 @@ tasks:
       - go build -o dist/horoctl ./cmd/horoctl
   up:
     desc: Pull the pinned images and start the stack
+    summary: >-
+      Pulls the pinned images and starts the whole stack. This runs the published images, so it
+      does not include anything in your working tree — use up:local for that.
     cmds:
       - docker compose pull
       - docker compose up -d
   up:local:
     desc: Build images from the working tree and start the stack
+    summary: >-
+      Builds images from the working tree with goreleaser in snapshot mode and starts the stack on
+      them, layering docker-compose.snapshot.yaml over the base compose file. This is the one that
+      tests uncommitted code; `up` runs the published images regardless of what you have changed.
     cmds:
       - ./hack/snapshot-config.sh
       - goreleaser release --snapshot --clean -f .goreleaser.snapshot.yaml
@@ -43,35 +66,67 @@ tasks:
       - docker compose -f docker-compose.yaml -f docker-compose.snapshot.yaml up -d
   stop:
     desc: Halt the stack, keeping containers and data
+    summary: >-
+      Halts the containers but keeps them and their data, so `up` restarts in place. The gentlest
+      of the three: down removes containers, down:wipe destroys the database.
     cmds:
       - docker compose stop
   down:
     desc: Stop the stack and remove containers, keeping the database
+    summary: >-
+      Stops the stack and removes the containers, keeping the database volume — so the data
+      survives and the next `up` finds it. Use down:wipe to discard the data too.
     cmds:
       - docker compose down
   down:wipe:
     desc: Stop the stack and destroy the database volume
+    summary: >-
+      Stops the stack and destroys the database volume with it. This is the destructive one: the
+      data is gone and the next start begins from an empty database. `down` is the version that
+      keeps it.
     cmds:
       - docker compose down -v
   logs:
     desc: Follow the ingress and egress logs
+    summary: >-
+      Follows the ingress and egress logs together, not the whole stack — the two services whose
+      interleaving is usually what you are reading for.
     cmds:
       - docker compose logs -f ingress egress
   seed:
     desc: Fill the running stack with changes in all three shapes
+    summary: >-
+      Fills a running stack with changes in all three shapes the model allows: closed, open and
+      point — where a point has its start and end coincide. Seeding all three is how a dashboard
+      or query gets exercised against the shapes it will actually see, rather than only the simple
+      closed case.
     cmds:
       - ./hack/seed.sh
   load:
     desc: Drive concurrent reads at the egress API (task load -- [concurrency] [iterations])
+    summary: >-
+      Drives concurrent reads at the egress API: `task load -- [concurrency] [iterations]`. It
+      authenticates with the compose stack's fixed dev reader key, scoped to the bootstrap
+      "default" tenant, so it works against a local stack with nothing exported. Point it
+      elsewhere with HOROPTER_EGRESS_URL, and set HOROPTER_TENANT only if you need a different
+      tenant.
     cmds:
       - ./hack/load.sh {{.CLI_ARGS}}
   fmt:
     desc: Check formatting with gofmt
+    summary: >-
+      Lists anything gofmt would change, then fails if that list is non-empty — so it reports the
+      files and the exit code, rather than rewriting. There is no apply counterpart here; run
+      gofmt -w yourself.
     cmds:
       - gofmt -l .
       - test -z "$(gofmt -l .)"
   check:
     desc: Run fmt, lint and test
+    summary: >-
+      fmt, lint and test in order, stopping at the first failure — so a passing fmt does not mean
+      lint and test ran. Note it runs the real test task, which means it needs the Postgres
+      container up.
     cmds:
       - task: fmt
       - task: lint
