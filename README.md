@@ -249,9 +249,23 @@ that no longer parses as JSON).
 - `HOROPTER_LOG_LEVEL` — the minimum level to log: `debug`, `info`, `warn` or `error`,
   case-insensitive. Default `info`. A value that does not parse stops the daemon at startup.
 
+**Every request writes one `request` line at `info`**, except `GET /healthz` and
+`GET /readyz`: `method`, `route` (the matched pattern, `unmatched` for a 404 or 405), `status`,
+`duration_ms` and `bytes`; `tenant` and `credential` (the key prefix) once a credential
+resolves; `error`, the message the client received, when a 4xx or 5xx answer is a JSON error
+object, as every Horopter error is. A 404 or 405 from an unmatched path, and a 500 from a
+panic, have no such body and log no `error`. Ingress adds `subject`,
+`type`, `ref` and, when the event has one, `idempotency_key`. Egress adds the `query` string of
+an authenticated read. Every string is cut at 1 KiB, with `<field>_truncated: true` when it
+was. Keys, request bodies, event attributes and client addresses are never logged.
+
+To follow the request lines:
+
+    docker compose logs --no-log-prefix -f ingress | jq -R 'fromjson? | select(.msg == "request")'
+
 A line logged while a span is active also carries `trace_id` and `span_id`, which is what links
 it to a trace in a backend such as Tempo. Every read-admission line has them **when tracing is
-on** — `read shed`, `read too large` and the halved-limit warning — as do the ingress request
+on** — `read shed`, `read too large` and the halved-limit warning — as do the request
 lines. With tracing at its default off, none of them do: there is no span to attach to. Startup
 and telemetry-failure lines never carry them, tracing on or off — they run before any span
 exists.
