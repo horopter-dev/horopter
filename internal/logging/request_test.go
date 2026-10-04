@@ -2,11 +2,15 @@ package logging
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,13 +19,15 @@ import (
 // serve runs req through Requests(mux) with slog's default sent to a buffer, and returns
 // every record written. No test in this package calls t.Parallel, which is what makes
 // swapping the process-wide default safe.
-func serve(t *testing.T, mux http.Handler, req *http.Request) []map[string]any {
+func serve(
+	t *testing.T, mux http.Handler, req *http.Request, opts ...RequestOption,
+) []map[string]any {
 	t.Helper()
 	var buf bytes.Buffer
 	previous := slog.Default()
 	slog.SetDefault(slog.New(handler(&buf, slog.LevelDebug)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
-	Requests(mux).ServeHTTP(httptest.NewRecorder(), req)
+	Requests(mux, opts...).ServeHTTP(httptest.NewRecorder(), req)
 	var records []map[string]any
 	dec := json.NewDecoder(&buf)
 	for dec.More() {
@@ -112,4 +118,117 @@ func TestAFlushingHandlerReachesTheFlusherThroughTheWrapper(t *testing.T) {
 	})
 	serve(t, m, httptest.NewRequest(http.MethodGet, "/stream", nil))
 	assert.NoError(t, flushErr)
+}
+
+func TestAnnotateWithoutARecordDoesNothing(t *testing.T) {
+	assert.NotPanics(t, func() { Annotate(context.Background(), slog.String("k", "v")) })
+}
+
+func TestAnnotationsReachTheLineAndTheLastValueWins(t *testing.T) {
+	m := muxWith("POST /v1/events", func(_ http.ResponseWriter, r *http.Request) {
+		Annotate(r.Context(), slog.String("subject", "first"), slog.String("type", "t"))
+		Annotate(r.Context(), slog.String("subject", "acme/prod"))
+	})
+	records := serve(t, m, httptest.NewRequest(http.MethodPost, "/v1/events", nil))
+	require.Len(t, records, 1)
+	assert.Equal(t, "acme/prod", records[0]["subject"])
+	assert.Equal(t, "t", records[0]["type"])
+}
+
+func TestConcurrentAnnotationsAreSafe(t *testing.T) {
+	m := muxWith("POST /v1/events", func(_ http.ResponseWriter, r *http.Request) {
+		var wg sync.WaitGroup
+		for i := range 50 {
+			wg.Go(func() { Annotate(r.Context(), slog.Int("n", i)) })
+		}
+		wg.Wait()
+	})
+	records := serve(t, m, httptest.NewRequest(http.MethodPost, "/v1/events", nil))
+	require.Len(t, records, 1)
+	assert.Contains(t, records[0], "n")
+}
+
+func TestErrorIsReadFromAJSONErrorBody(t *testing.T) {
+	m := muxWith("POST /v1/events", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"subject is required"}`))
+	})
+	records := serve(t, m, httptest.NewRequest(http.MethodPost, "/v1/events", nil))
+	assert.Equal(t, "subject is required", records[0]["error"])
+}
+
+func TestANonJSONErrorBodyAddsNoErrorField(t *testing.T) {
+	m := muxWith("POST /v1/events", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("plain text"))
+	})
+	records := serve(t, m, httptest.NewRequest(http.MethodPost, "/v1/events", nil))
+	assert.NotContains(t, records[0], "error")
+	assert.NotContains(t, records[0], "error_truncated")
+}
+
+func TestALongErrorIsCutToOneKiBAndFlagged(t *testing.T) {
+	msg := strings.Repeat("x", 8<<10)
+	m := muxWith("POST /v1/events", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	})
+	records := serve(t, m, httptest.NewRequest(http.MethodPost, "/v1/events", nil))
+	assert.Len(t, records[0]["error"], 1024)
+	assert.Equal(t, true, records[0]["error_truncated"])
+}
+
+func TestAnErrorBodyPastTheRetentionBoundIsFlaggedWithoutText(t *testing.T) {
+	msg := strings.Repeat("x", 3<<20)
+	m := muxWith("POST /v1/events", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	})
+	records := serve(t, m, httptest.NewRequest(http.MethodPost, "/v1/events", nil))
+	assert.NotContains(t, records[0], "error")
+	assert.Equal(t, true, records[0]["error_truncated"])
+}
+
+func TestEveryStringFieldIsCutAtOneKiB(t *testing.T) {
+	m := muxWith("POST /v1/events", func(_ http.ResponseWriter, r *http.Request) {
+		Annotate(r.Context(), slog.String("subject", strings.Repeat("s", 4<<10)))
+	})
+	records := serve(t, m, httptest.NewRequest(http.MethodPost, "/v1/events", nil))
+	assert.Len(t, records[0]["subject"], 1024)
+	assert.Equal(t, true, records[0]["subject_truncated"])
+}
+
+func TestACutNeverSplitsAMultiByteCharacter(t *testing.T) {
+	// "é" is two bytes; 1023 bytes of "a" put its first byte at offset 1023.
+	value := strings.Repeat("a", 1023) + strings.Repeat("é", 10)
+	m := muxWith("POST /v1/events", func(_ http.ResponseWriter, r *http.Request) {
+		Annotate(r.Context(), slog.String("subject", value))
+	})
+	records := serve(t, m, httptest.NewRequest(http.MethodPost, "/v1/events", nil))
+	got, ok := records[0]["subject"].(string)
+	require.True(t, ok)
+	assert.True(t, utf8.ValidString(got))
+	assert.Equal(t, strings.Repeat("a", 1023), got)
+}
+
+func TestTheQueryIsLoggedOnlyWithACredential(t *testing.T) {
+	anonymous := muxWith("GET /v1/changes", func(http.ResponseWriter, *http.Request) {})
+	records := serve(t, anonymous,
+		httptest.NewRequest(http.MethodGet, "/v1/changes?ref=ci/1", nil), WithQuery())
+	assert.NotContains(t, records[0], "query")
+
+	known := muxWith("GET /v1/changes", func(_ http.ResponseWriter, r *http.Request) {
+		Annotate(r.Context(), slog.String("credential", "0123456789ab"))
+	})
+	records = serve(t, known,
+		httptest.NewRequest(http.MethodGet, "/v1/changes?ref=ci/1", nil), WithQuery())
+	assert.Equal(t, "ref=ci/1", records[0]["query"])
+}
+
+func TestTheQueryIsNeverLoggedWithoutTheOption(t *testing.T) {
+	m := muxWith("GET /v1/changes", func(_ http.ResponseWriter, r *http.Request) {
+		Annotate(r.Context(), slog.String("credential", "0123456789ab"))
+	})
+	records := serve(t, m, httptest.NewRequest(http.MethodGet, "/v1/changes?ref=ci/1", nil))
+	assert.NotContains(t, records[0], "query")
 }
