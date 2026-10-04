@@ -417,7 +417,7 @@ func attributeFilters(r *http.Request) map[string]string {
 // validated it before this handler ever ran, and for a global credential that resolution is
 // a database round trip a query-building step must not repeat.
 func (s *Server) changesFor(
-	w http.ResponseWriter, r *http.Request, win window, adapter string,
+	w http.ResponseWriter, r *http.Request, win window, adapter string, after *postgres.ChangeKey,
 ) (changes []core.Change, truncated, ok bool) {
 	tenantID := tenantFromContext(r.Context())
 	trace.SpanFromContext(r.Context()).SetAttributes(
@@ -441,6 +441,7 @@ func (s *Server) changesFor(
 	q.Ref = r.URL.Query().Get("ref")
 	q.Locus = r.URL.Query().Get("locus")
 	q.Source = r.URL.Query().Get("source")
+	q.After = after
 	est, err := s.store.EstimateChanges(r.Context(), q)
 	if err != nil {
 		s.readFailed(w, r, adapter, err)
@@ -465,14 +466,74 @@ func (s *Server) queryChanges(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	key, paged, err := changeCursor(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var after *postgres.ChangeKey
+	if paged {
+		after = &key
+	}
 	trace.SpanFromContext(r.Context()).SetAttributes(
 		attribute.String("horopter.adapter", "neutral"))
-	changes, truncated, ok := s.changesFor(w, r, win, "neutral")
+	changes, truncated, ok := s.changesFor(w, r, win, "neutral", after)
 	if !ok {
 		return
 	}
 	markTruncated(w, truncated)
-	writeJSON(w, http.StatusOK, changesToJSON(changes))
+	body := map[string]any{"changes": changesToJSON(changes)}
+	if truncated && len(changes) > 0 {
+		last := changes[len(changes)-1]
+		lastKey := []string{last.Start.UTC().Format(time.RFC3339Nano), last.Ref.String()}
+		if err := setNext(w, r, body, lastKey); err != nil {
+			s.readFailed(w, r, "neutral", err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// changeCursor reads the request's cursor as a change key. ok is false when there is none.
+func changeCursor(r *http.Request) (key postgres.ChangeKey, ok bool, err error) {
+	token := r.URL.Query().Get("cursor")
+	if token == "" {
+		return postgres.ChangeKey{}, false, nil
+	}
+	k, err := decodeCursor(token, r.URL.Query())
+	if err != nil {
+		return postgres.ChangeKey{}, false, err
+	}
+	if len(k) != 2 {
+		return postgres.ChangeKey{}, false, errBadCursor
+	}
+	start, err := time.Parse(time.RFC3339Nano, k[0])
+	if err != nil {
+		return postgres.ChangeKey{}, false, errBadCursor
+	}
+	return postgres.ChangeKey{Start: start, Ref: k[1]}, true, nil
+}
+
+// setNext offers the page after rows, when rows were cut and at least one came back: a page
+// with no row has no key to continue from, and repeating the request's own cursor would send
+// a client round the same page forever.
+func setNext(w http.ResponseWriter, r *http.Request, body map[string]any, key []string) error {
+	token, err := encodeCursor(key, r.URL.Query())
+	if err != nil {
+		return err
+	}
+	next := nextURL(r, token)
+	w.Header().Set("Link", "<"+next+`>; rel="next"`)
+	body["next"] = next
+	return nil
+}
+
+// cursorError is err, or errBadCursor when a token decoded but carried the wrong key shape.
+func cursorError(err error) error {
+	if err != nil {
+		return err
+	}
+	return errBadCursor
 }
 
 // listEvents returns the raw event log for a tenant, optionally scoped to one change's
@@ -483,6 +544,11 @@ func (s *Server) queryChanges(w http.ResponseWriter, r *http.Request) {
 // ListEvents for why the id arm is restricted to rows carrying no correlation_ref.
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 	limit, err := limitParam(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	afterID, err := eventCursor(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -498,6 +564,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q.Ref = r.URL.Query().Get("ref")
+	q.AfterID = afterID
 	est, err := s.store.EstimateEvents(r.Context(), q)
 	if err != nil {
 		s.readFailed(w, r, "neutral", err)
@@ -513,8 +580,37 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		s.readFailed(w, r, "neutral", err)
 		return
 	}
+	s.writeEventsPage(w, r, events, truncated)
+}
+
+// eventCursor reads the request's cursor as the id the next page starts after; "" when there
+// is none.
+func eventCursor(r *http.Request) (string, error) {
+	token := r.URL.Query().Get("cursor")
+	if token == "" {
+		return "", nil
+	}
+	k, err := decodeCursor(token, r.URL.Query())
+	if err != nil || len(k) != 1 {
+		return "", cursorError(err)
+	}
+	return k[0], nil
+}
+
+// writeEventsPage answers with the events envelope, offering next when rows were cut and at
+// least one came back.
+func (s *Server) writeEventsPage(
+	w http.ResponseWriter, r *http.Request, events []core.Event, truncated bool,
+) {
 	markTruncated(w, truncated)
-	writeJSON(w, http.StatusOK, eventsToJSON(events))
+	body := map[string]any{"events": eventsToJSON(events)}
+	if truncated && len(events) > 0 {
+		if err := setNext(w, r, body, []string{events[len(events)-1].ID}); err != nil {
+			s.readFailed(w, r, "neutral", err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // grafanaAnnotations renders the changes overlapping a window as Grafana annotations.
@@ -559,7 +655,7 @@ func (s *Server) render(
 	trace.SpanFromContext(r.Context()).SetAttributes(
 		attribute.String("horopter.adapter", adapter))
 
-	changes, truncated, ok := s.changesFor(w, r, win, adapter)
+	changes, truncated, ok := s.changesFor(w, r, win, adapter, nil)
 	if !ok {
 		return
 	}

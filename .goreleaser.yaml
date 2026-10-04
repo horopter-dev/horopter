@@ -41,6 +41,16 @@ builds:
       - goos: darwin
         goarch: amd64
     flags: [-trimpath]
+  - id: horo
+    main: ./cmd/horo
+    binary: horo
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: darwin
+        goarch: amd64
+    flags: [-trimpath]
 
 # ko compiles each platform and pushes an OCI index straight to the registry: no Dockerfile,
 # no buildx builder, no QEMU, no daemon. Three settings are explicit because ko's defaults are
@@ -116,6 +126,10 @@ archives:
     ids: [horoctl]
     formats: [tar.gz]
     name_template: "horoctl_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  - id: horo
+    ids: [horo]
+    formats: [tar.gz]
+    name_template: "horo_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
   name_template: checksums.txt
