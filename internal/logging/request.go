@@ -168,13 +168,14 @@ func cut(attrs []slog.Attr) []slog.Attr {
 	return out
 }
 
-// validPrefix returns at most n bytes of s, backing off so no character is split.
+// validPrefix returns at most n bytes of s, backing off to a rune start so no character is
+// split. It looks only at the cut: an invalid byte earlier in s is left for slog, which
+// writes it as U+FFFD, rather than costing the whole field.
 func validPrefix(s string, n int) string {
-	s = s[:n]
-	for !utf8.ValidString(s) {
-		s = s[:len(s)-1]
+	for back := 0; back < utf8.UTFMax && n > 0 && !utf8.RuneStart(s[n]); back++ {
+		n--
 	}
-	return s
+	return s[:n]
 }
 
 // responseRecorder captures what the handler wrote, and retains an error response's body.

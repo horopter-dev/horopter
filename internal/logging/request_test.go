@@ -232,3 +232,17 @@ func TestTheQueryIsNeverLoggedWithoutTheOption(t *testing.T) {
 	records := serve(t, m, httptest.NewRequest(http.MethodGet, "/v1/changes?ref=ci/1", nil))
 	assert.NotContains(t, records[0], "query")
 }
+
+// TestAnInvalidByteDoesNotEmptyALongField: validPrefix used to trim until the whole prefix
+// was valid UTF-8, so one bad byte near the start of a long field cut it to nothing.
+func TestAnInvalidByteDoesNotEmptyALongField(t *testing.T) {
+	value := "a\xff" + strings.Repeat("b", 4<<10)
+	m := muxWith("POST /v1/events", func(_ http.ResponseWriter, r *http.Request) {
+		Annotate(r.Context(), slog.String("subject", value))
+	})
+	records := serve(t, m, httptest.NewRequest(http.MethodPost, "/v1/events", nil))
+	got, ok := records[0]["subject"].(string)
+	require.True(t, ok)
+	assert.Greater(t, len(got), 1000, "the field kept its content, not just its flag")
+	assert.Equal(t, true, records[0]["subject_truncated"])
+}

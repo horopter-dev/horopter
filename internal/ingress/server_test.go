@@ -1437,3 +1437,35 @@ func TestTheProbesLogNoRequestLine(t *testing.T) {
 	f.srv.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	assert.Empty(t, requestLines(records()))
 }
+
+// TestAReplayWithADifferentBodyLogsTheOriginalsSubject: a reused idempotency key returns the
+// original event, so the line names its subject and type, not the discarded duplicate's.
+func TestAReplayWithADifferentBodyLogsTheOriginalsSubject(t *testing.T) {
+	f := newIngressFixture(t)
+	key := idemKey(t, "replay-different")
+	first := post(t, f.srv, f.producerKey, fmt.Sprintf(`{"type":"t.started","subject":"acme/prod",
+		"occurred_at":"2026-09-22T00:00:00Z","idempotency_key":%q}`, key))
+	require.Equal(t, http.StatusCreated, first.Code, first.Body.String())
+
+	records := captureLogs(t)
+	again := post(t, f.srv, f.producerKey, fmt.Sprintf(`{"type":"t.completed","subject":"other/x",
+		"occurred_at":"2026-09-22T00:00:00Z","idempotency_key":%q}`, key))
+	require.Equal(t, http.StatusOK, again.Code, again.Body.String())
+	line := requestLines(records())[0]
+	assert.Equal(t, "acme/prod", line["subject"])
+	assert.Equal(t, "t.started", line["type"])
+}
+
+// TestAFailedPointAppendLogsNoRef: a point's ref is minted from the event id, and a rejected
+// point is never stored, so a ref on its line would name a change that does not exist.
+func TestAFailedPointAppendLogsNoRef(t *testing.T) {
+	f := newIngressFixture(t)
+	records := captureLogs(t)
+	// No type: the event is built, then refused by validation inside the store's append.
+	rec := post(t, f.srv, f.producerKey,
+		`{"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z"}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	line := requestLines(records())[0]
+	assert.NotContains(t, line, "ref")
+	assert.Equal(t, "acme/prod", line["subject"])
+}

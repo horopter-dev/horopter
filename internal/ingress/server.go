@@ -285,13 +285,20 @@ func (s *Server) append(w http.ResponseWriter, r *http.Request, ev core.Event) {
 	annotateEvent(r.Context(), ev)
 	stored, created, err := s.store.AppendEvent(r.Context(), ev)
 	if err != nil {
-		logging.Annotate(r.Context(), slog.String("ref", core.RefFor(ev).String()))
+		// Only a correlated event's ref exists apart from the event: a point's is minted from
+		// an id that was never stored, so it would name a change that does not exist.
+		if !ev.CorrelationRef.IsZero() {
+			logging.Annotate(r.Context(), slog.String("ref", ev.CorrelationRef.String()))
+		}
 		appendFailed(w, r, ev, err)
 		return
 	}
-	// The stored event, not ev: a replayed idempotency key returns the original, whose ref
-	// is the one the caller and every reader see.
-	logging.Annotate(r.Context(), slog.String("ref", core.RefFor(stored).String()))
+	// The stored event, not ev: a replayed idempotency key returns the original, whose ref,
+	// subject and type are the ones the caller and every reader see.
+	logging.Annotate(r.Context(),
+		slog.String("ref", core.RefFor(stored).String()),
+		slog.String("subject", stored.Subject),
+		slog.String("type", stored.Type))
 	status := http.StatusOK
 	if created {
 		status = http.StatusCreated
