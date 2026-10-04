@@ -32,16 +32,16 @@ minutes_ago() {
     || date -u -d "${1} minutes ago" +%Y-%m-%dT%H:%M:%SZ
 }
 
-# post <source> <type> <subject> <minutes-ago> <ref-or-empty> <title>
+# post <type> <subject> <minutes-ago> <ref-or-empty> <title>
 #
-# tenant is not a parameter: it is derived from the producer credential, and the ingress
-# API now rejects a request body that names one. Every event this script posts lands in
+# tenant and source are not parameters: both are derived from the producer credential, and
+# the ingress API rejects a request body that names either. Every event this script posts lands in
 # whatever tenant HOROPTER_DEV_PRODUCER_KEY is bound to — the bootstrap service's "default"
 # tenant by default — and the credential's locus ("dev") is what prefixes every stored ref
 # below, points included since 0006, so "dep-1" is stored and queried back as
 # "dev/<run>-dep-1", and a point is stored as "dev/<its own event id>".
 post() {
-  local source=$1 type=$2 subject=$3 ago=$4 ref=$5 title=$6
+  local type=$1 subject=$2 ago=$3 ref=$4 title=$5
   local occurred body status
   occurred="$(minutes_ago "$ago")"
   # deployment.environment.name is the one attribute key this branch makes filterable, so
@@ -50,11 +50,11 @@ post() {
   local env="${subject##*/}"
 
   body="$(jq -n \
-    --arg source "$source" --arg type "$type" \
+    --arg type "$type" \
     --arg subject "$subject" --arg occurred "$occurred" --arg title "$title" \
     --arg key "${run}-${ref:-$type}-${ago}" --arg ref "$ref" --arg run "$run" \
     --arg commit "$commit" --arg env "$env" \
-    '{source: $source, type: $type, subject: $subject,
+    '{type: $type, subject: $subject,
       occurred_at: $occurred, title: $title, actor: "seed.sh",
       idempotency_key: $key,
       attributes: {
@@ -77,27 +77,27 @@ post() {
 }
 
 # Six closed changes: a start and a terminal event sharing a correlation ref.
-post ci deployment.started acme/prod 330 dep-1 "Deploy api v1.4.0 to prod"
-post ci deployment.completed acme/prod 324 dep-1 "Deploy api v1.4.0 to prod"
-post ci deployment.started acme/prod 280 dep-2 "Deploy web v2.1.7 to prod"
-post ci deployment.failed acme/prod 276 dep-2 "Deploy web v2.1.7 to prod"
-post terraform infrastructure.started acme/prod 240 tf-1 "Apply network module"
-post terraform infrastructure.completed acme/prod 231 tf-1 "Apply network module"
-post flux reconciliation.started globex/staging 200 flux-1 "Reconcile ingress-nginx"
-post flux reconciliation.completed globex/staging 198 flux-1 "Reconcile ingress-nginx"
-post flux reconciliation.started globex/staging 150 flux-2 "Reconcile cert-manager"
-post flux reconciliation.rolled_back globex/staging 146 flux-2 "Reconcile cert-manager"
-post ci deployment.started globex/prod 120 dep-3 "Deploy worker v0.9.2"
-post ci deployment.completed globex/prod 110 dep-3 "Deploy worker v0.9.2"
+post deployment.started acme/prod 330 dep-1 "Deploy api v1.4.0 to prod"
+post deployment.completed acme/prod 324 dep-1 "Deploy api v1.4.0 to prod"
+post deployment.started acme/prod 280 dep-2 "Deploy web v2.1.7 to prod"
+post deployment.failed acme/prod 276 dep-2 "Deploy web v2.1.7 to prod"
+post infrastructure.started acme/prod 240 tf-1 "Apply network module"
+post infrastructure.completed acme/prod 231 tf-1 "Apply network module"
+post reconciliation.started globex/staging 200 flux-1 "Reconcile ingress-nginx"
+post reconciliation.completed globex/staging 198 flux-1 "Reconcile ingress-nginx"
+post reconciliation.started globex/staging 150 flux-2 "Reconcile cert-manager"
+post reconciliation.rolled_back globex/staging 146 flux-2 "Reconcile cert-manager"
+post deployment.started globex/prod 120 dep-3 "Deploy worker v0.9.2"
+post deployment.completed globex/prod 110 dep-3 "Deploy worker v0.9.2"
 
 # Three open changes: a start with nothing terminal yet.
-post ci deployment.started acme/staging 90 dep-4 "Deploy api v1.5.0-rc1 to staging"
-post flux reconciliation.started globex/prod 45 flux-3 "Reconcile monitoring stack"
-post terraform infrastructure.started acme/staging 20 tf-2 "Apply database module"
+post deployment.started acme/staging 90 dep-4 "Deploy api v1.5.0-rc1 to staging"
+post reconciliation.started globex/prod 45 flux-3 "Reconcile monitoring stack"
+post infrastructure.started acme/staging 20 tf-2 "Apply database module"
 
 # Three points: one event, no correlation ref, a terminal type, so start and end coincide.
-post ci incident.resolved acme/prod 175 "" "Checkout latency back to normal"
-post ci incident.resolved globex/prod 95 "" "Queue backlog cleared"
-post ci configuration.completed acme/prod 30 "" "Feature flag checkout-v2 enabled"
+post incident.resolved acme/prod 175 "" "Checkout latency back to normal"
+post incident.resolved globex/prod 95 "" "Queue backlog cleared"
+post configuration.completed acme/prod 30 "" "Feature flag checkout-v2 enabled"
 
 echo "seeded 12 changes for run $run"

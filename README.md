@@ -66,7 +66,7 @@ Then post an event and read it back:
 
     curl -X POST localhost:8080/v1/events \
       -H "Authorization: Bearer $HOROPTER_DEV_PRODUCER_KEY" -H 'Content-Type: application/json' \
-      -d '{"source":"ci","type":"deployment.started","subject":"acme/prod",
+      -d '{"type":"deployment.started","subject":"acme/prod",
            "occurred_at":"2026-09-14T10:00:00Z","correlation_ref":"dep-1"}'
     curl -H "Authorization: Bearer $HOROPTER_DEV_READER_KEY" \
       "localhost:8081/adapters/grafana/annotations?from=1789376400000&to=1789383600000"
@@ -541,6 +541,20 @@ that does not act on a `400` loses them. Shrink the attributes — link to large
 embedding it — or raise `HOROPTER_INGRESS_MAX_EVENT_ATTRIBUTE_BYTES`, up to `1048576`. Events
 already stored are not re-checked.
 
+### `source` comes from the credential
+
+An event's `source` is now the source its credential was issued with
+(`horoctl admin keys issue --source`), on both ingest routes, rather than whatever the producer
+claimed.
+
+- `POST /v1/events` answers `400` to a body carrying `source` — any value, including `""` and
+  `null` — the same as it does for `tenant`. Remove the field; the event is otherwise unchanged.
+- `POST /v1/events/cloudevents` still requires the envelope's `source`, as CloudEvents does,
+  but it no longer becomes the event's `source`. It keeps its CloudEvents role as half of the
+  idempotency key, so redelivery still deduplicates.
+- Events already stored keep the `source` their producer claimed. `?source=` therefore matches
+  credential sources for events written after the upgrade and claimed ones before it.
+
 ### v0.1 pre-release: the images moved to the horopter-dev organisation
 
 The repository moved from `yo61` to `horopter-dev`, and the images moved with it — to
@@ -590,7 +604,7 @@ optional, all combining with AND:
 | `type` | the change's type |
 | `status` | the change's status |
 | `locus` | the namespace the ref was issued under — the part of a stored ref before its `/` |
-| `source` | a system that reported the change — matches if it is any of them |
+| `source` | the source of a credential that reported the change — matches if it is any of them |
 | `attr.<key>` | an attribute's exact value |
 
 An empty value is no filter, so `?status=` and an omitted `status` mean the same thing. That
@@ -717,6 +731,10 @@ A reserved key holding a non-string value is left alone rather than coerced — 
 CloudEvents carries no tenancy either, but `tenant` is not one more reserved key alongside
 the ones above: it is derived from the credential, the same as on `POST /v1/events`, and a
 `data.tenant` of any kind — including `null` — is rejected with `400` rather than read.
+
+The envelope's `source` is not the event's `source` either. The event takes its source from the
+credential; the envelope's stays half of the idempotency key, which is the event's identity in
+CloudEvents' own terms.
 
 The envelope's own `time` supplies `occurred_at`. It is optional in CloudEvents; when it
 is missing, receipt time is used, since that is the earliest moment the system can attest

@@ -120,6 +120,10 @@ func newIngressFixtureOpts(
 	}
 }
 
+// credentialSource is the source every fixture credential is issued with. It differs from
+// every source a test body or envelope names, so a stored event shows which one won.
+const credentialSource = "test"
+
 // seedCredential inserts a tenant, a principal and a producer credential scoped to locus
 // and subjectPattern (empty for none), registering cleanup for all three in the order
 // their foreign keys require. It returns the tenant, as the row-backed core.TenantID a
@@ -154,8 +158,8 @@ func seedCredential(
 	_, err = pool.Exec(ctx, `
 		INSERT INTO credential (id, principal_id, type, key_prefix, key_hash, role,
 		                        tenant_id, source, locus, subject_pattern)
-		VALUES ($1, $2, 'machine_key', $3, $4, 'producer', $5, 'test', $6, $7)`,
-		credentialID, principalID, prefix, hash, tenantID, locus, pattern)
+		VALUES ($1, $2, 'machine_key', $3, $4, 'producer', $5, $6, $7, $8)`,
+		credentialID, principalID, prefix, hash, tenantID, credentialSource, locus, pattern)
 	require.NoError(t, err)
 	t.Cleanup(func() { deleteRow(t, "credential", credentialID) })
 
@@ -185,8 +189,8 @@ func seedGlobalCredential(t *testing.T, s *postgres.Store, role string) string {
 	_, err = pool.Exec(ctx, `
 		INSERT INTO credential (id, principal_id, type, key_prefix, key_hash, role,
 		                        tenant_id, source, locus)
-		VALUES ($1, $2, 'machine_key', $3, $4, $5, NULL, 'test', 'test')`,
-		credentialID, principalID, prefix, hash, role)
+		VALUES ($1, $2, 'machine_key', $3, $4, $5, NULL, $6, 'test')`,
+		credentialID, principalID, prefix, hash, role, credentialSource)
 	require.NoError(t, err)
 	t.Cleanup(func() { deleteRow(t, "credential", credentialID) })
 
@@ -254,6 +258,8 @@ func postCE(t *testing.T, h http.Handler, key, body string) *httptest.ResponseRe
 // have caught a wrong-but-valid locus reaching the stored row.
 type storedRow struct {
 	Tenant         string
+	Source         string
+	IdempotencyKey string
 	CorrelationRef string
 	Origin         core.Origin
 	Locus          string
@@ -272,30 +278,33 @@ func storedEvent(t *testing.T, store *postgres.Store, rec *httptest.ResponseReco
 	var row storedRow
 	var origin string
 	err := store.Pool().QueryRow(context.Background(),
-		`SELECT tenant, correlation_ref, origin, locus, schema_version FROM event WHERE id = $1`,
+		`SELECT tenant, source, COALESCE(idempotency_key, ''), correlation_ref, origin, locus,
+		        schema_version
+		   FROM event WHERE id = $1`,
 		resp.ID,
-	).Scan(&row.Tenant, &row.CorrelationRef, &origin, &row.Locus, &row.SchemaVersion)
+	).Scan(&row.Tenant, &row.Source, &row.IdempotencyKey, &row.CorrelationRef, &origin,
+		&row.Locus, &row.SchemaVersion)
 	require.NoError(t, err)
 	row.Origin = core.Origin(origin)
 	return row
 }
 
-const validBody = `{"source":"s","type":"t.started","subject":"acme/prod",
+const validBody = `{"type":"t.started","subject":"acme/prod",
 	"occurred_at":"2026-09-22T00:00:00Z"}`
 
 // bodyWith appends extra top-level JSON fields to validBody's object.
 func bodyWith(extra string) string {
-	return fmt.Sprintf(`{"source":"s","type":"t.started","subject":"acme/prod",
+	return fmt.Sprintf(`{"type":"t.started","subject":"acme/prod",
 		"occurred_at":"2026-09-22T00:00:00Z",%s}`, extra)
 }
 
 func bodyWithRef(ref string) string {
-	return fmt.Sprintf(`{"source":"s","type":"t.started","subject":"acme/prod",
+	return fmt.Sprintf(`{"type":"t.started","subject":"acme/prod",
 		"occurred_at":"2026-09-22T00:00:00Z","correlation_ref":%q}`, ref)
 }
 
 func bodySubject(subject string) string {
-	return fmt.Sprintf(`{"source":"s","type":"t.started","subject":%q,
+	return fmt.Sprintf(`{"type":"t.started","subject":%q,
 		"occurred_at":"2026-09-22T00:00:00Z"}`, subject)
 }
 
@@ -319,7 +328,7 @@ func bodyCE(t *testing.T, subject string) string {
 
 func TestPostRejectsABodyCarryingTenant(t *testing.T) {
 	f := newIngressFixture(t)
-	rec := post(t, f.srv, f.producerKey, `{"tenant":"other","source":"s","type":"t.started",
+	rec := post(t, f.srv, f.producerKey, `{"tenant":"other","type":"t.started",
 		"correlation_ref":"r","occurred_at":"2026-09-22T00:00:00Z"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "tenant is derived from the credential")
@@ -333,10 +342,43 @@ func TestPostRejectsABodyCarryingTenant(t *testing.T) {
 // value.
 func TestPostRejectsABodyCarryingANullTenant(t *testing.T) {
 	f := newIngressFixture(t)
-	rec := post(t, f.srv, f.producerKey, `{"tenant":null,"source":"s","type":"t.started",
+	rec := post(t, f.srv, f.producerKey, `{"tenant":null,"type":"t.started",
 		"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "tenant is derived from the credential")
+}
+
+func TestPostRejectsABodyCarryingSource(t *testing.T) {
+	f := newIngressFixture(t)
+	for name, value := range map[string]string{
+		"populated": `"buildkite"`, "empty": `""`, "null": `null`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := post(t, f.srv, f.producerKey, fmt.Sprintf(`{"source":%s,"type":"t.started",
+				"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z"}`, value))
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.Contains(t, rec.Body.String(), "source is derived from the credential")
+		})
+	}
+}
+
+func TestPostStoresTheSourceFromTheCredential(t *testing.T) {
+	f := newIngressFixture(t)
+	rec := post(t, f.srv, f.producerKey, validBody)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Equal(t, credentialSource, storedEvent(t, f.store, rec).Source)
+}
+
+// TestCloudEventPostStoresTheSourceFromTheCredential pins both roles the envelope's source
+// had: Event.Source now comes from the credential, while the envelope source stays half of
+// the idempotency key, which is CloudEvents' own identity for the event.
+func TestCloudEventPostStoresTheSourceFromTheCredential(t *testing.T) {
+	f := newIngressFixture(t)
+	rec := postCE(t, f.srv, f.producerKey, bodyCE(t, "acme/prod"))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	row := storedEvent(t, f.store, rec)
+	assert.Equal(t, credentialSource, row.Source)
+	assert.Contains(t, row.IdempotencyKey, "/buildkite/pipelines/api/")
 }
 
 func TestPostStoresTheTenantFromTheCredential(t *testing.T) {
@@ -490,7 +532,7 @@ func TestStoredEventsCarrySchemaVersionTwo(t *testing.T) {
 
 func TestPostEventCreatesChange(t *testing.T) {
 	f := newIngressFixture(t)
-	body := fmt.Sprintf(`{"source":"buildkite","type":"deployment.started",
+	body := fmt.Sprintf(`{"type":"deployment.started",
 		"subject":"acme/prod","actor":"ci-bot","occurred_at":"2026-09-14T10:00:00Z",
 		"correlation_ref":"dep-7","idempotency_key":%q,
 		"attributes":{"service.version":"2.5.0"}}`, idemKey(t, "1"))
@@ -504,7 +546,7 @@ func TestPostEventCreatesChange(t *testing.T) {
 // read — asserting that the request is merely accepted would pass with the field dropped.
 func TestPostEventAcceptsALifecycleAssertion(t *testing.T) {
 	f := newIngressFixture(t)
-	body := fmt.Sprintf(`{"source":"ci","type":"deployment.initiated",
+	body := fmt.Sprintf(`{"type":"deployment.initiated",
 		"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z",
 		"lifecycle":"started","idempotency_key":%q}`, idemKey(t, "1"))
 	rec := post(t, f.srv, f.producerKey, body)
@@ -539,7 +581,7 @@ func TestPostEventAcceptsALifecycleAssertion(t *testing.T) {
 // case: right word, wrong case, and the vocabulary is exact.
 func TestPostEventRefusesAnUnknownLifecycle(t *testing.T) {
 	f := newIngressFixture(t)
-	body := fmt.Sprintf(`{"source":"ci","type":"deployment.initiated",
+	body := fmt.Sprintf(`{"type":"deployment.initiated",
 		"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z",
 		"lifecycle":"Started","idempotency_key":%q}`, idemKey(t, "1"))
 	rec := post(t, f.srv, f.producerKey, body)
@@ -557,7 +599,7 @@ func TestPostEventRefusesAnUnknownLifecycle(t *testing.T) {
 // single-change assertion would notice.
 func TestAmendHandleRoundTrips(t *testing.T) {
 	f := newIngressFixture(t)
-	open := fmt.Sprintf(`{"source":"ci","type":"deployment.started",
+	open := fmt.Sprintf(`{"type":"deployment.started",
 		"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z",
 		"idempotency_key":%q}`, idemKey(t, "open"))
 	rec := post(t, f.srv, f.producerKey, open)
@@ -570,7 +612,7 @@ func TestAmendHandleRoundTrips(t *testing.T) {
 	require.NotEmpty(t, handle, "the response must carry an amend handle")
 
 	// Verbatim. Any transformation here would test the test rather than the contract.
-	closeBody := fmt.Sprintf(`{"source":"ci","type":"deployment.completed",
+	closeBody := fmt.Sprintf(`{"type":"deployment.completed",
 		"subject":"acme/prod","occurred_at":"2026-09-22T01:00:00Z",
 		"correlation_ref":%q,"idempotency_key":%q}`, handle, idemKey(t, "close"))
 	rec = post(t, f.srv, f.producerKey, closeBody)
@@ -607,7 +649,7 @@ func TestAmendHandleRoundTrips(t *testing.T) {
 // wrong reason (a length or whitespace failure, say) would pass a status-only check.
 func TestPostRefusesARefStartingWithTheCredentialsLocus(t *testing.T) {
 	f := newIngressFixture(t)
-	body := fmt.Sprintf(`{"source":"ci","type":"deployment.started",
+	body := fmt.Sprintf(`{"type":"deployment.started",
 		"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z",
 		"correlation_ref":"github/dep-1","idempotency_key":%q}`, idemKey(t, "1"))
 	rec := post(t, f.srv, f.producerKey, body)
@@ -627,7 +669,7 @@ func TestPostRefusesARefStartingWithTheCredentialsLocus(t *testing.T) {
 // prefix would also return 201, and that is the behaviour this design rejected.
 func TestPostAcceptsALocusPrefixedRefWhenAllowed(t *testing.T) {
 	f := newIngressFixtureWith(t, ingress.WithAllowLocusPrefixedRef(true))
-	body := fmt.Sprintf(`{"source":"ci","type":"deployment.started",
+	body := fmt.Sprintf(`{"type":"deployment.started",
 		"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z",
 		"correlation_ref":"github/dep-1","idempotency_key":%q}`, idemKey(t, "1"))
 	rec := post(t, f.srv, f.producerKey, body)
@@ -644,7 +686,7 @@ func TestPostAcceptsALocusPrefixedRefWhenAllowed(t *testing.T) {
 // with the guard on.
 func TestPostAcceptsASlashedRefThatIsNotLocusPrefixed(t *testing.T) {
 	f := newIngressFixture(t)
-	body := fmt.Sprintf(`{"source":"ci","type":"deployment.started",
+	body := fmt.Sprintf(`{"type":"deployment.started",
 		"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z",
 		"correlation_ref":"myorg/repo#123","idempotency_key":%q}`, idemKey(t, "1"))
 	rec := post(t, f.srv, f.producerKey, body)
@@ -661,7 +703,7 @@ func TestPostAcceptsASlashedRefThatIsNotLocusPrefixed(t *testing.T) {
 // nothing.
 func TestAmendHandleRoundTripsForASlashedProducerRef(t *testing.T) {
 	f := newIngressFixture(t)
-	body := fmt.Sprintf(`{"source":"ci","type":"deployment.started",
+	body := fmt.Sprintf(`{"type":"deployment.started",
 		"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z",
 		"correlation_ref":"myorg/repo#123","idempotency_key":%q}`, idemKey(t, "1"))
 	rec := post(t, f.srv, f.producerKey, body)
@@ -721,7 +763,7 @@ func TestPostDuplicateIdempotencyKeyReturns200(t *testing.T) {
 
 func TestPostInvalidEventReturns400WithReason(t *testing.T) {
 	f := newIngressFixture(t)
-	body := `{"source":"ci","type":"deployment.started","occurred_at":"2026-09-14T10:00:00Z"}`
+	body := `{"type":"deployment.started","occurred_at":"2026-09-14T10:00:00Z"}`
 	rec := post(t, f.srv, f.producerKey, body)
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "subject")
@@ -900,7 +942,7 @@ func TestNewRejectsANilAuthenticator(t *testing.T) {
 // that does not exist.
 func TestPostEventRejectsAnOversizedBody(t *testing.T) {
 	f := newIngressFixture(t)
-	huge := fmt.Sprintf(`{"source":"ci","type":"deployment.started",
+	huge := fmt.Sprintf(`{"type":"deployment.started",
 		"subject":"acme/prod","occurred_at":"2026-09-14T10:00:00Z",
 		"attributes":{"blob":%q}}`, strings.Repeat("x", ingress.MaxBodyBytes+1))
 
@@ -1195,7 +1237,7 @@ func TestFailedReadinessProbeLogsItsCause(t *testing.T) {
 // a retryable 503.
 func TestPostEventRefusesAttributesOverTheCap(t *testing.T) {
 	f := newIngressFixture(t, postgres.WithMaxEventAttributeBytes(26))
-	body := fmt.Sprintf(`{"source":"buildkite","type":"deployment.started",
+	body := fmt.Sprintf(`{"type":"deployment.started",
 		"subject":"acme/prod","occurred_at":"2026-09-14T10:00:00Z",
 		"idempotency_key":%q,"attributes":{"service.version":"2.5.0"}}`, idemKey(t, "1"))
 

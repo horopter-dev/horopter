@@ -29,6 +29,7 @@ type Credential struct {
 	Role            string
 	Capabilities    []Capability
 	Tenant          core.TenantID
+	Source          string
 	Locus           string
 	SubjectPattern  string
 	RevokedAt       *time.Time
@@ -43,6 +44,7 @@ type Principal struct {
 	Role                      string
 	Capabilities              []Capability
 	Origin                    core.Origin
+	Source                    string
 	Locus                     string
 	SubjectPattern            string
 }
@@ -82,7 +84,7 @@ func (c Credential) principal() (Principal, error) {
 	}
 	return Principal{
 		CredentialID: c.ID, PrincipalID: c.PrincipalID, Tenant: c.Tenant, Role: c.Role,
-		Capabilities: c.Capabilities, Origin: origin, Locus: c.Locus,
+		Capabilities: c.Capabilities, Origin: origin, Source: c.Source, Locus: c.Locus,
 		SubjectPattern: c.SubjectPattern,
 	}, nil
 }

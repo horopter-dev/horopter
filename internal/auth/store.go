@@ -35,7 +35,7 @@ func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 //nolint:gosec // G101
 const credentialByPrefixSQL = `
 	SELECT c.id, c.principal_id, c.type, c.key_hash, c.role, r.capabilities,
-	       c.tenant_id, c.locus, c.subject_pattern, c.revoked_at, c.expires_at
+	       c.tenant_id, c.source, c.locus, c.subject_pattern, c.revoked_at, c.expires_at
 	FROM credential c
 	JOIN role r ON r.name = c.role
 	WHERE c.key_prefix = $1`
@@ -50,7 +50,7 @@ func (s *Store) CredentialByPrefix(ctx context.Context, prefix string) (Credenti
 	)
 	err := s.pool.QueryRow(ctx, credentialByPrefixSQL, prefix).Scan(
 		&cred.ID, &cred.PrincipalID, &cred.Type, &cred.KeyHash, &cred.Role, &capabilities,
-		&tenantID, &cred.Locus, &subjectPattern, &cred.RevokedAt, &cred.ExpiresAt)
+		&tenantID, &cred.Source, &cred.Locus, &subjectPattern, &cred.RevokedAt, &cred.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Credential{}, ErrNoCredential
 	}
