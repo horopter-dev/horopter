@@ -29,6 +29,7 @@ import (
 	"horopter.dev/horopter/internal/auth"
 	"horopter.dev/horopter/internal/core"
 	"horopter.dev/horopter/internal/ingress"
+	"horopter.dev/horopter/internal/logging"
 	"horopter.dev/horopter/internal/store/postgres"
 	"horopter.dev/horopter/internal/testdb"
 )
@@ -1246,4 +1247,225 @@ func TestPostEventRefusesAttributesOverTheCap(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(),
 		"attributes encode to 27 bytes of JSON; the limit is 26")
+}
+
+// requestLines keeps the records the request middleware wrote.
+func requestLines(records []map[string]any) []map[string]any {
+	var out []map[string]any
+	for _, r := range records {
+		if r["msg"] == "request" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func TestAnAppendLogsOneLineWithItsIdentifiers(t *testing.T) {
+	f := newIngressFixture(t)
+	records := captureLogs(t)
+	key := idemKey(t, "logged")
+	rec := post(t, f.srv, f.producerKey, bodyWith(fmt.Sprintf(`"idempotency_key":%q`, key)))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var resp struct {
+		Ref string `json:"ref"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	prefix, _, ok := auth.SplitKey(f.producerKey)
+	require.True(t, ok)
+
+	lines := requestLines(records())
+	require.Len(t, lines, 1)
+	line := lines[0]
+	assert.Equal(t, "POST /v1/events", line["route"])
+	assert.InDelta(t, 201, line["status"], 0)
+	assert.Equal(t, key, line["idempotency_key"])
+	assert.Equal(t, "acme/prod", line["subject"])
+	assert.Equal(t, "t.started", line["type"])
+	assert.Equal(t, resp.Ref, line["ref"])
+	assert.Equal(t, f.producerTenant.String(), line["tenant"])
+	assert.Equal(t, prefix, line["credential"])
+}
+
+func TestAReplayLogsTheOriginalEventsRef(t *testing.T) {
+	f := newIngressFixture(t)
+	body := bodyWith(fmt.Sprintf(`"idempotency_key":%q`, idemKey(t, "replay")))
+	first := post(t, f.srv, f.producerKey, body)
+	require.Equal(t, http.StatusCreated, first.Code)
+	var resp struct {
+		Ref string `json:"ref"`
+	}
+	require.NoError(t, json.Unmarshal(first.Body.Bytes(), &resp))
+
+	records := captureLogs(t)
+	again := post(t, f.srv, f.producerKey, body)
+	require.Equal(t, http.StatusOK, again.Code)
+	lines := requestLines(records())
+	require.Len(t, lines, 1)
+	assert.Equal(t, resp.Ref, lines[0]["ref"])
+	// The second request resolves its credential from resolve's cache. KeyPrefix is set on
+	// resolve's single success return, after the cache lookup inside a.credential; this pins
+	// that a later early return on a cache hit would not blank the field.
+	prefix, _, _ := auth.SplitKey(f.producerKey)
+	assert.Equal(t, prefix, lines[0]["credential"])
+}
+
+func TestACloudEventLogsItsComputedIdempotencyKey(t *testing.T) {
+	f := newIngressFixture(t)
+	records := captureLogs(t)
+	rec := postCE(t, f.srv, f.producerKey, bodyCE(t, "acme/prod"))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	lines := requestLines(records())
+	require.Len(t, lines, 1)
+	assert.Equal(t, "POST /v1/events/cloudevents", lines[0]["route"])
+	assert.Equal(t, storedEvent(t, f.store, rec).IdempotencyKey, lines[0]["idempotency_key"])
+}
+
+func TestABadTokenLogsItsErrorAndNoCredential(t *testing.T) {
+	f := newIngressFixture(t)
+	records := captureLogs(t)
+	rec := post(t, f.srv, "wrong", validBody)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	var body struct {
+		Error string `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	lines := requestLines(records())
+	require.Len(t, lines, 1)
+	assert.Equal(t, body.Error, lines[0]["error"])
+	assert.NotContains(t, lines[0], "credential")
+	assert.NotContains(t, lines[0], "tenant")
+}
+
+func TestASubjectOutsideTheScopeLogsTheScopeMessage(t *testing.T) {
+	f := newIngressFixture(t)
+	records := captureLogs(t)
+	rec := post(t, f.srv, f.scopedKey, bodySubject("other/prod"))
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	lines := requestLines(records())
+	require.Len(t, lines, 1)
+	assert.Contains(t, lines[0]["error"], "outside this credential's scope")
+	assert.Contains(t, lines[0], "credential", "the credential resolved; only its scope refused")
+}
+
+func TestAMalformedBodyLogsItsErrorAndNoEventFields(t *testing.T) {
+	f := newIngressFixture(t)
+	records := captureLogs(t)
+	rec := post(t, f.srv, f.producerKey, `{not json`)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	lines := requestLines(records())
+	require.Len(t, lines, 1)
+	assert.Contains(t, lines[0]["error"], "malformed JSON body")
+	for _, field := range []string{"subject", "type", "idempotency_key"} {
+		assert.NotContains(t, lines[0], field)
+	}
+}
+
+func TestAGlobalCredentialLogsNoTenantKey(t *testing.T) {
+	f := newIngressFixture(t)
+	key := seedGlobalCredential(t, f.store, "producer")
+	records := captureLogs(t)
+	post(t, f.srv, key, validBody)
+	lines := requestLines(records())
+	require.Len(t, lines, 1)
+	assert.NotContains(t, lines[0], "tenant")
+	assert.Contains(t, lines[0], "credential")
+}
+
+func TestOversizedFieldsAreCutAndFlagged(t *testing.T) {
+	f := newIngressFixture(t)
+	records := captureLogs(t)
+	subject := strings.Repeat("s", 4<<10)
+	key := strings.Repeat("k", 4<<10)
+	rec := post(t, f.srv, f.producerKey, fmt.Sprintf(`{"type":"t.started","subject":%q,
+		"occurred_at":"2026-09-22T00:00:00Z","idempotency_key":%q}`, subject, key))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	line := requestLines(records())[0]
+	assert.Len(t, line["subject"], 1024)
+	assert.Equal(t, true, line["subject_truncated"])
+	assert.Len(t, line["idempotency_key"], 1024)
+	assert.Equal(t, true, line["idempotency_key_truncated"])
+}
+
+func TestNoKeyOrAttributeValueReachesTheLog(t *testing.T) {
+	f := newIngressFixture(t)
+	records := captureLogs(t)
+	const marker = "attr-value-that-must-not-be-logged"
+	rec := post(t, f.srv, f.producerKey, bodyWith(fmt.Sprintf(`"attributes":{"x":%q}`, marker)))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	all, err := json.Marshal(records())
+	require.NoError(t, err)
+	assert.NotContains(t, string(all), marker)
+	assert.NotContains(t, string(all), f.producerKey)
+	_, secret, _ := auth.SplitKey(f.producerKey)
+	assert.NotContains(t, string(all), secret)
+}
+
+// TestARequestLineCarriesTheTraceIdWhenTracing pins the middleware's place inside otelhttp.
+// captureLogs uses a plain JSON handler, which never adds trace ids, so this test logs
+// through the daemons' own handler and installs a real tracer provider.
+func TestARequestLineCarriesTheTraceIdWhenTracing(t *testing.T) {
+	// The provider goes in before the fixture: Routes builds otelhttp's handler, which takes
+	// its tracer from the global provider at that moment.
+	tp := sdktrace.NewTracerProvider()
+	previousTP := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() { otel.SetTracerProvider(previousTP); _ = tp.Shutdown(context.Background()) })
+	f := newIngressFixture(t)
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(logging.Handler(&buf, slog.LevelInfo)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	post(t, f.srv, f.producerKey, validBody)
+
+	var line map[string]any
+	dec := json.NewDecoder(&buf)
+	for dec.More() {
+		var r map[string]any
+		require.NoError(t, dec.Decode(&r))
+		if r["msg"] == "request" {
+			line = r
+		}
+	}
+	require.NotNil(t, line)
+	assert.Regexp(t, `^[0-9a-f]{32}$`, line["trace_id"])
+}
+
+func TestTheProbesLogNoRequestLine(t *testing.T) {
+	f := newIngressFixture(t)
+	records := captureLogs(t)
+	f.srv.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	assert.Empty(t, requestLines(records()))
+}
+
+// TestAReplayWithADifferentBodyLogsTheOriginalsSubject: a reused idempotency key returns the
+// original event, so the line names its subject and type, not the discarded duplicate's.
+func TestAReplayWithADifferentBodyLogsTheOriginalsSubject(t *testing.T) {
+	f := newIngressFixture(t)
+	key := idemKey(t, "replay-different")
+	first := post(t, f.srv, f.producerKey, fmt.Sprintf(`{"type":"t.started","subject":"acme/prod",
+		"occurred_at":"2026-09-22T00:00:00Z","idempotency_key":%q}`, key))
+	require.Equal(t, http.StatusCreated, first.Code, first.Body.String())
+
+	records := captureLogs(t)
+	again := post(t, f.srv, f.producerKey, fmt.Sprintf(`{"type":"t.completed","subject":"other/x",
+		"occurred_at":"2026-09-22T00:00:00Z","idempotency_key":%q}`, key))
+	require.Equal(t, http.StatusOK, again.Code, again.Body.String())
+	line := requestLines(records())[0]
+	assert.Equal(t, "acme/prod", line["subject"])
+	assert.Equal(t, "t.started", line["type"])
+}
+
+// TestAFailedPointAppendLogsNoRef: a point's ref is minted from the event id, and a rejected
+// point is never stored, so a ref on its line would name a change that does not exist.
+func TestAFailedPointAppendLogsNoRef(t *testing.T) {
+	f := newIngressFixture(t)
+	records := captureLogs(t)
+	// No type: the event is built, then refused by validation inside the store's append.
+	rec := post(t, f.srv, f.producerKey,
+		`{"subject":"acme/prod","occurred_at":"2026-09-22T00:00:00Z"}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	line := requestLines(records())[0]
+	assert.NotContains(t, line, "ref")
+	assert.Equal(t, "acme/prod", line["subject"])
 }

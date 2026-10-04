@@ -47,6 +47,9 @@ type Principal struct {
 	Source                    string
 	Locus                     string
 	SubjectPattern            string
+	// KeyPrefix is the public half of the key the request presented, set by resolve. It
+	// is what a log line names the credential by: horoctl prints it too.
+	KeyPrefix string
 }
 
 // Can reports whether the principal's role grants c.
