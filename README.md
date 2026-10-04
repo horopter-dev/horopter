@@ -139,6 +139,26 @@ bytes or outside the `horo_<12-hex-char-prefix>_<secret>` shape a presented cred
 actually parsed as, since anything else would store a credential that can never
 authenticate.
 
+## horo
+
+`horo` explores what Horopter recorded. It reads egress with a reader key:
+
+    export HOROPTER_EGRESS_URL=http://localhost:8081
+    export HOROPTER_EGRESS_KEY=<reader key>
+    horo changes                         # the last 24 hours
+    horo changes --since 168h --subject acme/prod --status failed
+    horo changes --from 2026-09-14T00:00:00Z --to 2026-09-15T00:00:00Z --output json
+    horo show ci/dep-1                   # one change and all its events
+
+`horo changes` follows egress's `next` links, so it returns every matching change however many
+there are; `--limit` caps it. Output is a table on a terminal and one JSON object per line
+otherwise; `--output table|json|jsonl` chooses. Exit codes: `0` success, `1` an error from
+egress, `2` a usage error, `3` `horo show` found no such ref.
+
+Install from a release archive, or, while the repository is private:
+
+    GOPRIVATE=horopter.dev go install horopter.dev/horopter/cmd/horo@latest
+
 ## Security
 
 **Every non-probe route on both daemons now requires an issued credential.** `horopter-ingress`
@@ -555,6 +575,13 @@ that does not act on a `400` loses them. Shrink the attributes — link to large
 embedding it — or raise `HOROPTER_INGRESS_MAX_EVENT_ATTRIBUTE_BYTES`, up to `1048576`. Events
 already stored are not re-checked.
 
+### `GET /v1/changes` and `GET /v1/events` answer with an envelope
+
+Both routes used to answer with a bare JSON array. They now answer
+`{"changes": [...], "next": "..."}` and `{"events": [...], "next": "..."}`: read the rows from
+`changes` or `events`, and follow `next` until it is absent to read past the 1000-row cap (see
+Truncated responses). `X-Horopter-Truncated` is unchanged, and the adapter routes are unchanged.
+
 ### `source` comes from the credential
 
 An event's `source` is now the source its credential was issued with
@@ -602,6 +629,22 @@ is otherwise indistinguishable from a complete one. Narrow the time window, or f
 `subject`, `type`, `status`, `locus`, `source` or `attr.deployment.environment.name`, and
 repeat the query until the header is gone. A `limit` query parameter below 1000 asks for
 fewer rows; it cannot raise the cap.
+
+**`GET /v1/changes` and `GET /v1/events` page instead.** Their bodies are an envelope —
+`{"changes": [...], "next": "..."}` and `{"events": [...], "next": "..."}` — and `next`, present
+until the last page, is the next request ready to send: every parameter repeated, with a
+`cursor` added. The same URL comes as a `Link: <...>; rel="next"` header. In a shell:
+
+    url="/v1/changes?from=$FROM&to=$TO"
+    while [ -n "$url" ]; do
+      page="$(curl -s -H "Authorization: Bearer $KEY" "$EGRESS$url")"
+      echo "$page" | jq -c '.changes[]'
+      url="$(echo "$page" | jq -r '.next // empty')"
+    done
+
+A cursor is bound to its query: resending it with different filters or a different window is a
+`400`. `limit` may change between pages. Pages are not a snapshot: a change whose start moves
+earlier while you page can be missed, and re-reading finds it.
 
 The signal is a header rather than a field in the body because two of these routes render
 vendor-owned shapes — Grafana annotations and OTLP spans — that cannot carry a Horopter
