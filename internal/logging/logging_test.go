@@ -20,7 +20,7 @@ import (
 func record(t *testing.T, log func(l *slog.Logger)) map[string]any {
 	t.Helper()
 	var buf bytes.Buffer
-	log(slog.New(handler(&buf, slog.LevelDebug)))
+	log(slog.New(Handler(&buf, slog.LevelDebug)))
 	var out map[string]any
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &out), "handler wrote %q", buf.String())
 	return out

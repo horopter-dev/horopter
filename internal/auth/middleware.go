@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/singleflight"
+	"horopter.dev/horopter/internal/logging"
 )
 
 // DefaultPositiveTTL is how long a resolved credential is cached, and therefore the
@@ -127,6 +128,13 @@ func (a *Authenticator) Require(c Capability) func(http.Handler) http.Handler {
 				reject(w, r, err)
 				return
 			}
+			// After resolve, never before: an unauthenticated caller chooses the prefix it
+			// presents, and must not be able to put a string of its choosing on the line.
+			attrs := []slog.Attr{slog.String("credential", p.KeyPrefix)}
+			if tenant := p.Tenant.String(); tenant != "" {
+				attrs = append(attrs, slog.String("tenant", tenant))
+			}
+			logging.Annotate(r.Context(), attrs...)
 			if !p.Can(c) {
 				writeError(w, http.StatusForbidden,
 					fmt.Sprintf("role %q cannot %s", p.Role, c))
@@ -187,6 +195,7 @@ func (a *Authenticator) resolve(r *http.Request) (Principal, error) {
 		// authentication, and the holder sees only the same 401 as everyone else.
 		slog.WarnContext(r.Context(), "credential cannot be used as issued", "error", err)
 	}
+	p.KeyPrefix = prefix
 	return p, err
 }
 

@@ -25,7 +25,7 @@ func serve(
 	t.Helper()
 	var buf bytes.Buffer
 	previous := slog.Default()
-	slog.SetDefault(slog.New(handler(&buf, slog.LevelDebug)))
+	slog.SetDefault(slog.New(Handler(&buf, slog.LevelDebug)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 	Requests(mux, opts...).ServeHTTP(httptest.NewRecorder(), req)
 	var records []map[string]any
@@ -86,7 +86,7 @@ func TestAnUnmatchedPathLogsUnmatched(t *testing.T) {
 func TestAPanicStillLogs500AndRepanics(t *testing.T) {
 	var buf bytes.Buffer
 	previous := slog.Default()
-	slog.SetDefault(slog.New(handler(&buf, slog.LevelDebug)))
+	slog.SetDefault(slog.New(Handler(&buf, slog.LevelDebug)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 	m := muxWith("GET /boom", func(http.ResponseWriter, *http.Request) { panic("boom") })
 

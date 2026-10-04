@@ -27,6 +27,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"horopter.dev/horopter/internal/auth"
 	"horopter.dev/horopter/internal/core"
+	"horopter.dev/horopter/internal/logging"
 	"horopter.dev/horopter/internal/store/postgres"
 )
 
@@ -99,7 +100,9 @@ func (s *Server) Routes() http.Handler {
 	// entirely and names the span from the request's method and route; passing the
 	// binary name only made it look load-bearing. The binary name already reaches
 	// backends as the service.name resource attribute.
-	return otelhttp.NewHandler(mux, "")
+	// Inside otelhttp so the span is in the context the line is logged with; around the
+	// mux so the matched route is known when it is written.
+	return otelhttp.NewHandler(logging.Requests(mux), "")
 }
 
 // healthz reports process liveness only. It must not touch the database: a failing
@@ -279,11 +282,16 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) append(w http.ResponseWriter, r *http.Request, ev core.Event) {
+	annotateEvent(r.Context(), ev)
 	stored, created, err := s.store.AppendEvent(r.Context(), ev)
 	if err != nil {
+		logging.Annotate(r.Context(), slog.String("ref", core.RefFor(ev).String()))
 		appendFailed(w, r, ev, err)
 		return
 	}
+	// The stored event, not ev: a replayed idempotency key returns the original, whose ref
+	// is the one the caller and every reader see.
+	logging.Annotate(r.Context(), slog.String("ref", core.RefFor(stored).String()))
 	status := http.StatusOK
 	if created {
 		status = http.StatusCreated
@@ -292,6 +300,16 @@ func (s *Server) append(w http.ResponseWriter, r *http.Request, ev core.Event) {
 		"id": stored.ID, "ref": core.RefFor(stored).String(),
 		"correlation_ref": amendHandle(stored), "created": created,
 	})
+}
+
+// annotateEvent puts the event's searchable identifiers on the request's log line. Never
+// its attributes: they are operator-owned, and may hold anything.
+func annotateEvent(ctx context.Context, ev core.Event) {
+	attrs := []slog.Attr{slog.String("subject", ev.Subject), slog.String("type", ev.Type)}
+	if ev.IdempotencyKey != "" {
+		attrs = append(attrs, slog.String("idempotency_key", ev.IdempotencyKey))
+	}
+	logging.Annotate(ctx, attrs...)
 }
 
 // amendHandle returns the value a producer echoes into the NEXT event's correlation_ref to

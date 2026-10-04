@@ -30,11 +30,14 @@ func Setup() error {
 	if err != nil {
 		return err
 	}
-	slog.SetDefault(slog.New(handler(os.Stderr, level)))
+	slog.SetDefault(slog.New(Handler(os.Stderr, level)))
 	return nil
 }
 
-func handler(w io.Writer, level slog.Leveler) slog.Handler {
+// Handler is the handler Setup installs: JSON to w at level, with the active span's ids on
+// records logged with a context. Exported so another package's tests can log exactly as
+// the daemons do.
+func Handler(w io.Writer, level slog.Leveler) slog.Handler {
 	return traceHandler{Handler: slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level})}
 }
 
