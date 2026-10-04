@@ -1565,3 +1565,122 @@ func TestBothNeutralRoutesAnswerWithAnEnvelope(t *testing.T) {
 		"/v1/changes?from=2020-01-01T00:00:00Z&to=2020-01-02T00:00:00Z"))
 	assert.Empty(t, empty)
 }
+
+// follow reads every page of url by following next, returning all rows and the page count.
+func follow(t *testing.T, h http.Handler, key, url, field string) ([]map[string]any, int) {
+	t.Helper()
+	var rows []map[string]any
+	pages := 0
+	for url != "" {
+		rec := get(t, h, key, url)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		var page []map[string]any
+		require.NoError(t, json.Unmarshal(body[field], &page))
+		rows = append(rows, page...)
+		pages++
+		url = ""
+		if raw, ok := body["next"]; ok {
+			require.NoError(t, json.Unmarshal(raw, &url))
+			assert.Equal(t, "<"+url+">; rel=\"next\"", rec.Header().Get("Link"))
+			assert.Equal(t, "true", rec.Header().Get(egress.TruncatedHeader),
+				"a page with a successor is still a cut result for callers that do not page")
+			require.NotEmpty(t, page, "next is sent only with at least one row")
+		} else {
+			assert.Empty(t, rec.Header().Get("Link"))
+		}
+	}
+	return rows, pages
+}
+
+func TestFollowingNextReturnsEveryChangeOnceInOrder(t *testing.T) {
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	// seedManyChanges seeds every change at the same instant, so every page boundary falls
+	// inside a run of equal start_at values: only the ref tie-break keeps them apart.
+	seedManyChanges(t, s, tn, 2500)
+	rows, pages := follow(t, h, key,
+		"/v1/changes?from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z", "changes")
+	assert.Equal(t, 3, pages)
+	assert.Len(t, rows, 2500)
+	// Uniqueness and the count, not Go string order: Postgres orders ref by the database's
+	// collation, which need not agree with byte order, and the keyset compares the same way.
+	seen := map[string]bool{}
+	for _, row := range rows {
+		ref, _ := row["ref"].(string)
+		assert.False(t, seen[ref], "ref %s returned twice", ref)
+		seen[ref] = true
+	}
+}
+
+func TestFollowingNextReturnsEveryEventOnce(t *testing.T) {
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	seedManyEvents(t, s, tn, 1200)
+	rows, pages := follow(t, h, key, "/v1/events?limit=500", "events")
+	assert.Equal(t, 3, pages)
+	assert.Len(t, rows, 1200)
+}
+
+func TestACursorForADifferentQueryIs400(t *testing.T) {
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	seedManyChanges(t, s, tn, 3)
+	first := get(t, h, key, "/v1/changes?from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z&limit=1")
+	var body struct {
+		Next string `json:"next"`
+	}
+	require.NoError(t, json.Unmarshal(first.Body.Bytes(), &body))
+	require.NotEmpty(t, body.Next)
+	u, err := url.Parse(body.Next)
+	require.NoError(t, err)
+	q := u.Query()
+	q.Set("status", "completed")
+	rec := get(t, h, key, u.Path+"?"+q.Encode())
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "cursor was issued for a different query")
+
+	garbage := get(t, h, key,
+		"/v1/changes?from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z&cursor=%21%21")
+	assert.Equal(t, http.StatusBadRequest, garbage.Code)
+}
+
+func TestTheAdapterRoutesIgnoreACursor(t *testing.T) {
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	seedManyChanges(t, s, tn, 3)
+	plain := get(t, h, key, "/adapters/otlp/spans?from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z")
+	withCursor := get(t, h, key,
+		"/adapters/otlp/spans?from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z&cursor=anything")
+	assert.Equal(t, plain.Code, withCursor.Code)
+	assert.Equal(t, plain.Body.String(), withCursor.Body.String())
+	assert.Empty(t, withCursor.Header().Get("Link"))
+}
+
+// seedChangesWithSubject seeds n correlated changes under subject, an hour apart.
+func seedChangesWithSubject(t *testing.T, s *postgres.Store, tn, subject string, n int) {
+	t.Helper()
+	for i := range n {
+		id := core.NewULID(time.Now(), rand.Reader)
+		at := time.Date(2026, 9, 14, 9, 10+i, 0, 0, time.UTC)
+		_, _, err := s.AppendEvent(context.Background(), core.Event{
+			ID: id, Tenant: tn, IdempotencyKey: id, SchemaVersion: core.CurrentSchemaVersion,
+			Source: "ci", Type: "deployment.started", Subject: subject,
+			OccurredAt: at, ReceivedAt: at,
+			CorrelationRef: core.RefFromRow(fmt.Sprintf("ci/esc-%d", i)),
+			Origin:         core.OriginProcess, Locus: core.LocusFromRow("ci"),
+		})
+		require.NoError(t, err)
+	}
+}
+
+func TestNextKeepsAFilterThatNeedsEscaping(t *testing.T) {
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	seedChangesWithSubject(t, s, tn, "a&b/c", 3)
+	rows, pages := follow(t, h, key, "/v1/changes?from=2026-09-14T09:00:00Z"+
+		"&to=2026-09-14T11:00:00Z&subject=a%26b%2Fc&limit=1", "changes")
+	assert.Equal(t, 3, pages)
+	assert.Len(t, rows, 3)
+}

@@ -206,3 +206,29 @@ func TestAnEventsReadWhoseFirstRowExceedsTheMemoryPoolIsRefused(t *testing.T) {
 	require.Equal(t, http.StatusUnprocessableEntity, resp.Code, resp.Body.String())
 	assert.JSONEq(t, tooLargeBody(capacity), resp.Body.String())
 }
+
+// TestAMemoryCutPageOffersNextThatResumes: a page the pool cuts short is a page, not a dead
+// end. Following next under the same small pool reaches every change the fixture holds.
+func TestAMemoryCutPageOffersNextThatResumes(t *testing.T) {
+	f := newMemoryFixture(t)
+	small := f.server(t, egress.ReadExpansionFactor*f.firstTwo.TotalBytes)
+	first := get(t, small.Routes(), f.key, changesURL(f.tn))
+	require.Equal(t, http.StatusOK, first.Code, first.Body.String())
+	assert.Equal(t, []string{"ci/mem-a", "ci/mem-b"}, refsIn(t, first), "cut to what fits")
+	assert.NotEmpty(t, first.Header().Get("Link"), "a cut page offers the next one")
+
+	rows, _ := follow(t, small.Routes(), f.key, changesURL(f.tn), "changes")
+	whole := changesBody(t, get(t, f.server(t, 1<<30).Routes(), f.key, changesURL(f.tn)))
+	assert.Len(t, rows, len(whole), "paging under the small pool reaches every change once")
+}
+
+// TestARefusedReadOffersNoNext: a first row larger than the pool is refused with 422, as read
+// admission already does, and never answered 200 with a next it could not continue from.
+func TestARefusedReadOffersNoNext(t *testing.T) {
+	f := newMemoryFixture(t)
+	srv := f.server(t, egress.ReadExpansionFactor*f.firstTwo.FirstRowBytes-1)
+	resp := get(t, srv.Routes(), f.key, changesURL(f.tn))
+	require.Equal(t, http.StatusUnprocessableEntity, resp.Code, resp.Body.String())
+	assert.Empty(t, resp.Header().Get("Link"))
+	assert.NotContains(t, resp.Body.String(), `"next"`)
+}

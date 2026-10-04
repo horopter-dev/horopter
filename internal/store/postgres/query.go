@@ -15,6 +15,14 @@ import (
 	"horopter.dev/horopter/internal/core"
 )
 
+// ChangeKey is a change's position in a read's order, (start_at, ref). A cursor carries the
+// last returned row's key, and the next page starts strictly after it. ref is unique within a
+// tenant, so the pair is a total order even when many changes share one start_at.
+type ChangeKey struct {
+	Start time.Time
+	Ref   string
+}
+
 // ChangeQuery selects changes overlapping a time window, or by ref alone. tenant is
 // unexported: NewChangeQuery is the only way to set it, so a query naming no tenant is a
 // compile error, not a struct literal that happens to select nothing.
@@ -41,6 +49,8 @@ type ChangeQuery struct {
 	// exact and a window could only narrow it redundantly.
 	Ref   string
 	Limit int
+	// After, when set, selects only rows strictly after it in (start_at, ref) order.
+	After *ChangeKey
 	// MaxRowTextBytes cuts the result after the leading rows whose row text, summed in order,
 	// fits within it; zero means no cut. Row text is a row's size as Postgres renders the whole
 	// row as text, octet_length(row::text). A cut that discards rows reports the result
@@ -111,6 +121,8 @@ type EventQuery struct {
 	tenant string
 	Ref    string
 	Limit  int
+	// AfterID, when set, selects only events whose id sorts after it.
+	AfterID string
 	// MaxRowTextBytes cuts the result after the leading rows whose row text, summed in order,
 	// fits within it; zero means no cut. Row text is a row's size as Postgres renders the whole
 	// row as text, octet_length(row::text). A cut that discards rows reports the result
@@ -192,6 +204,10 @@ func changeSelection(q ChangeQuery) selection {
 		args = []any{q.tenant, q.To.UTC(), q.From.UTC()}
 	}
 	args = appendChangeFilters(&sb, args, q)
+	if q.After != nil {
+		args = append(args, q.After.Start.UTC(), q.After.Ref)
+		fmt.Fprintf(&sb, " AND (c.start_at, c.ref) > ($%d, $%d)", len(args)-1, len(args))
+	}
 	sb.WriteString(" ORDER BY c.start_at ASC, c.ref ASC")
 	if limit, bounded := overFetch(q.Limit); bounded {
 		args = append(args, limit)
@@ -229,6 +245,10 @@ func eventSelection(q EventQuery) selection {
 			" AND (e.correlation_ref = $%d OR"+
 				" (e.correlation_ref = '' AND e.locus = $%d AND e.id = $%d))",
 			len(args)-2, len(args)-1, len(args))
+	}
+	if q.AfterID != "" {
+		args = append(args, q.AfterID)
+		query += fmt.Sprintf(" AND e.id > $%d", len(args))
 	}
 	query += " ORDER BY e.id ASC"
 	if limit, bounded := overFetch(q.Limit); bounded {
