@@ -472,7 +472,7 @@ func (s *Server) queryChanges(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	markTruncated(w, truncated)
-	writeJSON(w, http.StatusOK, changesToJSON(changes))
+	writeJSON(w, http.StatusOK, map[string]any{"changes": changesToJSON(changes)})
 }
 
 // listEvents returns the raw event log for a tenant, optionally scoped to one change's
@@ -514,7 +514,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	markTruncated(w, truncated)
-	writeJSON(w, http.StatusOK, eventsToJSON(events))
+	writeJSON(w, http.StatusOK, map[string]any{"events": eventsToJSON(events)})
 }
 
 // grafanaAnnotations renders the changes overlapping a window as Grafana annotations.

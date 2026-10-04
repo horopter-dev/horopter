@@ -2,7 +2,6 @@ package egress_test
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -190,8 +189,7 @@ func TestAnEventsReadLargerThanTheMemoryPoolIsCutAndMarked(t *testing.T) {
 	resp := get(t, srv.Routes(), f.key, eventsURL(f.tn))
 
 	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
-	var events []map[string]any
-	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &events))
+	events := eventsBody(t, resp)
 	assert.Len(t, events, 2, "the oldest events that fit the pool")
 	assert.Equal(t, "true", resp.Header().Get(egress.TruncatedHeader))
 }

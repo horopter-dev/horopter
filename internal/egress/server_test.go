@@ -310,9 +310,11 @@ type jsonChange struct {
 func changesOf(t *testing.T, rec *httptest.ResponseRecorder) []jsonChange {
 	t.Helper()
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var changes []jsonChange
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &changes))
-	return changes
+	var body struct {
+		Changes []jsonChange `json:"changes"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	return body.Changes
 }
 
 func TestQueryChangesReturnsNeutralJSON(t *testing.T) {
@@ -325,8 +327,7 @@ func TestQueryChangesReturnsNeutralJSON(t *testing.T) {
 		"&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	var changes []map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &changes))
+	changes := changesBody(t, rec)
 	require.Len(t, changes, 1)
 	assert.Equal(t, "ci/dep-7", changes[0]["ref"])
 	assert.Equal(t, "in_progress", changes[0]["status"])
@@ -424,8 +425,7 @@ func TestListEventsReturnsRawLog(t *testing.T) {
 	rec := get(t, h, key, "/v1/events?tenant="+tn+"&ref="+url.QueryEscape("ci/dep-10"))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	var events []map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &events))
+	events := eventsBody(t, rec)
 	require.Len(t, events, 1)
 	assert.Equal(t, "ci/dep-10", events[0]["correlation_ref"])
 	assert.Equal(t, "deployment.started", events[0]["type"])
@@ -437,8 +437,7 @@ func TestListEventsReturnsRawLog(t *testing.T) {
 	// event id>, which this test never captures on its own.
 	full := get(t, h, key, "/v1/events?tenant="+tn)
 	require.Equal(t, http.StatusOK, full.Code, full.Body.String())
-	var all []map[string]any
-	require.NoError(t, json.Unmarshal(full.Body.Bytes(), &all))
+	all := eventsBody(t, full)
 	var point map[string]any
 	for _, e := range all {
 		if e["type"] == "config.changed" {
@@ -481,8 +480,7 @@ func TestListEventsIsCappedAtMaxLimit(t *testing.T) {
 
 	rec := get(t, h, key, "/v1/events?tenant="+tn)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var events []map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &events))
+	events := eventsBody(t, rec)
 	assert.Len(t, events, egress.MaxLimit, "the default limit must cap the result set")
 	assert.Equal(t, "true", rec.Header().Get(egress.TruncatedHeader),
 		"a result cut short at exactly the cap must say so; a caller cannot otherwise "+
@@ -490,8 +488,7 @@ func TestListEventsIsCappedAtMaxLimit(t *testing.T) {
 
 	recBig := get(t, h, key, "/v1/events?tenant="+tn+"&limit=5000")
 	require.Equal(t, http.StatusOK, recBig.Code, recBig.Body.String())
-	var eventsBig []map[string]any
-	require.NoError(t, json.Unmarshal(recBig.Body.Bytes(), &eventsBig))
+	eventsBig := eventsBody(t, recBig)
 	assert.Len(t, eventsBig, egress.MaxLimit,
 		"a caller-supplied limit above the cap must still be clamped to it")
 	assert.Equal(t, "true", recBig.Header().Get(egress.TruncatedHeader))
@@ -509,8 +506,7 @@ func TestQueryChangesIsCappedAtMaxLimit(t *testing.T) {
 	rec := get(t, h, key, "/v1/changes?tenant="+tn+
 		"&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var changes []map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &changes))
+	changes := changesBody(t, rec)
 	assert.Len(t, changes, egress.MaxLimit, "the default limit must cap the result set")
 	assert.Equal(t, "true", rec.Header().Get(egress.TruncatedHeader),
 		"a result cut short at exactly the cap must say so")
@@ -691,8 +687,7 @@ func TestQueryChangesEmitsBothStartFacts(t *testing.T) {
 	only := func() map[string]any {
 		rec := get(t, h, key, url)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		var changes []map[string]any
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &changes))
+		changes := changesBody(t, rec)
 		require.Len(t, changes, 1)
 		return changes[0]
 	}
@@ -1040,8 +1035,7 @@ func seedWith(t *testing.T, s *postgres.Store, tn, ref, typ, subject string, at 
 func refsIn(t *testing.T, rec *httptest.ResponseRecorder) []string {
 	t.Helper()
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var changes []map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &changes))
+	changes := changesBody(t, rec)
 	refs := make([]string, 0, len(changes))
 	for _, c := range changes {
 		refs = append(refs, c["ref"].(string))
@@ -1242,8 +1236,7 @@ func TestChangesRenderTheirSources(t *testing.T) {
 		"&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	var changes []map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &changes))
+	changes := changesBody(t, rec)
 	require.Len(t, changes, 1)
 	assert.Equal(t, []any{"github"}, changes[0]["sources"])
 	assert.NotContains(t, changes[0], "locus",
@@ -1427,8 +1420,7 @@ func TestListEventsReturnsOriginAndEdited(t *testing.T) {
 	rec := get(t, h, key, "/v1/events?tenant="+tn+"&ref="+url.QueryEscape("ci/dep-origin"))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	var events []map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &events))
+	events := eventsBody(t, rec)
 	require.Len(t, events, 1)
 	assert.Equal(t, string(core.OriginProcess), events[0]["origin"],
 		"every Tier 0 credential is a machine key, so every event is origin=process")
@@ -1455,8 +1447,7 @@ func TestListEventsReturnsLifecycle(t *testing.T) {
 	rec := get(t, h, key, "/v1/events?tenant="+tn+"&ref="+url.QueryEscape("ci/dep-lifecycle"))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	var events []map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &events))
+	events := eventsBody(t, rec)
 	require.Len(t, events, 1)
 	assert.Equal(t, string(core.LifecycleStarted), events[0]["lifecycle"],
 		"the explicit assertion must render, not just the type suffix that would imply it")
@@ -1484,8 +1475,7 @@ func TestListEventsReturnsLocus(t *testing.T) {
 	rec := get(t, h, key, "/v1/events?tenant="+tn+"&ref="+url.QueryEscape("gha/dep-locus"))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	var events []map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &events))
+	events := eventsBody(t, rec)
 	require.Len(t, events, 1)
 	assert.Equal(t, "gha", events[0]["locus"],
 		"the locus every stored ref is prefixed with must be readable back")
@@ -1538,4 +1528,40 @@ func TestALongQueryIsCutAndFlagged(t *testing.T) {
 	line := requestLines(records())[0]
 	assert.Len(t, line["query"], 1024)
 	assert.Equal(t, true, line["query_truncated"])
+}
+
+// changesBody decodes a /v1/changes envelope's rows.
+func changesBody(t *testing.T, rec *httptest.ResponseRecorder) []map[string]any {
+	t.Helper()
+	var body struct {
+		Changes []map[string]any `json:"changes"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
+	require.NotNil(t, body.Changes, "the envelope always carries changes, [] when none")
+	return body.Changes
+}
+
+// eventsBody decodes a /v1/events envelope's rows.
+func eventsBody(t *testing.T, rec *httptest.ResponseRecorder) []map[string]any {
+	t.Helper()
+	var body struct {
+		Events []map[string]any `json:"events"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
+	require.NotNil(t, body.Events, "the envelope always carries events, [] when none")
+	return body.Events
+}
+
+func TestBothNeutralRoutesAnswerWithAnEnvelope(t *testing.T) {
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	seed(t, s, tn, "ci/env-1", "deployment.started", time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC))
+	changes := changesBody(t, get(t, h, key,
+		"/v1/changes?from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"))
+	assert.Len(t, changes, 1)
+	events := eventsBody(t, get(t, h, key, "/v1/events?ref=ci/env-1"))
+	assert.Len(t, events, 1)
+	empty := changesBody(t, get(t, h, key,
+		"/v1/changes?from=2020-01-01T00:00:00Z&to=2020-01-02T00:00:00Z"))
+	assert.Empty(t, empty)
 }
