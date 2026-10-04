@@ -165,3 +165,48 @@ func TestNewRefusesAnEmptyURLOrKey(t *testing.T) {
 	_, err = client.New("http://x", "")
 	require.Error(t, err)
 }
+
+// TestAChangeRepeatedAcrossPagesIsYieldedOnce: a change's start can move later while a caller
+// pages (a started event arriving after an annotation), carrying it past the cursor and onto a
+// later page too. The client yields each ref once.
+func TestAChangeRepeatedAcrossPagesIsYieldedOnce(t *testing.T) {
+	srv, _ := pages(t, []string{"a", "b"}, []string{"b", "c"})
+	c, err := client.New(srv.URL, "k")
+	require.NoError(t, err)
+	got, err := refs(t, c, window())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a", "b", "c"}, got)
+}
+
+// TestAnErrorMidSequenceEndsTheIterationWithIt: rows already read are yielded, then the error,
+// then nothing.
+func TestAnErrorMidSequenceEndsTheIterationWithIt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("cursor") == "" {
+			_, _ = w.Write([]byte(`{"changes":[{"ref":"a","start":"2026-09-14T10:00:00Z"}],` +
+				`"next":"/v1/changes?cursor=p1"}`))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"read failed"}`))
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL, "k")
+	require.NoError(t, err)
+	var got []string
+	var last error
+	calls := 0
+	for ch, err := range c.Changes(context.Background(), window()) {
+		calls++
+		if err != nil {
+			last = err
+			continue
+		}
+		got = append(got, ch.Ref)
+	}
+	assert.Equal(t, []string{"a"}, got)
+	var he *client.HTTPError
+	require.ErrorAs(t, last, &he)
+	assert.Equal(t, http.StatusInternalServerError, he.Status)
+	assert.Equal(t, 2, calls, "the error ends the iteration")
+}

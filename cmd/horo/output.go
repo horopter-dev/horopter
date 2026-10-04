@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"horopter.dev/horopter/internal/client"
 )
@@ -35,8 +37,8 @@ func writeChangeTable(w io.Writer, loc *time.Location, rows iter.Seq2[client.Cha
 			return err
 		}
 		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			ch.Start.In(loc).Format(time.RFC3339), duration(ch), ch.Status, ch.Ref, ch.Subject,
-			ch.Type, ch.Title); err != nil {
+			ch.Start.In(loc).Format(time.RFC3339), duration(ch), clean(ch.Status), clean(ch.Ref),
+			clean(ch.Subject), clean(ch.Type), clean(ch.Title)); err != nil {
 			return err
 		}
 	}
@@ -71,8 +73,9 @@ func writeShowTable(
 	w io.Writer, loc *time.Location, ch client.Change, events iter.Seq2[client.Event, error],
 ) error {
 	if _, err := fmt.Fprintf(w, "ref:      %s\nsubject:  %s\ntype:     %s\nstatus:   %s\n"+
-		"title:    %s\nstart:    %s\nduration: %s\n\n", ch.Ref, ch.Subject, ch.Type, ch.Status,
-		ch.Title, ch.Start.In(loc).Format(time.RFC3339), duration(ch)); err != nil {
+		"title:    %s\nstart:    %s\nduration: %s\n\n", clean(ch.Ref), clean(ch.Subject),
+		clean(ch.Type), clean(ch.Status), clean(ch.Title), ch.Start.In(loc).Format(time.RFC3339),
+		duration(ch)); err != nil {
 		return err
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
@@ -85,12 +88,24 @@ func writeShowTable(
 			return err
 		}
 		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			ev.OccurredAt.In(loc).Format(time.RFC3339), ev.Type, ev.Actor, ev.Title,
-			ev.ID); err != nil {
+			ev.OccurredAt.In(loc).Format(time.RFC3339), clean(ev.Type), clean(ev.Actor),
+			clean(ev.Title), clean(ev.ID)); err != nil {
 			return err
 		}
 	}
 	return tw.Flush()
+}
+
+// clean replaces control characters in producer-supplied text before it reaches a terminal,
+// which would otherwise act on escape sequences in a title and break the table on a newline.
+// JSON output is left as egress sent it.
+func clean(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '\uFFFD'
+		}
+		return r
+	}, s)
 }
 
 func duration(ch client.Change) string {

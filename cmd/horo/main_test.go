@@ -128,3 +128,20 @@ func TestAnUnknownCommandIsAUsageError(t *testing.T) {
 	assert.Equal(t, 2, code)
 	assert.Contains(t, errOut, "changes")
 }
+
+// TestTableOutputNeutralisesControlCharacters: titles and subjects are producer-supplied, and a
+// terminal executes escape sequences printed to it. The table replaces control characters; json
+// and jsonl carry egress's object unchanged.
+func TestTableOutputNeutralisesControlCharacters(t *testing.T) {
+	hostile := `{"ref":"ci/x","subject":"acme/prod","type":"t.started",` +
+		`"title":"a\u001b]52;c;cGF3bmVk\u0007b\nc\td","status":"in_progress",` +
+		`"start":"2026-09-14T10:00:00Z","first_seen_at":"2026-09-14T10:00:00Z"}`
+	code, out, _ := horo(t, egress(t, hostile, ""), true, "changes", "--utc")
+	require.Equal(t, 0, code)
+	assert.NotContains(t, out, "\x1b")
+	assert.NotContains(t, out, "\x07")
+	assert.Equal(t, 2, strings.Count(out, "\n"), "header and one row: no embedded line break")
+	code, out, _ = horo(t, egress(t, hostile, ""), false, "changes")
+	require.Equal(t, 0, code)
+	assert.JSONEq(t, hostile, strings.TrimSpace(out), "jsonl is egress's object, unchanged")
+}

@@ -89,6 +89,10 @@ func (e *HTTPError) Error() string {
 func (c *Client) Changes(ctx context.Context, q ChangeQuery) iter.Seq2[Change, error] {
 	return func(yield func(Change, error) bool) {
 		n := 0
+		// A change's start can move later while a caller pages — a started event arriving
+		// after an annotation — carrying it past the cursor onto a later page as well. Each
+		// ref is yielded once.
+		seen := map[string]bool{}
 		for row, err := range rows(ctx, c, "/v1/changes?"+changeParams(q).Encode(), "changes") {
 			if err != nil {
 				yield(Change{}, err)
@@ -100,6 +104,10 @@ func (c *Client) Changes(ctx context.Context, q ChangeQuery) iter.Seq2[Change, e
 				return
 			}
 			ch.Raw = row
+			if seen[ch.Ref] {
+				continue
+			}
+			seen[ch.Ref] = true
 			if !yield(ch, nil) {
 				return
 			}

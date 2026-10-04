@@ -643,8 +643,10 @@ until the last page, is the next request ready to send: every parameter repeated
     done
 
 A cursor is bound to its query: resending it with different filters or a different window is a
-`400`. `limit` may change between pages. Pages are not a snapshot: a change whose start moves
-earlier while you page can be missed, and re-reading finds it.
+`400`. `limit` may change between pages. Pages are not a snapshot: a change's start can move
+while you page — earlier when an older event arrives, later when a `started` event follows an
+annotation — so a change can be missed, or returned on two pages. `horo` shows each ref once;
+re-reading finds a missed one.
 
 The signal is a header rather than a field in the body because two of these routes render
 vendor-owned shapes — Grafana annotations and OTLP spans — that cannot carry a Horopter
