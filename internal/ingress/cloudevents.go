@@ -164,7 +164,7 @@ func eventFromCloudEvent(
 		Tenant:         p.Tenant.String(),
 		IdempotencyKey: idempotencyKey(ce.Source(), ce.ID()),
 		SchemaVersion:  core.CurrentSchemaVersion,
-		Source:         ce.Source(),
+		Source:         p.Source,
 		Type:           ce.Type(),
 		Subject:        ce.Subject(),
 		Actor:          actor,

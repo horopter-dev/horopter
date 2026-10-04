@@ -125,12 +125,12 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 }
 
 type eventRequest struct {
-	// Tenant is json.RawMessage, not string, so a present-but-null "tenant":null is
+	// Tenant and Source are json.RawMessage, not string, so a present-but-null value is
 	// distinguishable from an absent key: unmarshaling null into *string or string both
 	// leave the zero value, indistinguishable from omission, and the rule is reject a
 	// caller who sends the key at all, whatever its value — not just a non-empty one.
 	Tenant         json.RawMessage `json:"tenant"`
-	Source         string          `json:"source"`
+	Source         json.RawMessage `json:"source"`
 	Type           string          `json:"type"`
 	Subject        string          `json:"subject"`
 	Actor          string          `json:"actor"`
@@ -231,12 +231,17 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 	var req eventRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeBodyError(w, err, "malformed JSON body: "+err.Error()+
-			"; expected an object with source, type, subject and occurred_at")
+			"; expected an object with type, subject and occurred_at")
 		return
 	}
 	if req.Tenant != nil {
 		writeError(w, http.StatusBadRequest,
 			"tenant is derived from the credential; remove it from the request body")
+		return
+	}
+	if req.Source != nil {
+		writeError(w, http.StatusBadRequest,
+			"source is derived from the credential; remove it from the request body")
 		return
 	}
 	p, _ := auth.PrincipalFrom(r.Context())
@@ -257,7 +262,7 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		Tenant:         p.Tenant.String(),
 		IdempotencyKey: req.IdempotencyKey,
 		SchemaVersion:  core.CurrentSchemaVersion,
-		Source:         req.Source,
+		Source:         p.Source,
 		Type:           req.Type,
 		Subject:        req.Subject,
 		Actor:          req.Actor,
