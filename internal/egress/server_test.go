@@ -1492,3 +1492,50 @@ func TestListEventsReturnsLocus(t *testing.T) {
 	assert.Equal(t, "ci", events[0]["source"],
 		"and must not be confused with source, which defaults to the same value")
 }
+
+func requestLines(records []map[string]any) []map[string]any {
+	var out []map[string]any
+	for _, r := range records {
+		if r["msg"] == "request" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func TestAReadLogsItsQueryTenantAndCredential(t *testing.T) {
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	records := captureLogs(t)
+	get(t, h, key, "/v1/changes?ref=ci/dep-1")
+	prefix, _, ok := auth.SplitKey(key)
+	require.True(t, ok)
+	lines := requestLines(records())
+	require.Len(t, lines, 1)
+	assert.Equal(t, "GET /v1/changes", lines[0]["route"])
+	assert.Equal(t, "ref=ci/dep-1", lines[0]["query"])
+	assert.Equal(t, tn, lines[0]["tenant"])
+	assert.Equal(t, prefix, lines[0]["credential"])
+}
+
+func TestAnUnauthenticatedReadLogsNoQuery(t *testing.T) {
+	h, _, _ := newServer(t)
+	records := captureLogs(t)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/changes?ref=chosen-by-anyone", nil))
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	lines := requestLines(records())
+	require.Len(t, lines, 1)
+	assert.NotContains(t, lines[0], "query")
+	assert.NotContains(t, lines[0], "credential")
+}
+
+func TestALongQueryIsCutAndFlagged(t *testing.T) {
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	records := captureLogs(t)
+	get(t, h, key, "/v1/changes?ref=ci/"+strings.Repeat("q", 4<<10))
+	line := requestLines(records())[0]
+	assert.Len(t, line["query"], 1024)
+	assert.Equal(t, true, line["query_truncated"])
+}

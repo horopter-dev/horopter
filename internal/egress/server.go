@@ -29,6 +29,7 @@ import (
 	"horopter.dev/horopter/internal/admission"
 	"horopter.dev/horopter/internal/auth"
 	"horopter.dev/horopter/internal/core"
+	"horopter.dev/horopter/internal/logging"
 	"horopter.dev/horopter/internal/store/postgres"
 )
 
@@ -127,7 +128,9 @@ func (s *Server) Routes() http.Handler {
 	// entirely and names the span from the request's method and route; passing the
 	// binary name only made it look load-bearing. The binary name already reaches
 	// backends as the service.name resource attribute.
-	return otelhttp.NewHandler(mux, "")
+	// WithQuery: a read's filters are what tell "empty because nothing matched" from
+	// "empty because the filter was wrong". Logged only once a credential resolves.
+	return otelhttp.NewHandler(logging.Requests(mux, logging.WithQuery()), "")
 }
 
 // authz gates next on capability c, wrapping admission rather than sitting inside it: an
