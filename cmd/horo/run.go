@@ -182,7 +182,7 @@ func (x *runner) postUnlessInterrupted(
 	ctx context.Context, ev client.NewEvent, window time.Duration,
 ) error {
 	again := make(chan os.Signal, 1)
-	signal.Notify(again, os.Interrupt, syscall.SIGTERM)
+	notify(again, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(again)
 	posted := make(chan error, 1)
 	go func() {

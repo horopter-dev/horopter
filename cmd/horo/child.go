@@ -37,6 +37,32 @@ func forwarded(terminal bool) []os.Signal {
 	return []os.Signal{syscall.SIGTERM, os.Interrupt, syscall.SIGHUP, syscall.SIGQUIT}
 }
 
+// inherited records which signals were ignored when horo started — nohup leaves SIGHUP ignored,
+// a script's background job SIGINT. It is read at package initialisation, before any Notify,
+// which would un-ignore them.
+var inherited = func() map[os.Signal]bool {
+	ignored := map[os.Signal]bool{}
+	for _, s := range []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT} {
+		ignored[s] = signal.Ignored(s)
+	}
+	return ignored
+}()
+
+// notify is signal.Notify for those of sigs horo did not inherit as ignored. Catching an ignored
+// signal un-ignores it, and exec then gives the wrapped command the default action, ending the
+// protection nohup set up. With none left it registers nothing: Notify with no signals means all.
+func notify(c chan<- os.Signal, sigs ...os.Signal) {
+	var keep []os.Signal
+	for _, s := range sigs {
+		if !inherited[s] {
+			keep = append(keep, s)
+		}
+	}
+	if len(keep) > 0 {
+		signal.Notify(c, keep...)
+	}
+}
+
 // runChild runs argv with stdin, stdout and stderr passed through, forwarding the given signals
 // to it, and reports how it ended.
 func runChild(argv []string, stdout, stderr io.Writer, forward []os.Signal) outcome {
@@ -44,7 +70,7 @@ func runChild(argv []string, stdout, stderr io.Writer, forward []os.Signal) outc
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, stdout, stderr
 	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, forward...)
+	notify(signals, forward...)
 	defer signal.Stop(signals)
 	if err := cmd.Start(); err != nil {
 		return outcome{word: "failed", exitCode: 127, attrs: map[string]any{"error": err.Error()}}

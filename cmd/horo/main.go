@@ -60,7 +60,7 @@ func run(args []string, env func(string) string, stdout, stderr io.Writer, tty b
 func interruptible() (context.Context, func()) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	go func() {
 		select {
 		case s := <-signals:
