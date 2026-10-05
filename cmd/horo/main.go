@@ -54,12 +54,13 @@ func run(args []string, env func(string) string, stdout, stderr io.Writer, tty b
 	}
 }
 
-// interruptible is a context that ends when SIGINT or SIGTERM arrives, with the signal as its
-// cause. horo keeps running, so it can still record how a wrapped command ended.
+// interruptible is a context that ends when SIGINT, SIGTERM, SIGHUP or SIGQUIT arrives, with the
+// signal as its cause: a dropped SSH session or Ctrl-\ must not kill horo and leave the change
+// open. horo keeps running, so it can still record how a wrapped command ended.
 func interruptible() (context.Context, func()) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	go func() {
 		select {
 		case s := <-signals:

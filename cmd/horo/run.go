@@ -47,6 +47,7 @@ func runRun(
 		return x.abort(ctx)
 	}
 	if !started && x.strict {
+		say(stderr, "horo run: --strict, so the command was not run")
 		return exitError
 	}
 	out := runChild(argv, stdout, stderr, forwarded(sharesTerminal()))

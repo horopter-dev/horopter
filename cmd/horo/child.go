@@ -27,14 +27,14 @@ var signalNames = map[syscall.Signal]string{
 // the child's, directly. A variable so a test can pretend it does not.
 var sharesTerminal = func() bool { return inForeground("/dev/tty") }
 
-// forwarded are the signals horo passes on. On a terminal, Ctrl-C already reached the child's
-// process group: forwarding it again would deliver a second interrupt, which tools such as
-// Terraform treat as "stop immediately".
+// forwarded are the signals horo passes on. On a terminal, Ctrl-C, Ctrl-\ and a hangup already
+// reached the child's process group: forwarding them again would deliver a second one, which
+// tools such as Terraform treat as "stop immediately". SIGTERM never comes from a terminal.
 func forwarded(terminal bool) []os.Signal {
 	if terminal {
 		return []os.Signal{syscall.SIGTERM}
 	}
-	return []os.Signal{syscall.SIGTERM, os.Interrupt}
+	return []os.Signal{syscall.SIGTERM, os.Interrupt, syscall.SIGHUP, syscall.SIGQUIT}
 }
 
 // runChild runs argv with stdin, stdout and stderr passed through, forwarding the given signals

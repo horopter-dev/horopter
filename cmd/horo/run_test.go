@@ -113,10 +113,11 @@ func TestNoEndIsPostedWhenTheStartWasNotRecorded(t *testing.T) {
 func TestStrictDoesNotRunTheCommandWhenTheStartFails(t *testing.T) {
 	shortWindows(t)
 	marker := filepath.Join(t.TempDir(), "ran")
-	code, _, _ := runCmd(t, "http://127.0.0.1:1", "--strict", "--", "touch", marker)
+	code, _, errOut := runCmd(t, "http://127.0.0.1:1", "--strict", "--", "touch", marker)
 	assert.Equal(t, 1, code)
 	_, err := os.Stat(marker)
 	assert.True(t, os.IsNotExist(err), "the command must not have run")
+	assert.Contains(t, errOut, "the command was not run", "a CI log must say the deploy did not run")
 }
 
 // TestAMissingKeyStillRunsTheCommand: an unset CI secret is Horopter being unreachable, not a
@@ -190,11 +191,16 @@ func TestRunForwardsSignalsToTheChild(t *testing.T) {
 	saved := sharesTerminal
 	sharesTerminal = func() bool { return false }
 	t.Cleanup(func() { sharesTerminal = saved })
-	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGINT} {
+	for _, sig := range []syscall.Signal{
+		syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP, syscall.SIGQUIT,
+	} {
 		t.Run(sig.String(), func(t *testing.T) {
 			f := &fakeIngress{}
 			ready := filepath.Join(t.TempDir(), "ready")
-			name := map[syscall.Signal]string{syscall.SIGTERM: "TERM", syscall.SIGINT: "INT"}[sig]
+			name := map[syscall.Signal]string{
+				syscall.SIGTERM: "TERM", syscall.SIGINT: "INT",
+				syscall.SIGHUP: "HUP", syscall.SIGQUIT: "QUIT",
+			}[sig]
 			script := `trap 'exit 0' ` + name + `; touch "$1"; while :; do sleep 0.05; done`
 			done := make(chan int, 1)
 			go func() {
@@ -363,7 +369,8 @@ func TestDevNullIsNotATerminal(t *testing.T) {
 
 func TestSIGINTIsNotForwardedFromATerminal(t *testing.T) {
 	assert.Equal(t, []os.Signal{syscall.SIGTERM}, forwarded(true))
-	assert.ElementsMatch(t, []os.Signal{syscall.SIGTERM, os.Interrupt}, forwarded(false))
+	assert.ElementsMatch(t,
+		[]os.Signal{syscall.SIGTERM, os.Interrupt, syscall.SIGHUP, syscall.SIGQUIT}, forwarded(false))
 }
 
 // endFailingIngress forwards to inner but answers every end post (an /end key) with 400.
