@@ -828,6 +828,19 @@ func TestGrafanaRejectsAnOutOfRangeEpochWindow(t *testing.T) {
 	}
 }
 
+// TestGrafanaAcceptsTheEpochBoundsThemselves pins the other side of the bound: the epoch
+// itself and the open-ended sentinel are valid instants, and a dashboard asking for
+// "everything" sends exactly those. Making either comparison strict refuses them as out of
+// range, which only a test at the bound can tell from a correct check.
+func TestGrafanaAcceptsTheEpochBoundsThemselves(t *testing.T) {
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	url := fmt.Sprintf("/adapters/grafana/annotations?tenant=%s&from=0&to=%d",
+		tn, core.OpenSentinel.UnixMilli())
+	rec := get(t, h, key, url)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
 // recordSpans installs a recording provider and returns it with a restore function.
 //
 // This is a copy of internal/store/postgres/append_test.go's helper of the same name,

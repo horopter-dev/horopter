@@ -44,14 +44,10 @@ func (r *Renderer) Render(changes []core.Change, now time.Time) (any, error) {
 		if !c.IsOpen() {
 			end = *c.End
 		}
-		title := c.Title
-		if title == "" {
-			title = c.Type
-		}
 		out = append(out, Annotation{
 			Time:    c.Start.UnixMilli(),
 			TimeEnd: end.UnixMilli(),
-			Title:   title,
+			Title:   c.Title,
 			Tags:    tagsFor(c),
 			Text:    textFor(c),
 		})
