@@ -63,6 +63,7 @@ func parseRun(
 	fs.SetOutput(stderr)
 	x = &runner{stderr: stderr, id: newInvocationID()}
 	x.r.register(fs, env)
+	fs.Lookup("type").Usage = "the change's type, e.g. deployment; run adds .started and the outcome"
 	fs.BoolVar(&x.strict, "strict", false, "fail rather than run unrecorded, or succeed unrecorded")
 	if err := fs.Parse(args); err != nil {
 		return nil, nil, false

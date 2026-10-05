@@ -465,3 +465,12 @@ func TestShellQuoteSurvivesARealShell(t *testing.T) {
 	}
 	assert.True(t, strings.HasPrefix(shellQuote("=cmd"), "'"), "zsh expands a leading =")
 }
+
+// TestRunHelpShowsABareType: run adds the lifecycle word itself, so the example event help gives
+// (deployment.started) would record deployment.started.started.
+func TestRunHelpShowsABareType(t *testing.T) {
+	code, _, errOut := record(t, "http://x", "run", "-h")
+	assert.Equal(t, 2, code)
+	assert.Contains(t, errOut, "-type")
+	assert.NotContains(t, errOut, "deployment.started")
+}
