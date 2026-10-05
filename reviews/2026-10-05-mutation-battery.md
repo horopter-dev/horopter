@@ -47,8 +47,14 @@ caught; 1 is removed with its code.** The patch directory holds 6, and the batte
   a test passed against it for the wrong reason. #29's row named both places.
 - **Row 07's code was dead.** `core.Fold` sets a change's title from its type whenever no event
   supplies one (`TestFoldTitleFallsBackToType`), and every event has a type. The Grafana
-  adapter's own fallback therefore never ran, and it is deleted. Erasure (#26) blanks an event's
-  title, not the change's: a re-fold falls back to the type again.
+  adapter's own fallback therefore never ran, and it is deleted. The OTLP adapter carried the
+  identical dead fallback for its span name, and it is deleted too, so the two renderers agree
+  and the fold's comment, which says no renderer applies one, is true. Erasure (#26) blanks an
+  event's title, not the change's: a re-fold falls back to the type again.
+- **The schema does not enforce this** (`title` is `NOT NULL DEFAULT ''`). An empty title could
+  come only from a row projected before the fold's fallback existed, in mid-September. Every
+  published image has the fallback, nothing is deployed, and a re-fold or rebuild repairs such
+  a row.
 
 ## Part 2 — an independent battery over Areas C and B
 

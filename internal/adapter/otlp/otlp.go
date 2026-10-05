@@ -158,14 +158,10 @@ func (r *Renderer) Render(changes []core.Change, now time.Time) (any, error) {
 		if !c.IsOpen() {
 			end = *c.End
 		}
-		name := c.Title
-		if name == "" {
-			name = c.Type
-		}
 		spans = append(spans, Span{
 			TraceID:           traceID(c.Tenant, c.Ref.String()),
 			SpanID:            spanID(c.Tenant, c.Ref.String()),
-			Name:              name,
+			Name:              c.Title,
 			StartTimeUnixNano: formatUnixNano(c.Start),
 			EndTimeUnixNano:   formatUnixNano(end),
 			Attributes:        attributesFor(mergedAttributes(c)),
