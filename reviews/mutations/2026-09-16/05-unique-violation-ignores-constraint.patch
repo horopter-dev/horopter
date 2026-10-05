@@ -1,0 +1,18 @@
+# mutation: 05-unique-violation-ignores-constraint
+# guards: isUniqueViolation checks the constraint name
+# package: ./internal/store/postgres/
+# expect: a test that a unique violation on another constraint is not taken for a duplicate
+
+diff --git a/internal/store/postgres/append.go b/internal/store/postgres/append.go
+index 36cf441..86f4de1 100644
+--- a/internal/store/postgres/append.go
++++ b/internal/store/postgres/append.go
+@@ -254,7 +254,7 @@ func insertEvent(ctx context.Context, tx pgx.Tx, ev core.Event) error {
+ func isUniqueViolation(err error, constraint string) bool {
+ 	var pgErr *pgconn.PgError
+ 	return errors.As(err, &pgErr) &&
+-		pgErr.Code == uniqueViolation && pgErr.ConstraintName == constraint
++		pgErr.Code == uniqueViolation
+ }
+ 
+ // isLockTimeout reports whether err is Postgres giving up on a lock wait because

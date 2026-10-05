@@ -1,0 +1,18 @@
+# mutation: 06-change-order-drops-ref
+# guards: changes sharing a start are ordered by ref
+# package: ./internal/store/postgres/ ./internal/egress/
+# expect: a test that changes sharing a start are ordered by ref
+
+diff --git a/internal/store/postgres/query.go b/internal/store/postgres/query.go
+index 5d961b2..e856413 100644
+--- a/internal/store/postgres/query.go
++++ b/internal/store/postgres/query.go
+@@ -208,7 +208,7 @@ func changeSelection(q ChangeQuery) selection {
+ 		args = append(args, q.After.Start.UTC(), q.After.Ref)
+ 		fmt.Fprintf(&sb, " AND (c.start_at, c.ref) > ($%d, $%d)", len(args)-1, len(args))
+ 	}
+-	sb.WriteString(" ORDER BY c.start_at ASC, c.ref ASC")
++	sb.WriteString(" ORDER BY c.start_at ASC")
+ 	if limit, bounded := overFetch(q.Limit); bounded {
+ 		args = append(args, limit)
+ 		fmt.Fprintf(&sb, " LIMIT $%d", len(args))

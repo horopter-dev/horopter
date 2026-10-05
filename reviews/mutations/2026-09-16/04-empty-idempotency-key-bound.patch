@@ -1,0 +1,18 @@
+# mutation: 04-empty-idempotency-key-bound
+# guards: an empty idempotency key is bound as NULL
+# package: ./internal/store/postgres/
+# expect: a test that two keyless events in one tenant are both stored
+
+diff --git a/internal/store/postgres/append.go b/internal/store/postgres/append.go
+index 36cf441..ab110ee 100644
+--- a/internal/store/postgres/append.go
++++ b/internal/store/postgres/append.go
+@@ -231,7 +231,7 @@ func (s *Store) writeEvent(
+ // make every keyless event collide with every other one.
+ func insertEvent(ctx context.Context, tx pgx.Tx, ev core.Event) error {
+ 	var idem *string
+-	if ev.IdempotencyKey != "" {
++	if true {
+ 		idem = &ev.IdempotencyKey
+ 	}
+ 	if _, err := tx.Exec(ctx, `

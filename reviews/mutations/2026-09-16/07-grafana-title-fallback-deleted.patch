@@ -1,0 +1,19 @@
+# mutation: 07-grafana-title-fallback-deleted
+# guards: a Grafana annotation falls back to the type for an empty title
+# package: ./internal/adapter/grafana/
+# expect: none: claimed unreachable, since the fold always sets a title
+
+diff --git a/internal/adapter/grafana/grafana.go b/internal/adapter/grafana/grafana.go
+index d6b93af..2b4e5be 100644
+--- a/internal/adapter/grafana/grafana.go
++++ b/internal/adapter/grafana/grafana.go
+@@ -45,9 +45,6 @@ func (r *Renderer) Render(changes []core.Change, now time.Time) (any, error) {
+ 			end = *c.End
+ 		}
+ 		title := c.Title
+-		if title == "" {
+-			title = c.Type
+-		}
+ 		out = append(out, Annotation{
+ 			Time:    c.Start.UnixMilli(),
+ 			TimeEnd: end.UnixMilli(),

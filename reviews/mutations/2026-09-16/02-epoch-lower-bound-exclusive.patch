@@ -1,0 +1,18 @@
+# mutation: 02-epoch-lower-bound-exclusive
+# guards: egress's epoch-millisecond parameter accepts the lower bound itself
+# package: ./internal/egress/
+# expect: a test that the lower epoch bound itself is accepted
+
+diff --git a/internal/egress/server.go b/internal/egress/server.go
+index aadb197..dd55ff9 100644
+--- a/internal/egress/server.go
++++ b/internal/egress/server.go
+@@ -282,7 +282,7 @@ func epochMillisParam(r *http.Request, name string) (time.Time, error) {
+ 		return time.Time{}, fmt.Errorf(
+ 			"query parameter %q=%q is not epoch milliseconds: %w", name, raw, err)
+ 	}
+-	if ms < minEpochMillis || ms > maxEpochMillis {
++	if ms <= minEpochMillis || ms > maxEpochMillis {
+ 		return time.Time{}, fmt.Errorf(
+ 			"query parameter %q=%d is out of range; epoch milliseconds must be between "+
+ 				"%d (%s) and %d (%s)",
