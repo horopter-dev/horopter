@@ -1697,3 +1697,44 @@ func TestNextKeepsAFilterThatNeedsEscaping(t *testing.T) {
 	assert.Equal(t, 3, pages)
 	assert.Len(t, rows, 3)
 }
+
+// TestFollowingNextAcrossSubSecondStartsReturnsEachChangeOnce: real starts carry fractions of a
+// second, and the cursor must keep them. A cursor cut back to the whole second resumes before
+// rows it already returned, so a caller paging with curl sees them again, page after page.
+func TestFollowingNextAcrossSubSecondStartsReturnsEachChangeOnce(t *testing.T) {
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	base := time.Date(2026, 9, 14, 9, 10, 0, 0, time.UTC)
+	for i := range 5 {
+		id := core.NewULID(time.Now(), rand.Reader)
+		at := base.Add(time.Duration(i+1) * 150 * time.Millisecond)
+		_, _, err := s.AppendEvent(context.Background(), core.Event{
+			ID: id, Tenant: tn, IdempotencyKey: id, SchemaVersion: core.CurrentSchemaVersion,
+			Source: "ci", Type: "deployment.started", Subject: "acme/prod",
+			OccurredAt: at, ReceivedAt: at,
+			CorrelationRef: core.RefFromRow(fmt.Sprintf("ci/sub-%d", i)),
+			Origin:         core.OriginProcess, Locus: core.LocusFromRow("ci"),
+		})
+		require.NoError(t, err)
+	}
+	seen := map[string]int{}
+	url := "/v1/changes?from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z&limit=2"
+	for pages := 0; url != ""; pages++ {
+		require.Less(t, pages, 10, "paging must end; refs so far %v", seen)
+		rec := get(t, h, key, url)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		for _, row := range changesBody(t, rec) {
+			ref, _ := row["ref"].(string)
+			seen[ref]++
+		}
+		var body struct {
+			Next string `json:"next"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		url = body.Next
+	}
+	assert.Len(t, seen, 5)
+	for ref, n := range seen {
+		assert.Equal(t, 1, n, "%s returned %d times", ref, n)
+	}
+}

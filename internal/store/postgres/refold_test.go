@@ -939,3 +939,21 @@ func TestARefoldWaitsForAnAppendToTheSameRef(t *testing.T) {
 	require.Error(t, err, "the re-fold must wait for the append's lock and time out")
 	assert.GreaterOrEqual(t, time.Since(start), postgres.AppendLockTimeout-200*time.Millisecond)
 }
+
+// TestRefoldRefReportsARepairedStartAndSources: started_at, the start generated from it, and
+// the source set are commutative fields alteredFields deliberately skips, and exactly what an
+// operator re-folds to repair once corrupted by hand — so changedFields must name them.
+func TestRefoldRefReportsARepairedStartAndSources(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	want := appendStartedAndCompleted(ctx, t, s, tn)
+
+	_, err := s.Pool().Exec(ctx, `
+		UPDATE change SET started_at = started_at - interval '1 hour', sources = ARRAY['bogus']
+		WHERE tenant = $1 AND ref = 'ci/d1'`, tn)
+	require.NoError(t, err)
+
+	got, err := s.RefoldRef(ctx, tn, core.RefFromRow("ci/d1"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"sources", "start", "started_at"}, got.Altered)
+	assert.Equal(t, want, oneChange(ctx, t, s, tn, "ci/d1"))
+}
