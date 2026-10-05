@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.0](https://github.com/horopter-dev/horopter/compare/v0.3.0...v0.4.0) (2026-10-05)
+
+
+### Features
+
+* **ingress:** accept Flux notifications at /v1/events/flux ([e11a206](https://github.com/horopter-dev/horopter/commit/e11a2068f347d5a8ecf286c4be974cbd4d48374f))
+* **ingress:** accept Flux notifications at /v1/events/flux ([936104f](https://github.com/horopter-dev/horopter/commit/936104f9c2a3849dc4c23d102dad9b00db739cfa))
+* **ingress:** map Flux events onto Horopter events ([f449d03](https://github.com/horopter-dev/horopter/commit/f449d03c1c929a2f71601b55548f9bd99620419c))
+
+
+### Bug Fixes
+
+* **ingress:** keep Flux keys apart per locus and record reverts ([64efd14](https://github.com/horopter-dev/horopter/commit/64efd146b183895a4dc3b3a3a9e5cb415649ee74))
+
 ## [0.3.0](https://github.com/horopter-dev/horopter/compare/v0.2.0...v0.3.0) (2026-10-05)
 
 
