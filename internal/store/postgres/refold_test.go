@@ -39,7 +39,7 @@ func TestRefoldRefFoldsACorrelatedRefFromItsLog(t *testing.T) {
 
 	ref := core.RefFromRow("ci/d1")
 	before := oneChange(ctx, t, s, tn, ref.String())
-	require.NoError(t, s.RefoldRef(ctx, tn, ref))
+	require.NoError(t, refoldErr(s.RefoldRef(ctx, tn, ref)))
 	assert.Equal(t, before, oneChange(ctx, t, s, tn, ref.String()),
 		"re-folding a ref nothing has disturbed must not change it")
 }
@@ -84,7 +84,7 @@ func TestRefoldRefReproducesAttributeMergeAtAContestedKey(t *testing.T) {
 
 	// RefoldRef on an already-converged ref must reproduce it exactly, the same invariant
 	// TestRefoldRefFoldsACorrelatedRefFromItsLog pins for the ordinary, in-order case.
-	require.NoError(t, s.RefoldRef(ctx, tn, ref))
+	require.NoError(t, refoldErr(s.RefoldRef(ctx, tn, ref)))
 	assert.Equal(t, converged, oneChange(ctx, t, s, tn, ref.String()),
 		"re-folding an already-converged ref must not change it")
 }
@@ -112,7 +112,7 @@ func TestRefoldRefIgnoresAPointEventInAnotherLocus(t *testing.T) {
 	require.NoError(t, err)
 
 	ref := core.RefFromRow("ci/" + point.ID)
-	require.NoError(t, s.RefoldRef(ctx, tn, ref))
+	require.NoError(t, refoldErr(s.RefoldRef(ctx, tn, ref)))
 
 	got := oneChange(ctx, t, s, tn, ref.String())
 	assert.Equal(t, "deployment.started", got.Type,
@@ -433,7 +433,7 @@ func TestRefoldRefFoldsAPointRefFromItsOwnEvent(t *testing.T) {
 	require.Equal(t, "ci/"+ev.ID, ref.String(), "fixture: a point's ref is locus/own-id")
 
 	before := oneChange(ctx, t, s, tn, ref.String())
-	require.NoError(t, s.RefoldRef(ctx, tn, ref))
+	require.NoError(t, refoldErr(s.RefoldRef(ctx, tn, ref)))
 	after := oneChange(ctx, t, s, tn, ref.String())
 
 	assert.Equal(t, before, after,
@@ -442,20 +442,19 @@ func TestRefoldRefFoldsAPointRefFromItsOwnEvent(t *testing.T) {
 	assert.Equal(t, core.StatusOccurred, after.Status)
 }
 
-// TestRefoldRefOnAnUnknownRefWritesNothing pins that a ref with no events is a no-op
-// rather than an error or an empty row. Under the decided mechanisms an events count of
-// zero means exactly one thing — the ref has never existed — so there is nothing for the
-// store to decide and nothing for it to write.
+// TestRefoldRefOnAnUnknownRefWritesNothing pins that a ref with no events is reported as not
+// found and writes nothing. Under the decided mechanisms an events count of zero means exactly
+// one thing — the ref has never existed — so there is nothing for the store to write.
 //
-// The real catcher is the require.NoError on RefoldRef, not the assert.Empty below it: if
-// refoldRef dropped its events == 0 branch and called upsertChange unconditionally on a
-// zero-value foldedRef.change, the write would fail the tenant foreign key, and that
-// failure would surface at the require.NoError. Do not simplify that call away.
+// require.ErrorIs is the real catcher: if refoldRef dropped its events == 0 branch and called
+// upsertChange on a zero-value change, the write would fail the tenant foreign key, which is
+// not ErrRefNotFound.
 func TestRefoldRefOnAnUnknownRefWritesNothing(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 
 	ref := core.RefFromRow("ci/never-existed")
-	require.NoError(t, s.RefoldRef(ctx, tn, ref))
+	_, err := s.RefoldRef(ctx, tn, ref)
+	require.ErrorIs(t, err, postgres.ErrRefNotFound)
 
 	q := changeQuery(t, tn, time.Time{}, time.Time{}, 0, nil)
 	q.Ref = ref.String()
@@ -494,7 +493,7 @@ func TestRefoldRefReadsOnlyItsOwnRef(t *testing.T) {
 	}
 
 	ref := core.RefFromRow("ci/d1")
-	require.NoError(t, s.RefoldRef(ctx, tn, ref))
+	require.NoError(t, refoldErr(s.RefoldRef(ctx, tn, ref)))
 
 	got := oneChange(ctx, t, s, tn, ref.String())
 	assert.Equal(t, target.ID, got.LastEventID,
@@ -736,7 +735,9 @@ func TestRefoldRefDeletesAChangeWhoseEventsAreGone(t *testing.T) {
 	_, err = s.Pool().Exec(ctx, `DELETE FROM event WHERE tenant = $1`, tn)
 	require.NoError(t, err)
 
-	require.NoError(t, s.RefoldRef(ctx, tn, core.RefFromRow("ci/d1")))
+	_, err = s.RefoldRef(ctx, tn, core.RefFromRow("ci/d1"))
+	require.ErrorIs(t, err, postgres.ErrRefNotFound,
+		"no events is not-found even when an orphaned row was removed")
 
 	q := changeQuery(t, tn, time.Time{}, time.Time{}, 0, nil)
 	q.Ref = "ci/d1"
@@ -822,4 +823,119 @@ func refoldCounts(t *testing.T, reader *sdkmetric.ManualReader) map[string]int64
 		}
 	}
 	return out
+}
+
+// refoldErr drops RefoldRef's result, for the tests that only care whether it failed.
+func refoldErr(_ postgres.RefoldResult, err error) error { return err }
+
+// appendStartedAndCompleted appends a started and a completed event to ci/d1 and returns
+// the change the live fold wrote.
+func appendStartedAndCompleted(
+	ctx context.Context, t *testing.T, s *postgres.Store, tn string,
+) core.Change {
+	t.Helper()
+	at := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+	for _, e := range []struct {
+		suffix, idem, typ string
+		off               time.Duration
+	}{
+		{"started", "k1", "deployment.started", 0},
+		{"completed", "k2", "deployment.completed", 20 * time.Minute},
+	} {
+		ev := mkEvent(tn, eventID(t, e.suffix), e.idem, "d1", e.typ, at.Add(e.off))
+		_, _, err := s.AppendEvent(ctx, ev)
+		require.NoError(t, err)
+	}
+	return oneChange(ctx, t, s, tn, "ci/d1")
+}
+
+// TestRefoldRefReportsTheFieldsItRepaired corrupts one non-commutative field and one
+// commutative one. alteredFields would report only the first: it exists to explain an
+// ordering flip, where the commutative fields cannot differ. A hand-corrupted
+// first_seen_at is exactly what an operator re-folds to repair.
+func TestRefoldRefReportsTheFieldsItRepaired(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	want := appendStartedAndCompleted(ctx, t, s, tn)
+
+	_, err := s.Pool().Exec(ctx, `
+		UPDATE change SET title = 'wrong', first_seen_at = first_seen_at - interval '1 hour'
+		WHERE tenant = $1 AND ref = 'ci/d1'`, tn)
+	require.NoError(t, err)
+
+	got, err := s.RefoldRef(ctx, tn, core.RefFromRow("ci/d1"))
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.Events)
+	assert.Equal(t, []string{"first_seen_at", "title"}, got.Altered)
+	assert.Equal(t, want, oneChange(ctx, t, s, tn, "ci/d1"), "the change is repaired")
+}
+
+func TestRefoldRefOfACorrectChangeAltersNothing(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	appendStartedAndCompleted(ctx, t, s, tn)
+
+	for range 2 {
+		got, err := s.RefoldRef(ctx, tn, core.RefFromRow("ci/d1"))
+		require.NoError(t, err)
+		assert.Equal(t, 2, got.Events)
+		assert.Equal(t, []string{}, got.Altered, "empty, and not nil: it renders as []")
+	}
+}
+
+// TestRefoldRefRecreatesAMissingChange: a change row lost from the projection is rebuilt
+// from the log, and every field counts as changed, since none was there before.
+func TestRefoldRefRecreatesAMissingChange(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	want := appendStartedAndCompleted(ctx, t, s, tn)
+	_, err := s.Pool().Exec(ctx, `DELETE FROM change WHERE tenant = $1 AND ref = 'ci/d1'`, tn)
+	require.NoError(t, err)
+
+	got, err := s.RefoldRef(ctx, tn, core.RefFromRow("ci/d1"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"actor", "attributes", "end", "first_seen_at", "last_event_id", "sources",
+		"start", "started_at", "status", "subject", "title", "type",
+	}, got.Altered)
+	assert.Equal(t, want, oneChange(ctx, t, s, tn, "ci/d1"))
+}
+
+// holdRefLocks takes, in a transaction of its own, the pair an append to ref holds — the
+// tenant's lock shared, the ref's lock exclusively — until the test ends: an append caught
+// mid-flight.
+func holdRefLocks(t *testing.T, s *postgres.Store, tn, ref string) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := s.Pool().Begin(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+	_, err = tx.Exec(ctx, `
+		SELECT pg_advisory_xact_lock_shared(hashtext($1)),
+		       pg_advisory_xact_lock(hashtext($1 || '/' || $2))`, tn, ref)
+	require.NoError(t, err)
+}
+
+// TestARefoldRunsWhileAnotherRefIsBeingAppended pins "ingest keeps running": the re-fold
+// shares the tenant lock with appends, as RebuildProjection does not.
+func TestARefoldRunsWhileAnotherRefIsBeingAppended(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	appendStartedAndCompleted(ctx, t, s, tn)
+	holdRefLocks(t, s, tn, "ci/other")
+
+	start := time.Now()
+	_, err := s.RefoldRef(ctx, tn, core.RefFromRow("ci/d1"))
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), postgres.AppendLockTimeout,
+		"an append to another ref must not hold the re-fold up")
+}
+
+// TestARefoldWaitsForAnAppendToTheSameRef pins the per-ref lock: without it a re-fold could
+// interleave with an append to the same ref and write a stale fold over it.
+func TestARefoldWaitsForAnAppendToTheSameRef(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	appendStartedAndCompleted(ctx, t, s, tn)
+	holdRefLocks(t, s, tn, "ci/d1")
+
+	start := time.Now()
+	_, err := s.RefoldRef(ctx, tn, core.RefFromRow("ci/d1"))
+	require.Error(t, err, "the re-fold must wait for the append's lock and time out")
+	assert.GreaterOrEqual(t, time.Since(start), postgres.AppendLockTimeout-200*time.Millisecond)
 }

@@ -83,12 +83,15 @@ func WithAllowLocusPrefixedRef(allow bool) Option {
 type Option func(*Server)
 
 // Routes returns the handler for every ingress endpoint. Probes are unauthenticated;
-// everything else requires a credential granting the append capability.
+// everything else requires a credential granting the append capability, or for /v1/admin/
+// routes the admin capability.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/events", s.authn.Require(auth.CapAppend)(http.HandlerFunc(s.postEvent)))
 	mux.Handle("POST /v1/events/cloudevents",
 		s.authn.Require(auth.CapAppend)(http.HandlerFunc(s.postCloudEvent)))
+	mux.Handle("POST /v1/admin/refold",
+		s.authn.Require(auth.CapAdmin)(http.HandlerFunc(s.postRefold)))
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 	// otelhttp gives every route a server span carrying the http.* semantic

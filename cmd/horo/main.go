@@ -47,6 +47,8 @@ func run(args []string, env func(string) string, stdout, stderr io.Writer, tty b
 		return runEvent(ctx, args[1:], env, stdout, stderr)
 	case "run":
 		return runRun(ctx, args[1:], env, stdout, stderr)
+	case "refold":
+		return runRefold(ctx, args[1:], env, stdout, stderr)
 	default:
 		sayf(stderr, "horo: unknown command %q\n", args[0])
 		usage(stderr)
@@ -94,7 +96,8 @@ func usage(w io.Writer) {
 	say(w, "usage: horo changes [flags]           list changes in a window\n"+
 		"       horo show [flags] <ref>         one change and its events\n"+
 		"       horo event [flags]              record one event\n"+
-		"       horo run [flags] -- <command>   record a command's start and outcome")
+		"       horo run [flags] -- <command>   record a command's start and outcome\n"+
+		"       horo refold [flags] <ref>       re-fold one change from its log")
 }
 
 // common are the flags every command takes.

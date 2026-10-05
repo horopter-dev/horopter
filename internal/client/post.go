@@ -34,27 +34,70 @@ type Appended struct {
 // Post appends ev, retrying network errors and 503 with backoff until retryUntil. retryUntil
 // bounds the whole call, every attempt included.
 func (c *Client) Post(ctx context.Context, ev NewEvent, retryUntil time.Time) (Appended, error) {
-	ctx, cancel := context.WithDeadline(ctx, retryUntil)
-	defer cancel()
 	body, err := json.Marshal(eventBody(ev))
 	if err != nil {
 		return Appended{}, fmt.Errorf("encode event: %w", err)
 	}
+	var got Appended
+	err = c.postRetrying(ctx, "/v1/events", body, &got, retryUntil)
+	return got, err
+}
+
+// postRetrying posts body to path, retrying network errors and 503 with backoff until
+// retryUntil, and decodes a 200 or 201 answer into out. retryUntil bounds the whole call,
+// every attempt included.
+func (c *Client) postRetrying(
+	ctx context.Context, path string, body []byte, out any, retryUntil time.Time,
+) error {
+	ctx, cancel := context.WithDeadline(ctx, retryUntil)
+	defer cancel()
 	backoff := 200 * time.Millisecond
 	for {
-		got, err := c.postOnce(ctx, body)
+		err := c.postOnce(ctx, path, body, out)
 		if err == nil || !retryable(err) {
-			return got, err
+			return err
 		}
 		//nolint:gosec // G404: backoff jitter spreads retries; it needs no unpredictability.
 		wait := backoff/2 + rand.N(backoff)
 		select {
 		case <-ctx.Done():
-			return Appended{}, fmt.Errorf("gave up at the deadline: %w", err)
+			return fmt.Errorf("gave up at the deadline: %w", err)
 		case <-time.After(wait):
 		}
 		backoff = min(2*backoff, 2*time.Second)
 	}
+}
+
+func (c *Client) postOnce(ctx context.Context, path string, body []byte, out any) error {
+	ctx, cancel := context.WithTimeout(ctx, attemptTimeout)
+	defer cancel()
+	u := *c.base
+	u.Path = c.base.Path + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.key)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("post %s: %w", u.Redacted(), err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		var e struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&e)
+		if e.Error == "" {
+			e.Error = strconv.Itoa(resp.StatusCode) + " " + http.StatusText(resp.StatusCode)
+		}
+		return &HTTPError{Status: resp.StatusCode, Message: e.Error}
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decode the answer from %s: %w", u.Redacted(), err)
+	}
+	return nil
 }
 
 func eventBody(ev NewEvent) map[string]any {
@@ -83,37 +126,4 @@ func retryable(err error) bool {
 		return he.Status == http.StatusServiceUnavailable
 	}
 	return true
-}
-
-func (c *Client) postOnce(ctx context.Context, body []byte) (Appended, error) {
-	ctx, cancel := context.WithTimeout(ctx, attemptTimeout)
-	defer cancel()
-	u := *c.base
-	u.Path = c.base.Path + "/v1/events"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
-	if err != nil {
-		return Appended{}, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.key)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return Appended{}, fmt.Errorf("post %s: %w", u.Redacted(), err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		var e struct {
-			Error string `json:"error"`
-		}
-		_ = json.NewDecoder(resp.Body).Decode(&e)
-		if e.Error == "" {
-			e.Error = strconv.Itoa(resp.StatusCode) + " " + http.StatusText(resp.StatusCode)
-		}
-		return Appended{}, &HTTPError{Status: resp.StatusCode, Message: e.Error}
-	}
-	var got Appended
-	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
-		return Appended{}, fmt.Errorf("decode ingress's answer: %w", err)
-	}
-	return got, nil
 }

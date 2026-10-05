@@ -155,6 +155,7 @@ Exploring reads egress with a reader key:
 there are; `--limit` caps it. Output is a table on a terminal and one JSON object per line
 otherwise; `--output table|json|jsonl` chooses. Exit codes: `0` success, `1` an error from
 egress, `2` a usage error, `3` `horo show` found no such ref.
+`horo refold` repairs one change; see [Re-folding one change](#re-folding-one-change).
 
 Install from a release archive, or, while the repository is private:
 
@@ -512,6 +513,27 @@ transaction, is held for as long as the `CREATE INDEX` that follows takes to bui
 blocking every append and read against `event` for the whole of that window. On a
 database with a large event history, size `0009`'s downtime before running it in
 production.
+
+### Re-folding one change
+
+A change is a fold of its events. If one is wrong — corrupted by hand, or folded under an older
+rule — re-fold it from its log, with ingest running:
+
+    export HOROPTER_INGRESS_URL=http://localhost:8080
+    export HOROPTER_ADMIN_KEY=<tenant_admin or superuser key>
+    horo refold ci/dep-1
+
+or `POST /v1/admin/refold` with `{"ref": "ci/dep-1"}`; a global superuser key adds
+`"tenant": "<tenant id>"`. The answer says how many events were read and which fields of the
+stored change were repaired — `[]` when it was already right:
+
+    {"ref":"ci/dep-1","events":12,"altered":["end","status"]}
+
+It takes the same locks an append takes: appends to every other ref carry on, and one to the
+same ref waits a moment. The whole-tenant rebuild below holds the tenant's lock exclusively and
+halts its ingest, so prefer this for a change you can name. A key needs the `admin` capability,
+held by `tenant_admin` and `superuser`; `horo refold` reads it from `HOROPTER_ADMIN_KEY` only,
+never from `HOROPTER_INGRESS_KEY`. A ref with no events answers `404`, and `horo refold` exits `3`.
 
 ### Rebuilding a tenant's projection
 
