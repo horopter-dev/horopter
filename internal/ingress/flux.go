@@ -1,14 +1,19 @@
 package ingress
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
 	"unicode"
 
+	"horopter.dev/horopter/internal/auth"
 	"horopter.dev/horopter/internal/core"
+	"horopter.dev/horopter/internal/logging"
 )
 
 // fluxEvent is the part of notification-controller's generic-provider payload, Flux's
@@ -164,4 +169,94 @@ func snakeCase(s string) string {
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// postFluxEvent ingests one event from notification-controller's generic provider and records
+// what decisions/2026-10-04-flux-lifecycle-mapping.md maps it to: nothing, one event, or a
+// failure's change end and point. An ignored event is answered 200, since a 4xx would make
+// notification-controller log a delivery error for every no-op it forwards.
+func (s *Server) postFluxEvent(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, MaxBodyBytes)
+	var fe fluxEvent
+	if err := json.NewDecoder(r.Body).Decode(&fe); err != nil {
+		writeBodyError(w, err, "malformed Flux event: "+err.Error()+
+			"; expected notification-controller's generic provider payload")
+		return
+	}
+	records, ignored, err := mapFluxEvent(fe)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if len(records) == 0 {
+		logging.Annotate(r.Context(), slog.String("ignored", ignored))
+		writeJSON(w, http.StatusOK, map[string]any{"recorded": 0, "ignored": ignored})
+		return
+	}
+	p, _ := auth.PrincipalFrom(r.Context())
+	recordTenant(r.Context(), p.Tenant.String())
+	events, err := s.eventsFromFlux(records, p)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if subject, ok := forbiddenSubject(p.SubjectPattern, events); ok {
+		subjectForbidden(w, p.SubjectPattern, subject)
+		return
+	}
+	annotateEvent(r.Context(), events[0])
+	s.appendFlux(w, r, events)
+}
+
+// appendFlux appends events in order and answers for all of them. A failure part-way is a
+// 503: every key is idempotent, so notification-controller's retry stores what is missing.
+func (s *Server) appendFlux(w http.ResponseWriter, r *http.Request, events []core.Event) {
+	created := 0
+	for _, ev := range events {
+		_, wasCreated, err := s.appendOne(r.Context(), ev)
+		if err != nil {
+			appendFailed(w, r, ev, err)
+			return
+		}
+		if wasCreated {
+			created++
+		}
+	}
+	status := http.StatusOK
+	if created > 0 {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, map[string]any{"recorded": len(events), "created": created})
+}
+
+// forbiddenSubject reports the first event subject the credential's pattern does not cover,
+// checked before anything is appended so a refused request stores nothing.
+func forbiddenSubject(pattern string, events []core.Event) (string, bool) {
+	for _, ev := range events {
+		if !subjectAllowed(pattern, ev.Subject) {
+			return ev.Subject, true
+		}
+	}
+	return "", false
+}
+
+func (s *Server) eventsFromFlux(records []fluxRecord, p auth.Principal) ([]core.Event, error) {
+	locus := core.LocusFromRow(p.Locus)
+	events := make([]core.Event, 0, len(records))
+	for _, rec := range records {
+		ref, err := resolveRef(locus, rec.Ref, s.allowLocusPrefixedRef)
+		if err != nil {
+			return nil, err
+		}
+		now := s.clock()
+		events = append(events, core.Event{
+			ID: core.NewULID(now, s.entropy), Tenant: p.Tenant.String(),
+			IdempotencyKey: rec.Key, SchemaVersion: core.CurrentSchemaVersion,
+			Source: p.Source, Type: rec.Type, Subject: rec.Subject, Title: rec.Title,
+			OccurredAt: rec.OccurredAt, ReceivedAt: now, CorrelationRef: ref,
+			Attributes: rec.Attributes, Origin: p.Origin, Locus: locus,
+			Lifecycle: rec.Lifecycle,
+		})
+	}
+	return events, nil
 }
