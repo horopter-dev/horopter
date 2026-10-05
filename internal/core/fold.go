@@ -147,9 +147,9 @@ func Fold(cur *Change, ev Event) Change {
 	// change always renders as something. KNOWN RESIDUAL: for a change no event ever
 	// titles, the stored fallback is the FIRST folded event's type and later events do
 	// not update it, so that case stays fold-order sensitive exactly as it was before.
-	// Removing that means not storing the fallback at all and letting renderers apply
-	// it — grafana.Render already does — which changes what the API returns and is out
-	// of scope here.
+	// Removing that means not storing the fallback at all and having every renderer
+	// apply it — none does today, since the stored title is never empty — which changes
+	// what the API returns and is out of scope here.
 	if ev.Title != "" {
 		out.Title = ev.Title
 	} else if out.Title == "" {

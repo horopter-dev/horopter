@@ -50,6 +50,9 @@ func TestNohupStillProtectsTheCommand(t *testing.T) {
 // foreground job receives a terminal's Ctrl-C, so only it may skip forwarding SIGINT; a
 // background horo that thought otherwise would never pass a kill -INT on to its command.
 func TestABackgroundJobOnATerminalIsNotInTheForeground(t *testing.T) {
+	_, err := exec.LookPath("script")
+	require.NoError(t, err, "this test needs script(1) for a pty: util-linux on Linux, "+
+		"the base system on macOS; it is not skipped, since nothing else pins inForeground")
 	self, err := os.Executable()
 	require.NoError(t, err)
 	for name, inner := range map[string]string{
