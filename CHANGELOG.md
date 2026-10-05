@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/horopter-dev/horopter/compare/v0.3.0...v0.4.0) (2026-10-05)
+
+### Features
+
+* **ingress:** `POST /v1/events/flux` takes Flux notification-controller's `generic` provider
+  payload and records one change per Git revision: `NewArtifact` starts it, and each
+  Kustomization's first success or failure at that revision ends it. A Kustomization failure is
+  also recorded as a point of its own, and HelmRelease actions are recorded as points. Anything
+  else is answered `200` with the reason it was ignored, which Flux counts as delivered. See the
+  README's "Flux" section. ([#47](https://github.com/horopter-dev/horopter/pull/47))
+
 ## [0.3.0](https://github.com/horopter-dev/horopter/compare/v0.2.0...v0.3.0) (2026-10-05)
 
 
