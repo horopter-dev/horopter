@@ -215,8 +215,15 @@ func (x *runner) closeCommand(word string, at time.Time) string {
 	return strings.Join(quoted, " ")
 }
 
+// shellSafe are the characters no shell treats specially, so a word made only of them needs no
+// quotes.
+const shellSafe = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./:@%+,=-"
+
+// shellQuote quotes s unless every character is shell-safe — an allowlist, so a tab or the
+// trailing newline a CI variable carries is quoted too. A leading = is quoted: zsh expands =cmd.
 func shellQuote(s string) string {
-	if s != "" && !strings.ContainsAny(s, " '\"\\$`!*?&;|<>(){}[]#~") {
+	unsafe := func(r rune) bool { return !strings.ContainsRune(shellSafe, r) }
+	if s != "" && !strings.HasPrefix(s, "=") && !strings.ContainsFunc(s, unsafe) {
 		return s
 	}
 	// A single quote is written '"'"': close the quote, a double-quoted ', reopen.

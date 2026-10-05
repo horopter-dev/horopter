@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -447,4 +448,20 @@ func (w *words) end() {
 		w.cur.Reset()
 		w.inWord = false
 	}
+}
+
+// TestShellQuoteSurvivesARealShell: the close command is the one way to close a change whose end
+// was lost, so every value must paste as exactly one word — a tab, or the trailing newline a CI
+// variable often carries, included.
+func TestShellQuoteSurvivesARealShell(t *testing.T) {
+	for _, s := range []string{
+		"plain", "", "acme prod", "it's", "a\tb", "trailing\n", "=cmd", "$HOME", "*", `a"b`,
+		`back\slash`, "ci/dep-1:2026",
+	} {
+		//nolint:gosec // G204: a fixed printf, with the quoted value under test.
+		out, err := exec.Command("sh", "-c", "printf %s "+shellQuote(s)).Output()
+		require.NoError(t, err, "%q", s)
+		assert.Equal(t, s, string(out), "%q quoted as %s", s, shellQuote(s))
+	}
+	assert.True(t, strings.HasPrefix(shellQuote("=cmd"), "'"), "zsh expands a leading =")
 }
