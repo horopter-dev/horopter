@@ -853,6 +853,39 @@ The envelope's own `time` supplies `occurred_at`. It is optional in CloudEvents;
 is missing, receipt time is used, since that is the earliest moment the system can attest
 to.
 
+## Flux
+
+`POST /v1/events/flux` takes Flux notification-controller's `generic` provider payload and
+records one change per Git revision, as `decisions/2026-10-04-flux-lifecycle-mapping.md` in
+`horopter-internal` lays out:
+
+| Flux event | recorded as | type | lifecycle |
+|---|---|---|---|
+| `GitRepository` `NewArtifact` | change start | `flux.artifact.new` | `started` |
+| Kustomization `ReconciliationSucceeded` | change end | `flux.kustomization.succeeded` | `completed` |
+| Kustomization, `severity: error` | change end and a point | `flux.kustomization.failed` | `failed`, `none` |
+| HelmRelease `…Succeeded` / `…Failed` | a point | `flux.helmrelease.<reason>` | `none` |
+
+The change's ref is the Git revision, e.g. `flux/refs/heads/main@sha1:…` under a `flux`
+credential. A Kustomization's later runs at the same revision repeat its key, so only its
+first outcome is folded. Anything else, including a non-Git revision, is answered
+`200 {"recorded": 0, "ignored": "<why>"}`, which notification-controller counts as delivered.
+
+A Flux `Provider` sends the key as a header from its secret:
+
+```yaml
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Provider
+metadata: { name: horopter, namespace: flux-system }
+spec:
+  type: generic
+  address: http://horopter-ingress.horopter.svc.cluster.local:8080/v1/events/flux
+  secretRef: { name: horopter-flux-producer }   # key `headers`: "Authorization: Bearer <key>"
+```
+
+An `Alert`'s event sources match a namespace exactly, so list every namespace holding a
+`GitRepository`, `Kustomization` or `HelmRelease` you want recorded.
+
 ## Type suffixes and the lifecycle field
 
 Every event asserts something about its change's lifecycle: whether a projection opens,
