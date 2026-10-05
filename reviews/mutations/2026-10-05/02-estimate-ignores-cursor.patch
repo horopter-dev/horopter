@@ -1,0 +1,19 @@
+# mutation: 02-estimate-ignores-cursor
+# guards: a later page is admitted on the size of its own leading rows, not page one's
+# package: ./internal/egress/
+# expect: none predicted; no test pages through rows whose sizes differ between the first and a later page's head
+
+diff --git a/internal/egress/server.go b/internal/egress/server.go
+index aadb197..ac1d1e0 100644
+--- a/internal/egress/server.go
++++ b/internal/egress/server.go
+@@ -441,8 +441,8 @@ func (s *Server) changesFor(
+ 	q.Ref = r.URL.Query().Get("ref")
+ 	q.Locus = r.URL.Query().Get("locus")
+ 	q.Source = r.URL.Query().Get("source")
+-	q.After = after
+ 	est, err := s.store.EstimateChanges(r.Context(), q)
++	q.After = after
+ 	if err != nil {
+ 		s.readFailed(w, r, adapter, err)
+ 		return nil, false, false

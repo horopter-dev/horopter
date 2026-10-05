@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -158,4 +160,94 @@ func TestUsageNeverPrintsTheKey(t *testing.T) {
 	assert.Equal(t, 2, code)
 	assert.Contains(t, errOut.String(), "-key")
 	assert.NotContains(t, errOut.String(), "horo_SECRET")
+}
+
+const changeB = `{"ref":"ci/dep-2","subject":"acme/prod","type":"deployment.started",` +
+	`"title":"Deploy web","status":"in_progress","start":"2026-09-14T11:00:00Z",` +
+	`"first_seen_at":"2026-09-14T11:00:00Z"}`
+
+// queryingEgress answers every changes request with no rows and records the query it was
+// sent, for the tests that pin what horo asks for rather than what it prints.
+func queryingEgress(t *testing.T) (string, *url.Values) {
+	t.Helper()
+	var got url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()
+		_, _ = w.Write([]byte(`{"changes":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, &got
+}
+
+// TestSinceSelectsTheWindowEndingNow: --since looks back from now, so its window ends now and
+// starts since earlier. Pointing it forward asks every default horo changes for the future.
+func TestSinceSelectsTheWindowEndingNow(t *testing.T) {
+	u, got := queryingEgress(t)
+	before := time.Now()
+	code, _, _ := horo(t, u, false, "changes", "--since", "2h")
+	require.Equal(t, 0, code)
+	from, err := time.Parse(time.RFC3339Nano, got.Get("from"))
+	require.NoError(t, err)
+	to, err := time.Parse(time.RFC3339Nano, got.Get("to"))
+	require.NoError(t, err)
+	assert.WithinDuration(t, before, to, 5*time.Second, "the window ends now")
+	assert.Equal(t, 2*time.Hour, to.Sub(from))
+}
+
+func TestFromAndToAreSentAsGiven(t *testing.T) {
+	u, got := queryingEgress(t)
+	code, _, _ := horo(t, u, false, "changes",
+		"--from", "2026-09-14T00:00:00Z", "--to", "2026-09-15T00:00:00Z")
+	require.Equal(t, 0, code)
+	assert.Equal(t, "2026-09-14T00:00:00Z", got.Get("from"))
+	assert.Equal(t, "2026-09-15T00:00:00Z", got.Get("to"))
+}
+
+func TestJSONOutputIsValidForSeveralRows(t *testing.T) {
+	code, out, _ := horo(t, egress(t, changeA+","+changeB, ""), false,
+		"changes", "--output", "json")
+	require.Equal(t, 0, code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &rows), out)
+	assert.Len(t, rows, 2)
+}
+
+// TestShowTableNeutralisesControlCharactersInEvents: an event's title is producer-supplied
+// too, and horo show prints it to a terminal.
+func TestShowTableNeutralisesControlCharactersInEvents(t *testing.T) {
+	ev := `{"id":"01J9","type":"t.started","title":"a\u001b]52;c;cGF3bmVk\u0007b",` +
+		`"occurred_at":"2026-09-14T10:00:00Z"}`
+	code, out, _ := horo(t, egress(t, changeA, ev), true, "show", "--utc", "ci/dep-1")
+	require.Equal(t, 0, code)
+	assert.NotContains(t, out, "\x1b")
+	assert.NotContains(t, out, "\x07")
+}
+
+// TestTableOutputNeutralisesC1AndDEL: U+009B is a one-character CSI on terminals that act on
+// 8-bit controls, and DEL is a control character too; both must be neutralised, not only the
+// C0 range below U+0020.
+func TestTableOutputNeutralisesC1AndDEL(t *testing.T) {
+	hostile := `{"ref":"ci/x","subject":"acme/prod","type":"t.started",` +
+		`"title":"a\u009b31mb\u007fc","status":"in_progress",` +
+		`"start":"2026-09-14T10:00:00Z","first_seen_at":"2026-09-14T10:00:00Z"}`
+	code, out, _ := horo(t, egress(t, hostile, ""), true, "changes", "--utc")
+	require.Equal(t, 0, code)
+	assert.NotContains(t, out, "\u009b")
+	assert.NotContains(t, out, "\u007f")
+}
+
+// TestShowWritesTheChangeThenItsEvents pins show's two machine shapes: jsonl is the change's
+// line and then one line per event, json is one object holding both.
+func TestShowWritesTheChangeThenItsEvents(t *testing.T) {
+	ev := `{"id":"01J9","type":"deployment.started","occurred_at":"2026-09-14T10:00:00Z"}`
+	code, out, _ := horo(t, egress(t, changeA, ev), false, "show", "ci/dep-1")
+	require.Equal(t, 0, code)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	require.Len(t, lines, 2, out)
+	assert.JSONEq(t, changeA, lines[0], "the first line is the change")
+	assert.JSONEq(t, ev, lines[1])
+
+	code, out, _ = horo(t, egress(t, changeA, ev), false, "show", "--output", "json", "ci/dep-1")
+	require.Equal(t, 0, code)
+	assert.JSONEq(t, `{"change":`+changeA+`,"events":[`+ev+`]}`, out)
 }

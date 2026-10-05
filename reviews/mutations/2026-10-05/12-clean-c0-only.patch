@@ -1,0 +1,18 @@
+# mutation: 12-clean-c0-only
+# guards: clean neutralises DEL and C1 controls (U+009B is a one-character CSI), not just C0
+# package: ./cmd/horo/
+# expect: none predicted; the hostile fixture uses only ESC, BEL, LF and TAB
+
+diff --git a/cmd/horo/output.go b/cmd/horo/output.go
+index aebaaa8..3d0ce3f 100644
+--- a/cmd/horo/output.go
++++ b/cmd/horo/output.go
+@@ -101,7 +101,7 @@ func writeShowTable(
+ // JSON output is left as egress sent it.
+ func clean(s string) string {
+ 	return strings.Map(func(r rune) rune {
+-		if unicode.IsControl(r) {
++		if unicode.IsControl(r) && r < 0x20 {
+ 			return '\uFFFD'
+ 		}
+ 		return r

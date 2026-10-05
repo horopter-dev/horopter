@@ -51,6 +51,8 @@ var inherited = func() map[os.Signal]bool {
 // notify is signal.Notify for those of sigs horo did not inherit as ignored. Catching an ignored
 // signal un-ignores it, and exec then gives the wrapped command the default action, ending the
 // protection nohup set up. With none left it registers nothing: Notify with no signals means all.
+// No call reaches that today: Go reports only SIGINT and SIGHUP as inherited-ignored, and every
+// call includes SIGTERM. The guard is for the call that some day passes SIGINT alone.
 func notify(c chan<- os.Signal, sigs ...os.Signal) {
 	var keep []os.Signal
 	for _, s := range sigs {

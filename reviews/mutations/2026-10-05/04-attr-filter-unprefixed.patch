@@ -1,0 +1,18 @@
+# mutation: 04-attr-filter-unprefixed
+# guards: horo changes --attr k=v sends attr.k, the parameter egress filters on
+# package: ./internal/client/ ./cmd/horo/
+# expect: none predicted; no fake egress inspects the query it was sent
+
+diff --git a/internal/client/client.go b/internal/client/client.go
+index 699a1c2..f06686c 100644
+--- a/internal/client/client.go
++++ b/internal/client/client.go
+@@ -169,7 +169,7 @@ func changeParams(q ChangeQuery) url.Values {
+ 		}
+ 	}
+ 	for k, value := range q.Attrs {
+-		v.Set("attr."+k, value)
++		v.Set(k, value)
+ 	}
+ 	return v
+ }

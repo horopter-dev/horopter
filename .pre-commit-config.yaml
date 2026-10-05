@@ -8,8 +8,12 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
+      # A unified diff's blank context line is a single space, so trimming it corrupts the
+      # mutation battery's patches; git apply then refuses them.
       - id: trailing-whitespace
+        exclude: \.patch$
       - id: end-of-file-fixer
+        exclude: \.patch$
       - id: check-yaml
       - id: check-merge-conflict
   - repo: https://github.com/compilerla/conventional-pre-commit

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/oklog/ulid/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -755,4 +756,44 @@ func TestOpenNoMigrateAppliesTheAttributeCap(t *testing.T) {
 		"deployment.started", time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)))
 
 	require.ErrorIs(t, err, core.ErrInvalidEvent)
+}
+
+// TestTwoKeylessEventsInOneTenantAreBothStored pins that an empty idempotency key is bound
+// as NULL. uq_event_idem is partial on idempotency_key IS NOT NULL, so binding "" would make
+// the second keyless event in a tenant collide with the first and come back as its duplicate:
+// a producer that sends no key would lose every event after its first, answered as success.
+func TestTwoKeylessEventsInOneTenantAreBothStored(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+
+	for _, suffix := range []string{"first", "second"} {
+		ev := mkEvent(tn, eventID(t, suffix), "", "", "config.changed", at)
+		_, created, err := s.AppendEvent(ctx, ev)
+		require.NoError(t, err)
+		assert.True(t, created, "%s keyless event must be stored, not matched as a duplicate", suffix)
+	}
+	var n int
+	require.NoError(t, s.Pool().QueryRow(ctx,
+		`SELECT count(*) FROM event WHERE tenant = $1`, tn).Scan(&n))
+	assert.Equal(t, 2, n)
+}
+
+// TestAnEventIDCollisionIsNotTakenForAConcurrentDuplicate pins isUniqueViolation's
+// constraint check. Only a violation of uq_event_idem means a concurrent retry carrying the
+// same idempotency key; any other unique violation — here the event's primary key — must
+// surface as itself. Without the check it is routed to recoverConcurrentDuplicate, which
+// looks for the new key, finds nothing, and reports a race to retry instead of the real
+// fault; and the next unique constraint added to event would be routed the same way.
+func TestAnEventIDCollisionIsNotTakenForAConcurrentDuplicate(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+	id := eventID(t, "shared")
+
+	_, _, err := s.AppendEvent(ctx, mkEvent(tn, id, "k1", "", "config.changed", at))
+	require.NoError(t, err)
+	_, _, err = s.AppendEvent(ctx, mkEvent(tn, id, "k2", "", "config.changed", at))
+
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr, "the store must surface Postgres's own violation")
+	assert.Equal(t, "event_pkey", pgErr.ConstraintName)
 }

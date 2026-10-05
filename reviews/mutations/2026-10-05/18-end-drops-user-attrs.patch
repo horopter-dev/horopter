@@ -1,0 +1,18 @@
+# mutation: 18-end-drops-user-attrs
+# guards: the end event carries the --attr values as well as the outcome's
+# package: ./cmd/horo/
+# expect: none predicted; the end-attribute tests give no --attr
+
+diff --git a/cmd/horo/run.go b/cmd/horo/run.go
+index 39163f3..2c08ffd 100644
+--- a/cmd/horo/run.go
++++ b/cmd/horo/run.go
+@@ -158,7 +158,7 @@ func (x *runner) finish(ctx context.Context, started bool, out outcome) int {
+ 			"so the outcome is not recorded either")
+ 		return out.exitCode
+ 	}
+-	attrs := x.r.attributes()
++	attrs := map[string]any{}
+ 	for k, v := range out.attrs {
+ 		attrs[k] = v
+ 	}

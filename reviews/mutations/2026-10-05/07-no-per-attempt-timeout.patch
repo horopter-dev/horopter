@@ -1,0 +1,18 @@
+# mutation: 07-no-per-attempt-timeout
+# guards: one hung attempt cannot eat the whole retry window
+# package: ./internal/client/ ./cmd/horo/
+# expect: none predicted; every silent-server test has a window shorter than attemptTimeout
+
+diff --git a/internal/client/post.go b/internal/client/post.go
+index e0f0bcf..e96198a 100644
+--- a/internal/client/post.go
++++ b/internal/client/post.go
+@@ -69,7 +69,7 @@ func (c *Client) postRetrying(
+ }
+ 
+ func (c *Client) postOnce(ctx context.Context, path string, body []byte, out any) error {
+-	ctx, cancel := context.WithTimeout(ctx, attemptTimeout)
++	ctx, cancel := context.WithCancel(ctx)
+ 	defer cancel()
+ 	u := *c.base
+ 	u.Path = c.base.Path + path

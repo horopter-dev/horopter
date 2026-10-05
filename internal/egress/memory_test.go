@@ -2,15 +2,19 @@ package egress_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"horopter.dev/horopter/internal/auth"
+	"horopter.dev/horopter/internal/core"
 	"horopter.dev/horopter/internal/egress"
 	"horopter.dev/horopter/internal/store/postgres"
 )
@@ -231,4 +235,41 @@ func TestARefusedReadOffersNoNext(t *testing.T) {
 	require.Equal(t, http.StatusUnprocessableEntity, resp.Code, resp.Body.String())
 	assert.Empty(t, resp.Header().Get("Link"))
 	assert.NotContains(t, resp.Body.String(), `"next"`)
+}
+
+// TestALaterPageIsAdmittedOnItsOwnFirstRow: each page is estimated with its own cursor, so a
+// page whose first row is too large for the pool is refused like any first page would be. An
+// estimate taken without the cursor sizes page two by page one's first row and admits it.
+func TestALaterPageIsAdmittedOnItsOwnFirstRow(t *testing.T) {
+	s, tn := openTestStore(t, 0)
+	base := time.Date(2026, 9, 14, 9, 30, 0, 0, time.UTC)
+	seed(t, s, tn, "ci/mem-small", "deployment.started", base)
+	id := core.NewULID(time.Now(), rand.Reader)
+	_, _, err := s.AppendEvent(context.Background(), core.Event{
+		ID: id, Tenant: tn, IdempotencyKey: id, SchemaVersion: core.CurrentSchemaVersion,
+		Source: "ci", Type: "deployment.started", Subject: "acme/prod",
+		Title:      strings.Repeat("x", 4000),
+		OccurredAt: base.Add(time.Minute), ReceivedAt: base.Add(time.Minute),
+		CorrelationRef: core.RefFromRow("ci/mem-large"),
+		Origin:         core.OriginProcess, Locus: core.LocusFromRow("ci"),
+	})
+	require.NoError(t, err)
+	small, err := s.EstimateChanges(context.Background(), changeQuery(t, tn,
+		time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC),
+		time.Date(2026, 9, 14, 11, 0, 0, 0, time.UTC), 1, nil))
+	require.NoError(t, err)
+	f := memoryFixture{s: s, tn: tn, key: readerKey(t, s, tn)}
+	srv := f.server(t, egress.ReadExpansionFactor*small.FirstRowBytes*3)
+
+	first := get(t, srv.Routes(), f.key, changesURL(tn)+"&limit=1")
+	require.Equal(t, http.StatusOK, first.Code, first.Body.String())
+	var body struct {
+		Next string `json:"next"`
+	}
+	require.NoError(t, json.Unmarshal(first.Body.Bytes(), &body))
+	require.NotEmpty(t, body.Next, "page one offers the next page")
+
+	second := get(t, srv.Routes(), f.key, body.Next)
+	assert.Equal(t, http.StatusUnprocessableEntity, second.Code,
+		"page two's first row is larger than the pool: %s", second.Body.String())
 }

@@ -1,0 +1,18 @@
+# mutation: 01-cursor-key-drops-subsecond
+# guards: a change cursor keeps start_at at full precision, so no row is repeated across pages
+# package: ./internal/egress/
+# expect: none predicted; every paging fixture seeds whole-second starts
+
+diff --git a/internal/egress/server.go b/internal/egress/server.go
+index aadb197..e164f53 100644
+--- a/internal/egress/server.go
++++ b/internal/egress/server.go
+@@ -485,7 +485,7 @@ func (s *Server) queryChanges(w http.ResponseWriter, r *http.Request) {
+ 	body := map[string]any{"changes": changesToJSON(changes)}
+ 	if truncated && len(changes) > 0 {
+ 		last := changes[len(changes)-1]
+-		lastKey := []string{last.Start.UTC().Format(time.RFC3339Nano), last.Ref.String()}
++		lastKey := []string{last.Start.UTC().Format(time.RFC3339), last.Ref.String()}
+ 		if err := setNext(w, r, body, lastKey); err != nil {
+ 			s.readFailed(w, r, "neutral", err)
+ 			return

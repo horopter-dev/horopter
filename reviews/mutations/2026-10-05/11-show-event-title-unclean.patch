@@ -1,0 +1,18 @@
+# mutation: 11-show-event-title-unclean
+# guards: horo show's event table neutralises control characters in an event title
+# package: ./cmd/horo/
+# expect: none predicted; the control-character test covers the changes table only
+
+diff --git a/cmd/horo/output.go b/cmd/horo/output.go
+index aebaaa8..17617b2 100644
+--- a/cmd/horo/output.go
++++ b/cmd/horo/output.go
+@@ -89,7 +89,7 @@ func writeShowTable(
+ 		}
+ 		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+ 			ev.OccurredAt.In(loc).Format(time.RFC3339), clean(ev.Type), clean(ev.Actor),
+-			clean(ev.Title), clean(ev.ID)); err != nil {
++			ev.Title, clean(ev.ID)); err != nil {
+ 			return err
+ 		}
+ 	}

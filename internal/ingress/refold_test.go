@@ -199,3 +199,18 @@ func TestAFailedRefoldStillLogsItsRef(t *testing.T) {
 	}
 	assert.True(t, found, "the 404's request line must carry the ref: %v", records())
 }
+
+// TestAFailingStoreAnswers503ForARefold: a database blip during a re-fold is transient, and
+// 503 is what tells a caller — horo refold among them — to retry. A 500 is not retried, and
+// its body no longer says the request may be.
+func TestAFailingStoreAnswers503ForARefold(t *testing.T) {
+	f := newRefoldFixture(t)
+	warm := refold(t, f.srv, f.adminKey, `{"ref":"github/d1"}`)
+	require.Equal(t, http.StatusOK, warm.Code,
+		"first call caches the credential: %s", warm.Body.String())
+	f.store.Close()
+
+	rec := refold(t, f.srv, f.adminKey, `{"ref":"github/d1"}`)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "may be retried")
+}

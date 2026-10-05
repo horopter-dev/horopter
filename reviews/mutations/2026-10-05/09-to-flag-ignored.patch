@@ -1,0 +1,21 @@
+# mutation: 09-to-flag-ignored
+# guards: horo changes --from X --to Y reads up to Y, not now
+# package: ./cmd/horo/
+# expect: none predicted; no test gives --to except alongside --since, which fails before it is parsed
+
+diff --git a/cmd/horo/main.go b/cmd/horo/main.go
+index c0bcc7c..fde5bf5 100644
+--- a/cmd/horo/main.go
++++ b/cmd/horo/main.go
+@@ -226,11 +226,6 @@ func explicitWindow(from, to string) (time.Time, time.Time, error) {
+ 		return time.Time{}, time.Time{}, fmt.Errorf("--from %q: %w", from, err)
+ 	}
+ 	end := time.Now()
+-	if to != "" {
+-		if end, err = time.Parse(time.RFC3339, to); err != nil {
+-			return time.Time{}, time.Time{}, fmt.Errorf("--to %q: %w", to, err)
+-		}
+-	}
+ 	return start, end, nil
+ }
+ 

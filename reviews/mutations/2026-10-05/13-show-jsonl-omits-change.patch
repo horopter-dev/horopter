@@ -1,0 +1,19 @@
+# mutation: 13-show-jsonl-omits-change
+# guards: horo show --output jsonl writes the change's line before its events
+# package: ./cmd/horo/
+# expect: none predicted; show is tested only as a table
+
+diff --git a/cmd/horo/output.go b/cmd/horo/output.go
+index aebaaa8..38990d6 100644
+--- a/cmd/horo/output.go
++++ b/cmd/horo/output.go
+@@ -51,9 +51,6 @@ func writeShow(
+ ) error {
+ 	switch format {
+ 	case "jsonl":
+-		if _, err := fmt.Fprintf(w, "%s\n", ch.Raw); err != nil {
+-			return err
+-		}
+ 		return writeLines(w, rawEvents(events))
+ 	case "json":
+ 		if _, err := fmt.Fprintf(w, `{"change":%s,"events":`, ch.Raw); err != nil {

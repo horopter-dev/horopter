@@ -762,3 +762,28 @@ func appendUnder(t *testing.T, s *postgres.Store, tn string, sd seeded, at time.
 	_, _, err = s.AppendEvent(context.Background(), ev)
 	require.NoError(t, err)
 }
+
+// TestChangesSharingAStartAreOrderedByRef pins the order's tiebreak. Changes sharing a start
+// are common — a deploy fanned out to several services in one second — and egress's keyset
+// paging resumes after (start_at, ref), so a read must return them in ref order. Without
+// "ref ASC", in the query and in the order a read re-sorts by, ties come back in the order
+// Postgres stores them: appended c, a, b, they come back c, a, b, and a page boundary
+// between them would skip or repeat one.
+func TestChangesSharingAStartAreOrderedByRef(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+	for _, ref := range []string{"c", "a", "b"} {
+		ev := mkEvent(tn, eventID(t, ref), "k-"+ref, ref, "deployment.started", at)
+		_, _, err := s.AppendEvent(ctx, ev)
+		require.NoError(t, err, "append %s", ref)
+	}
+
+	got, _, err := s.QueryChanges(ctx,
+		changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0, nil))
+	require.NoError(t, err)
+	refs := make([]string, len(got))
+	for i, c := range got {
+		refs[i] = c.Ref.String()
+	}
+	assert.Equal(t, []string{"ci/a", "ci/b", "ci/c"}, refs)
+}
