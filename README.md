@@ -141,7 +141,8 @@ authenticate.
 
 ## horo
 
-`horo` explores what Horopter recorded. It reads egress with a reader key:
+`horo` explores what Horopter recorded, and records changes (see [Recording](#recording)).
+Exploring reads egress with a reader key:
 
     export HOROPTER_EGRESS_URL=http://localhost:8081
     export HOROPTER_EGRESS_KEY=<reader key>
@@ -158,6 +159,37 @@ egress, `2` a usage error, `3` `horo show` found no such ref.
 Install from a release archive, or, while the repository is private:
 
     GOPRIVATE=horopter.dev go install horopter.dev/horopter/cmd/horo@latest
+
+### Recording
+
+`horo run` records a command's start and how it ended, and `horo event` records one event.
+Both post to ingress with a producer key:
+
+    export HOROPTER_INGRESS_URL=http://localhost:8080
+    export HOROPTER_INGRESS_KEY=<producer key>
+    horo run --type deployment --subject acme/prod --title "Deploy api" -- ./deploy.sh
+    horo event --type incident.resolved --subject acme/prod --title "Queue drained"
+
+`horo run` posts `<type>.started`, runs the command with its output untouched, then posts
+`<type>.completed`, `.failed` (with `exit_code`) or `.cancelled` (with `signal`), and exits with
+the command's own code — `128 + n` when a signal ended it, `127` when it could not start.
+`SIGTERM` is passed on to the command, and so is `SIGINT` unless `horo` runs in the foreground
+of a terminal: there Ctrl-C already reaches the command, and a second interrupt would cut short
+tools, such as Terraform, that shut down gracefully on the first. To stop a wrapped command from
+another shell, send `horo` `SIGTERM`. A Ctrl-C or `SIGTERM` before the command starts aborts it:
+the command is not run, and the change is recorded as cancelled.
+
+**Recording never blocks the work.** If Horopter cannot be reached, or no URL or key is set,
+`horo run` warns and runs the command anyway. It waits at most 10 seconds for the start, and if
+the start was not recorded it does not record the end either. If Horopter fails while the
+command runs, it retries the end for up to 30 seconds after the command; Ctrl-C stops that wait.
+`--strict` refuses to run the command when the start cannot be recorded, and fails when the end
+cannot.
+
+It prints both forms of the change's ref on stderr: the stored `<locus>/<ref>`, which `horo show`
+takes, and the plain ref, which `--ref` takes. If the end cannot be confirmed, `horo run` prints
+the `horo event` command that closes the change. It carries the time the command ended and the
+end's own idempotency key, so running it is safe even if the end did arrive.
 
 ## Security
 
