@@ -4,21 +4,15 @@
 # expect: none predicted; no read test uses a silent server
 
 diff --git a/internal/client/client.go b/internal/client/client.go
-index 699a1c2..b8907f9 100644
+index 2de44fc..b8907f9 100644
 --- a/internal/client/client.go
 +++ b/internal/client/client.go
-@@ -36,9 +36,13 @@ func New(baseURL, key string) (*Client, error) {
+@@ -36,7 +36,7 @@ func New(baseURL, key string) (*Client, error) {
  	if err != nil {
  		return nil, fmt.Errorf("URL %q: %w", baseURL, err)
  	}
--	return &Client{base: base, key: key, http: &http.Client{Timeout: time.Minute}}, nil
+-	return &Client{base: base, key: key, http: &http.Client{Timeout: httpTimeout}}, nil
 +	return &Client{base: base, key: key, http: &http.Client{}}, nil
  }
  
-+// httpTimeout bounds one request end to end, so a server that accepts and never answers cannot
-+// hold a read forever. A variable so a test can shorten it.
-+var httpTimeout = time.Minute
-+
- // ChangeQuery selects changes overlapping From..To. Limit caps the total across pages; zero
- // reads them all.
- type ChangeQuery struct {
+ // httpTimeout bounds one request end to end, so a server that accepts and never answers cannot
