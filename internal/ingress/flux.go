@@ -123,6 +123,13 @@ func mapHelmRelease(fe fluxEvent) ([]fluxRecord, string) {
 	}
 	chart, token := fe.Metadata["revision"], fe.Metadata["token"]
 	key := fe.objectPath() + "/" + chart + "/" + token + "/" + fe.Reason
+	// A success carries its time: a change reverted through Git returns to the same chart and
+	// values, and must be recorded again. A failure does not: helm-controller retries a failing
+	// upgrade every interval, and each retry is the same failure. Retried deliveries resend the
+	// same event, timestamp included, so both stay idempotent.
+	if strings.HasSuffix(fe.Reason, "Succeeded") {
+		key += "/" + fe.Timestamp.UTC().Format(time.RFC3339Nano)
+	}
 	rec := fe.record("flux.helmrelease."+snakeCase(fe.Reason), core.LifecycleNone, "", key)
 	rec.Attributes["chart_version"] = chart
 	rec.Attributes["values_digest"] = token
@@ -240,6 +247,9 @@ func forbiddenSubject(pattern string, events []core.Event) (string, bool) {
 	return "", false
 }
 
+// eventsFromFlux completes each record from the credential. Keys are stored under the
+// credential's locus: the store dedupes per tenant, not per locus, so a second cluster's
+// identical objects, or a native producer's key of the same shape, would otherwise collide.
 func (s *Server) eventsFromFlux(records []fluxRecord, p auth.Principal) ([]core.Event, error) {
 	locus := core.LocusFromRow(p.Locus)
 	events := make([]core.Event, 0, len(records))
@@ -250,12 +260,21 @@ func (s *Server) eventsFromFlux(records []fluxRecord, p auth.Principal) ([]core.
 		}
 		now := s.clock()
 		events = append(events, core.Event{
-			ID: core.NewULID(now, s.entropy), Tenant: p.Tenant.String(),
-			IdempotencyKey: rec.Key, SchemaVersion: core.CurrentSchemaVersion,
-			Source: p.Source, Type: rec.Type, Subject: rec.Subject, Title: rec.Title,
-			OccurredAt: rec.OccurredAt, ReceivedAt: now, CorrelationRef: ref,
-			Attributes: rec.Attributes, Origin: p.Origin, Locus: locus,
-			Lifecycle: rec.Lifecycle,
+			ID:             core.NewULID(now, s.entropy),
+			Tenant:         p.Tenant.String(),
+			IdempotencyKey: locus.String() + "/" + rec.Key,
+			SchemaVersion:  core.CurrentSchemaVersion,
+			Source:         p.Source,
+			Type:           rec.Type,
+			Subject:        rec.Subject,
+			Title:          rec.Title,
+			OccurredAt:     rec.OccurredAt,
+			ReceivedAt:     now,
+			CorrelationRef: ref,
+			Attributes:     rec.Attributes,
+			Origin:         p.Origin,
+			Locus:          locus,
+			Lifecycle:      rec.Lifecycle,
 		})
 	}
 	return events, nil

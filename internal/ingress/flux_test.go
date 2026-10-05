@@ -132,24 +132,58 @@ func TestFluxIgnores(t *testing.T) {
 }
 
 func TestFluxHelmReleaseIsAPointKeyedByChartAndValues(t *testing.T) {
-	ev := func(token string) fluxEvent {
-		return fluxEv("HelmRelease", "podinfo", "UpgradeSucceeded", "info",
+	ev := func(reason, token string, at time.Time) fluxEvent {
+		fe := fluxEv("HelmRelease", "podinfo", reason, "info",
 			map[string]string{"revision": "6.5.0", "token": token})
+		fe.Timestamp = at
+		return fe
 	}
-	got := mapOne(t, ev("d1"))
+	got := mapOne(t, ev("UpgradeSucceeded", "d1", fluxAt))
 	assert.Equal(t, "flux.helmrelease.upgrade_succeeded", got.Type)
 	assert.Equal(t, core.LifecycleNone, got.Lifecycle)
 	assert.Empty(t, got.Ref)
-	assert.Equal(t, "HelmRelease/flux-system/podinfo/6.5.0/d1/UpgradeSucceeded", got.Key)
+	assert.Equal(t,
+		"HelmRelease/flux-system/podinfo/6.5.0/d1/UpgradeSucceeded/2026-10-05T14:40:02Z", got.Key)
 	assert.Equal(t, "6.5.0", got.Attributes["chart_version"])
 	assert.Equal(t, "d1", got.Attributes["values_digest"])
-	assert.Equal(t, got.Key, mapOne(t, ev("d1")).Key, "a repeat is a duplicate")
-	assert.NotEqual(t, got.Key, mapOne(t, ev("d2")).Key, "a values change is recorded")
+	assert.Equal(t, got.Key, mapOne(t, ev("UpgradeSucceeded", "d1", fluxAt)).Key,
+		"a retried delivery resends the same event, so it is a duplicate")
+	assert.NotEqual(t, got.Key, mapOne(t, ev("UpgradeSucceeded", "d2", fluxAt)).Key,
+		"a values change is recorded")
+}
+
+// TestFluxARevertedHelmReleaseIsRecordedAgain pins the timestamp in a success's key: a change
+// reverted through Git returns to the same chart and values, and without it the second
+// UpgradeSucceeded would repeat the first one's key and never be recorded.
+func TestFluxARevertedHelmReleaseIsRecordedAgain(t *testing.T) {
+	upgrade := func(at time.Time) fluxEvent {
+		fe := fluxEv("HelmRelease", "podinfo", "UpgradeSucceeded", "info",
+			map[string]string{"revision": "6.5.0", "token": "d1"})
+		fe.Timestamp = at
+		return fe
+	}
+	assert.NotEqual(t, mapOne(t, upgrade(fluxAt)).Key,
+		mapOne(t, upgrade(fluxAt.Add(time.Hour))).Key)
+}
+
+// TestFluxARepeatedHelmReleaseFailureIsOnePoint keeps a failure's key free of the timestamp:
+// helm-controller retries a failing upgrade every interval, and each retry is the same failure.
+func TestFluxARepeatedHelmReleaseFailureIsOnePoint(t *testing.T) {
+	failed := func(at time.Time) fluxEvent {
+		fe := fluxEv("HelmRelease", "podinfo", "UpgradeFailed", "error",
+			map[string]string{"revision": "6.5.0", "token": "d1"})
+		fe.Timestamp = at
+		return fe
+	}
+	got := mapOne(t, failed(fluxAt))
+	assert.Equal(t, "HelmRelease/flux-system/podinfo/6.5.0/d1/UpgradeFailed", got.Key)
+	assert.Equal(t, got.Key, mapOne(t, failed(fluxAt.Add(time.Hour))).Key)
 }
 
 func TestFluxHelmReleaseWithoutTokenOrRevisionIsStillRecorded(t *testing.T) {
 	got := mapOne(t, fluxEv("HelmRelease", "podinfo", "UninstallSucceeded", "info", nil))
-	assert.Equal(t, "HelmRelease/flux-system/podinfo///UninstallSucceeded", got.Key)
+	assert.Equal(t, "HelmRelease/flux-system/podinfo///UninstallSucceeded/2026-10-05T14:40:02Z",
+		got.Key)
 	assert.Equal(t, "flux.helmrelease.uninstall_succeeded", got.Type)
 }
 

@@ -106,7 +106,8 @@ func TestFluxFailureStoresTheChangeEndAndAPoint(t *testing.T) {
 
 	status, _, _ := changeRow(t, f.store, tenant, "flux/"+r)
 	assert.Equal(t, "failed", status)
-	k := "Kustomization/flux-system/" + ks + "/" + r + "/HealthCheckFailed"
+	// Flux keys are stored under the credential's locus, here "flux".
+	k := "flux/Kustomization/flux-system/" + ks + "/" + r + "/HealthCheckFailed"
 	assert.Equal(t, 1, countKey(t, f.store, k))
 	assert.Equal(t, 1, countKey(t, f.store, k+"/point"))
 }
@@ -118,7 +119,8 @@ func TestFluxRetryAfterAPartialFailureStoresTheMissingEvent(t *testing.T) {
 	f := newIngressFixture(t)
 	_, key := seedCredential(t, f.store, "flux", "")
 	r, ks := uniqueRevision(t), "apps-"+uniqueToken()
-	k := "Kustomization/flux-system/" + ks + "/" + r + "/HealthCheckFailed"
+	// Flux keys are stored under the credential's locus, here "flux".
+	k := "flux/Kustomization/flux-system/" + ks + "/" + r + "/HealthCheckFailed"
 	first := post(t, f.srv, key, fmt.Sprintf(`{"type":"flux.kustomization.failed",
 		"subject":"Kustomization/flux-system/%s","occurred_at":"2026-10-05T15:00:00Z",
 		"lifecycle":"failed","correlation_ref":%q,"idempotency_key":%q}`, ks, r, k))
@@ -176,9 +178,28 @@ func TestFluxEventsCarryTheCredentialsSourceAndLocus(t *testing.T) {
 	var source, locus, ref string
 	require.NoError(t, f.store.Pool().QueryRow(context.Background(),
 		`SELECT source, locus, correlation_ref FROM event WHERE idempotency_key = $1`,
-		"Kustomization/flux-system/"+ks+"/"+r+"/ReconciliationSucceeded").
+		"flux/Kustomization/flux-system/"+ks+"/"+r+"/ReconciliationSucceeded").
 		Scan(&source, &locus, &ref))
 	assert.Equal(t, credentialSource, source)
 	assert.Equal(t, "flux", locus)
 	assert.Equal(t, "flux/"+r, ref)
+}
+
+// TestANativeEventCannotPreemptAFluxKey pins the locus prefix on Flux keys. Keys are unique per
+// tenant, not per locus, so without it a native producer in the tenant posting the bare
+// Flux-shaped key, or a second cluster's identical objects, would make the Flux event a
+// duplicate that is never folded.
+func TestANativeEventCannotPreemptAFluxKey(t *testing.T) {
+	f := newIngressFixture(t)
+	_, key := seedCredential(t, f.store, "flux", "")
+	r, ks := uniqueRevision(t), "apps-"+uniqueToken()
+	bare := "Kustomization/flux-system/" + ks + "/" + r + "/ReconciliationSucceeded"
+	native := post(t, f.srv, key, fmt.Sprintf(`{"type":"t","subject":"s",
+		"occurred_at":"2026-10-05T15:00:00Z","idempotency_key":%q}`, bare))
+	require.Equal(t, http.StatusCreated, native.Code, native.Body.String())
+
+	rec := postFlux(t, f.srv, key, fluxBody("Kustomization", ks, "ReconciliationSucceeded",
+		"info", r, time.Date(2026, 10, 5, 15, 0, 0, 0, time.UTC)))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Equal(t, fluxResponse{Recorded: 1, Created: 1}, decodeFlux(t, rec))
 }
