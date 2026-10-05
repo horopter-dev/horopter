@@ -28,6 +28,26 @@ tasks:
       HOROPTER_TEST_DSN: postgres://horopter:horopter@localhost:5432/horopter
     cmds:
       - go test -race -count=1 {{.CLI_ARGS | default "./..."}}
+  mutation-battery:
+    desc: Apply each recorded mutation and check a test catches it
+    summary: >-
+      Runs hack/mutation-battery.sh over every directory in reviews/mutations, against the local
+      Postgres. Each mutation is applied, its package tested and reverted; the run fails if any
+      survives or no longer applies. It refuses a dirty working tree. Pass a directory and a
+      name filter to narrow it: `task mutation-battery -- reviews/mutations/2026-10-05 21-`.
+    preconditions:
+      - sh: 'docker compose exec -T db pg_isready -U horopter'
+        msg: 'the database is not reachable; start it with `task db:up` and retry'
+    env:
+      HOROPTER_TEST_DSN: postgres://horopter:horopter@localhost:5432/horopter
+    cmds:
+      - |
+        set -euo pipefail
+        if [ -n "{{.CLI_ARGS}}" ]; then
+          hack/mutation-battery.sh {{.CLI_ARGS}}
+        else
+          for d in reviews/mutations/*/; do hack/mutation-battery.sh "$d"; done
+        fi
   lint:
     desc: Run golangci-lint
     summary: >-
