@@ -1,0 +1,18 @@
+# mutation: 04-revisionless-failure-recorded
+# guards: a failure with no revision is ignored
+# package: ./internal/ingress/
+# expect: TestFluxIgnoresARevisionlessFailure
+
+diff --git a/internal/ingress/flux.go b/internal/ingress/flux.go
+index 7d92210..efc996f 100644
+--- a/internal/ingress/flux.go
++++ b/internal/ingress/flux.go
+@@ -99,7 +99,7 @@ func mapKustomization(fe fluxEvent) ([]fluxRecord, string) {
+ 	key := fe.objectPath() + "/" + rev + "/" + fe.Reason
+ 	const failed = "flux.kustomization.failed"
+ 	switch {
+-	case fe.Severity == fluxSeverityError && rev == "":
++	case false:
+ 		return nil, "a Kustomization failure with no revision is not recorded"
+ 	case fe.Severity == fluxSeverityError:
+ 		point := fe.record(failed, core.LifecycleNone, "", key+"/point")

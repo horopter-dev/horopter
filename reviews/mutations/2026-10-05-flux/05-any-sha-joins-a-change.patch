@@ -1,0 +1,18 @@
+# mutation: 05-any-sha-joins-a-change
+# guards: only a Git SHA-1 revision joins a change
+# package: ./internal/ingress/
+# expect: TestFluxIgnores
+
+diff --git a/internal/ingress/flux.go b/internal/ingress/flux.go
+index 7d92210..5c622bb 100644
+--- a/internal/ingress/flux.go
++++ b/internal/ingress/flux.go
+@@ -54,7 +54,7 @@ const maxFluxTitle = 200
+ // gitRevision matches a Git SHA-1 revision as Flux reports it, e.g.
+ // refs/heads/main@sha1:<40 hex>. Only these join a change: an OCI source's latest@sha256:…
+ // needs the mapping record's collision check first.
+-var gitRevision = regexp.MustCompile(`@sha1:[0-9a-f]{40}$`)
++var gitRevision = regexp.MustCompile(`@sha`)
+ 
+ // mapFluxEvent applies decisions/2026-10-04-flux-lifecycle-mapping.md to one Flux event. It
+ // returns the events to record, or why none are, or an error for an event too incomplete to

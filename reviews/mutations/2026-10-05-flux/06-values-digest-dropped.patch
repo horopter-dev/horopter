@@ -1,0 +1,18 @@
+# mutation: 06-values-digest-dropped
+# guards: a values change is a new HelmRelease key
+# package: ./internal/ingress/
+# expect: TestFluxHelmReleaseIsAPointKeyedByChartAndValues
+
+diff --git a/internal/ingress/flux.go b/internal/ingress/flux.go
+index 7d92210..7032ac8 100644
+--- a/internal/ingress/flux.go
++++ b/internal/ingress/flux.go
+@@ -122,7 +122,7 @@ func mapHelmRelease(fe fluxEvent) ([]fluxRecord, string) {
+ 		return nil, fmt.Sprintf("HelmRelease reason %s is not recorded", fe.Reason)
+ 	}
+ 	chart, token := fe.Metadata["revision"], fe.Metadata["token"]
+-	key := fe.objectPath() + "/" + chart + "/" + token + "/" + fe.Reason
++	key := fe.objectPath() + "/" + chart + "/" + fe.Reason
+ 	rec := fe.record("flux.helmrelease."+snakeCase(fe.Reason), core.LifecycleNone, "", key)
+ 	rec.Attributes["chart_version"] = chart
+ 	rec.Attributes["values_digest"] = token
