@@ -150,6 +150,12 @@ The type matters beyond tidiness — it determines the next version number. `fix
 selects a patch bump, `feat:` a minor, and a `!` or a `BREAKING CHANGE:` footer a
 major (a minor while the project is pre-1.0). Choose it deliberately.
 
+Releases are cut by merging the release pull request. On every push to `main`,
+Release Please keeps one pull request open that bumps the version by those rules and
+adds the changes to `CHANGELOG.md`. Merging it tags the release, and the release
+workflow builds and publishes it. Nobody picks a version number or pushes a tag by
+hand.
+
 Keep the subject in the imperative mood and under 72 characters, and keep one
 logical change per commit.
 

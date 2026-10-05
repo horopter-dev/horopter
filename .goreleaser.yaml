@@ -138,6 +138,13 @@ changelog:
   use: github
 
 release:
+  # Release Please creates the release as a draft carrying its changelog, and pushes the tag
+  # that runs this (.github/workflows/release-please.yaml). GoReleaser reuses that draft and
+  # publishes it in one EditRelease call by setting draft to false, rather than creating a
+  # second release; a separate un-draft step published the wrong one in yo61/go-udap when two
+  # drafts coexisted.
+  draft: false
+  use_existing_draft: true
   # Any tag containing a hyphen (v0.1.0-dev.1, say) is a semver prerelease, so it publishes
   # as a GitHub prerelease and never becomes "Latest" — the whole point of the dev-tag scheme.
   prerelease: auto
