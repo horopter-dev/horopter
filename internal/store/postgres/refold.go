@@ -3,8 +3,10 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -181,34 +183,55 @@ func refoldRef(
 	return folded, nil
 }
 
+// RefoldResult is what a re-fold did: how many events it read from the log for the ref, and
+// which fields of the stored change it changed, sorted.
+type RefoldResult struct {
+	Events  int
+	Altered []string
+}
+
+// ErrRefNotFound reports a ref the log holds no events for.
+var ErrRefNotFound = errors.New("ref has no events")
+
 // RefoldRef recomputes one ref's change from the log in its own transaction, taking the
-// same locks an append takes so it cannot interleave with one or with a rebuild.
+// same locks an append takes so it cannot interleave with one or with a rebuild. Appends to
+// every other ref carry on while it runs.
+//
+// It returns ErrRefNotFound when the log holds no events for the ref. An unknown ref writes
+// nothing. A change row whose events have all gone is still removed, as a rebuild would —
+// unreachable under the mechanisms decided so far; see refoldRef.
 //
 // It is the operation decisions/2026-09-16 calls the per-ref re-fold, exposed for
-// operators and for Area B's management API. The append path calls refoldRef directly,
+// operators by ingress's POST /v1/admin/refold. The append path calls refoldRef directly,
 // inside the transaction it already holds.
-func (s *Store) RefoldRef(ctx context.Context, tenantID string, ref core.Ref) (err error) {
+func (s *Store) RefoldRef(
+	ctx context.Context, tenantID string, ref core.Ref,
+) (RefoldResult, error) {
 	ctx, span := tracer().Start(ctx, "RefoldRef")
 	defer span.End()
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin re-fold transaction: %w", err)
+		return RefoldResult{}, fmt.Errorf("begin re-fold transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Set as the transaction's first statement, for the reason AppendEvent sets it
 	// there: everything that can wait must be covered, not just the lock call.
 	if err := setLockTimeout(ctx, tx, AppendLockTimeout, "re-fold"); err != nil {
-		return err
+		return RefoldResult{}, err
 	}
 	var out appendOutcome
 	if err := lockProjectionWrite(ctx, tx, tenantID, ref.String(), &out); err != nil {
-		return err
+		return RefoldResult{}, err
+	}
+	before, found, err := lockAndLoadChange(ctx, tx, tenantID, ref.String())
+	if err != nil {
+		return RefoldResult{}, err
 	}
 	folded, err := refoldRef(ctx, tx, tenantID, ref)
 	if err != nil {
-		return err
+		return RefoldResult{}, err
 	}
 	span.SetAttributes(
 		attribute.String("horopter.tenant", tenantID),
@@ -216,9 +239,49 @@ func (s *Store) RefoldRef(ctx context.Context, tenantID string, ref core.Ref) (e
 		attribute.Int("horopter.refold.events", folded.events),
 	)
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit re-fold of %q in tenant %q: %w", ref, tenantID, err)
+		return RefoldResult{}, fmt.Errorf(
+			"commit re-fold of %q in tenant %q: %w", ref, tenantID, err)
 	}
-	return nil
+	if folded.events == 0 {
+		return RefoldResult{}, fmt.Errorf(
+			"re-fold %q in tenant %q: %w", ref, tenantID, ErrRefNotFound)
+	}
+	return RefoldResult{
+		Events: folded.events, Altered: changedFields(before, found, folded.change),
+	}, nil
+}
+
+// allChangeFields names every field changedFields compares, sorted.
+var allChangeFields = []string{
+	"actor", "attributes", "end", "first_seen_at", "last_event_id", "sources",
+	"start", "started_at", "status", "subject", "title", "type",
+}
+
+// changedFields names every field of the stored change a re-fold changed, sorted. Unlike
+// alteredFields, which explains an ordering flip and so skips the commutative fields, it
+// compares all of them: a hand-corrupted start or source set is what an operator re-folds
+// to repair. A change that was missing from the projection reports every field. Times and
+// attributes compare as alteredFields compares them, at the precision Postgres stores.
+func changedFields(before core.Change, found bool, after core.Change) []string {
+	if !found {
+		return slices.Clone(allChangeFields)
+	}
+	moved := alteredFields(before, after)
+	for _, c := range []struct {
+		name    string
+		differs bool
+	}{
+		{"start", !sameInstant(&before.Start, &after.Start)},
+		{"started_at", !sameInstant(before.StartedAt, after.StartedAt)},
+		{"first_seen_at", !sameInstant(&before.FirstSeenAt, &after.FirstSeenAt)},
+		{"sources", !slices.Equal(before.Sources, after.Sources)},
+	} {
+		if c.differs {
+			moved = append(moved, c.name)
+		}
+	}
+	slices.Sort(moved)
+	return moved
 }
 
 // alteredFields names the fields a re-fold moved. They are exactly the eight whose fold
