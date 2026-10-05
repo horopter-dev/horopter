@@ -109,3 +109,19 @@ func TestRefoldNeedsExactlyOneRef(t *testing.T) {
 		assert.Contains(t, errOut, "exactly one ref")
 	}
 }
+
+// TestARouteMissingFromIngressIsNotARefNotFound: an ingress built before the route existed, or
+// a URL pointing at egress, answers the mux's own 404. Exit 3 means "the ref has no events",
+// so that must exit 1, or a script reads a misconfiguration as a missing change.
+func TestARouteMissingFromIngressIsNotARefNotFound(t *testing.T) {
+	f := &fakeRefold{status: http.StatusNotFound, answer: "404 page not found\n"}
+	code, _, errOut := runRefoldWith(t, adminEnv(f.server(t)), "ci/d1")
+	assert.Equal(t, 1, code)
+	assert.Contains(t, errOut, "404")
+}
+
+func TestAnUnknownTenantIsNotARefNotFound(t *testing.T) {
+	f := &fakeRefold{status: http.StatusNotFound, answer: `{"error":"no tenant \"acme\""}`}
+	code, _, _ := runRefoldWith(t, adminEnv(f.server(t)), "--tenant", "acme", "ci/d1")
+	assert.Equal(t, 1, code)
+}

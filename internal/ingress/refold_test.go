@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -139,6 +140,12 @@ func TestRefoldOfAnUnknownRefIsNotFound(t *testing.T) {
 	f := newRefoldFixture(t)
 	rec := refold(t, f.srv, f.adminKey, `{"ref":"github/never-existed"}`)
 	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	var answer struct {
+		Error string `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &answer))
+	assert.True(t, strings.HasPrefix(answer.Error, "no events for ref"),
+		"horo refold exits 3 only on this prefix (cmd/horo/refold.go refNotFound): %q", answer.Error)
 }
 
 func TestRefoldLogsTheRefAndWhatItAltered(t *testing.T) {
@@ -175,4 +182,20 @@ func TestRefoldAnswerDecodes(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	assert.Equal(t, "github/d1", got.Ref)
 	assert.Equal(t, 1, got.Events)
+}
+
+// TestAFailedRefoldStillLogsItsRef: the request line is an admin action's audit record, so a
+// re-fold that ended in 404 must still say which change it targeted.
+func TestAFailedRefoldStillLogsItsRef(t *testing.T) {
+	f := newRefoldFixture(t)
+	records := captureLogs(t)
+
+	rec := refold(t, f.srv, f.adminKey, `{"ref":"github/never-existed"}`)
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+
+	var found bool
+	for _, r := range requestLines(records()) {
+		found = found || r["ref"] == "github/never-existed"
+	}
+	assert.True(t, found, "the 404's request line must carry the ref: %v", records())
 }

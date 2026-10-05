@@ -35,6 +35,9 @@ func (s *Server) postRefold(w http.ResponseWriter, r *http.Request) {
 			"; give the stored form, as horo show prints it")
 		return
 	}
+	// Annotated before anything can fail, so every outcome's request line names the change
+	// an admin action targeted.
+	logging.Annotate(r.Context(), slog.String("ref", ref.String()))
 	tenantID, status, msg := s.refoldTenant(r, req.Tenant)
 	if status != 0 {
 		writeError(w, status, msg)
@@ -53,7 +56,7 @@ func (s *Server) postRefold(w http.ResponseWriter, r *http.Request) {
 			"is temporarily unavailable — this request may be retried")
 		return
 	}
-	logging.Annotate(r.Context(), slog.String("ref", ref.String()),
+	logging.Annotate(r.Context(),
 		slog.Int("refold_events", res.Events), slog.Any("refold_altered", res.Altered))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ref": ref.String(), "events": res.Events, "altered": res.Altered,
