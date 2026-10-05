@@ -474,3 +474,69 @@ func TestRunHelpShowsABareType(t *testing.T) {
 	assert.Contains(t, errOut, "-type")
 	assert.NotContains(t, errOut, "deployment.started")
 }
+
+// TestStrictFailsWhenTheEndIsNotConfirmed: under --strict a pipeline insists on the record, so
+// a command that succeeded but whose end could not be confirmed must fail the step.
+func TestStrictFailsWhenTheEndIsNotConfirmed(t *testing.T) {
+	shortWindows(t)
+	f := &fakeIngress{}
+	failEnd := &endFailingIngress{inner: f}
+	code, _, errOut := record(t, failEnd.server(t, f.server(t)), "run", "--strict",
+		"--type", "deployment", "--subject", "acme/prod", "--", "true")
+	assert.Equal(t, 1, code)
+	assert.Contains(t, errOut, "horo event ", "the close command is still printed")
+}
+
+func TestRunSendsTitleActorAndAttributesOnBothPosts(t *testing.T) {
+	f := &fakeIngress{}
+	code, _, _ := runCmd(t, f.server(t), "--title", "Deploy api", "--actor", "ci-bot",
+		"--attr", "team=sre", "--", "sh", "-c", "exit 3")
+	require.Equal(t, 3, code)
+	posts := f.posted()
+	require.Len(t, posts, 2)
+	for _, p := range posts {
+		assert.Equal(t, "Deploy api", p["title"], "%s", p["type"])
+		assert.Equal(t, "ci-bot", p["actor"], "%s", p["type"])
+	}
+	assert.Equal(t, map[string]any{"team": "sre"}, posts[0]["attributes"])
+	assert.Equal(t, map[string]any{"team": "sre", "exit_code": float64(3)}, posts[1]["attributes"],
+		"the end carries --attr as well as its outcome")
+}
+
+// TestAnAbortsCancellationUsesTheEndKey: the cancellation post and the close command printed
+// when it cannot be confirmed must share one idempotency key, the end's, or pasting the close
+// command after a cancellation that was stored adds a second end.
+func TestAnAbortsCancellationUsesTheEndKey(t *testing.T) {
+	shortWindows(t)
+	keys := make(chan string, 4)
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		k, _ := body["idempotency_key"].(string)
+		keys <- k
+		<-release
+	}))
+	t.Cleanup(func() { close(release); srv.Close() })
+	done := make(chan string, 1)
+	go func() {
+		_, _, errOut := runCmd(t, srv.URL, "--", "true")
+		done <- errOut
+	}()
+	start := <-keys
+	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGINT))
+	cancel := <-keys
+	errOut := <-done
+	want := strings.TrimSuffix(start, "/start") + "/end"
+	assert.Equal(t, want, cancel)
+	assert.Contains(t, errOut, "--idempotency-key "+want, "the close command carries the same key")
+}
+
+// TestTheRecordingWindowsAreTheDocumentedOnes pins the promises the README and the decision
+// record make: a silent Horopter delays a command by at most 10 seconds, the end is retried
+// for 30, and a cancellation for 3.
+func TestTheRecordingWindowsAreTheDocumentedOnes(t *testing.T) {
+	assert.Equal(t, 10*time.Second, startWindow)
+	assert.Equal(t, 30*time.Second, endWindow)
+	assert.Equal(t, 3*time.Second, abortWindow)
+}
