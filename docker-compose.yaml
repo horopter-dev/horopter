@@ -26,11 +26,11 @@ services:
       retries: 15
 
   horopter-migrate:
-    # The tag after :- is the published version this stack runs. Bump it in the commit the
-    # tag is cut from, so the tagged tree names the images that tag builds; bumping it
-    # afterwards leaves the release pointing at the version before it. Set HOROPTER_IMAGE_TAG
-    # in the environment to override it for one run; `task up:local` bypasses both and runs
-    # images built from the working tree.
+    # The tag after :- is the published version this stack runs. Release Please bumps it in
+    # each release PR, so the tagged tree names the images that tag builds: keep the
+    # x-release-please-version marker on each image line, and do not bump the tags by hand.
+    # Set HOROPTER_IMAGE_TAG in the environment to override it for one run; `task up:local`
+    # bypasses both and runs images built from the working tree.
     image: ghcr.io/horopter-dev/horopter-migrate:${HOROPTER_IMAGE_TAG:-v0.3.0} # x-release-please-version
     environment:
       DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
