@@ -42,6 +42,8 @@ func run(args []string, env func(string) string, stdout, stderr io.Writer, tty b
 		return runChanges(ctx, args[1:], env, stdout, stderr, tty)
 	case "show":
 		return runShow(ctx, args[1:], env, stdout, stderr, tty)
+	case "event":
+		return runEvent(ctx, args[1:], env, stdout, stderr)
 	default:
 		sayf(stderr, "horo: unknown command %q\n", args[0])
 		usage(stderr)
@@ -50,8 +52,10 @@ func run(args []string, env func(string) string, stdout, stderr io.Writer, tty b
 }
 
 func usage(w io.Writer) {
-	say(w, "usage: horo changes [flags]    list changes in a window\n"+
-		"       horo show [flags] <ref>  one change and its events")
+	say(w, "usage: horo changes [flags]           list changes in a window\n"+
+		"       horo show [flags] <ref>         one change and its events\n"+
+		"       horo event [flags]              record one event\n"+
+		"       horo run [flags] -- <command>   record a command's start and outcome")
 }
 
 // common are the flags every command takes.
