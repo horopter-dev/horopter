@@ -8,9 +8,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"horopter.dev/horopter/internal/client"
@@ -34,13 +36,17 @@ func run(args []string, env func(string) string, stdout, stderr io.Writer, tty b
 		usage(stderr)
 		return exitUsage
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := interruptible()
 	defer stop()
 	switch args[0] {
 	case "changes":
 		return runChanges(ctx, args[1:], env, stdout, stderr, tty)
 	case "show":
 		return runShow(ctx, args[1:], env, stdout, stderr, tty)
+	case "event":
+		return runEvent(ctx, args[1:], env, stdout, stderr)
+	case "run":
+		return runRun(ctx, args[1:], env, stdout, stderr)
 	default:
 		sayf(stderr, "horo: unknown command %q\n", args[0])
 		usage(stderr)
@@ -48,9 +54,47 @@ func run(args []string, env func(string) string, stdout, stderr io.Writer, tty b
 	}
 }
 
+// interruptible is a context that ends when SIGINT, SIGTERM, SIGHUP or SIGQUIT arrives, with the
+// signal as its cause: a dropped SSH session or Ctrl-\ must not kill horo and leave the change
+// open. horo keeps running, so it can still record how a wrapped command ended.
+func interruptible() (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	signals := make(chan os.Signal, 1)
+	notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	go func() {
+		select {
+		case s := <-signals:
+			if sig, ok := s.(syscall.Signal); ok {
+				cancel(interrupted{sig})
+			}
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, func() {
+		signal.Stop(signals)
+		cancel(nil)
+	}
+}
+
+// interrupted is the cause of run's context ending on a signal.
+type interrupted struct{ sig syscall.Signal }
+
+func (i interrupted) Error() string { return "interrupted by " + i.sig.String() }
+
+// signalExit is the shell's exit code for the signal that ended ctx.
+func signalExit(ctx context.Context) int {
+	var i interrupted
+	if errors.As(context.Cause(ctx), &i) {
+		return 128 + int(i.sig)
+	}
+	return 128 + int(syscall.SIGINT)
+}
+
 func usage(w io.Writer) {
-	say(w, "usage: horo changes [flags]    list changes in a window\n"+
-		"       horo show [flags] <ref>  one change and its events")
+	say(w, "usage: horo changes [flags]           list changes in a window\n"+
+		"       horo show [flags] <ref>         one change and its events\n"+
+		"       horo event [flags]              record one event\n"+
+		"       horo run [flags] -- <command>   record a command's start and outcome")
 }
 
 // common are the flags every command takes.
@@ -61,7 +105,8 @@ type common struct {
 
 func (c *common) register(fs *flag.FlagSet, env func(string) string, tty bool) {
 	fs.StringVar(&c.url, "egress-url", env("HOROPTER_EGRESS_URL"), "egress base URL")
-	fs.StringVar(&c.key, "key", env("HOROPTER_EGRESS_KEY"), "a reader key")
+	c.key = env("HOROPTER_EGRESS_KEY")
+	fs.Var(secret{&c.key}, "key", "a reader key (default $HOROPTER_EGRESS_KEY)")
 	def := "jsonl"
 	if tty {
 		def = "table"
@@ -74,7 +119,31 @@ func (c *common) client() (*client.Client, error) {
 	if c.output != "table" && c.output != "json" && c.output != "jsonl" {
 		return nil, fmt.Errorf("--output %q: use table, json or jsonl", c.output)
 	}
+	if c.url == "" {
+		return nil, errors.New("no egress URL: set --egress-url or HOROPTER_EGRESS_URL")
+	}
+	if c.key == "" {
+		return nil, errors.New("no key: set --key or HOROPTER_EGRESS_KEY to a reader key")
+	}
 	return client.New(c.url, c.key)
+}
+
+const readerHint = "--key / HOROPTER_EGRESS_KEY must be a reader key"
+
+// secret is a flag whose default comes from the environment but is never shown: usage output
+// prints a flag's default, and CI keeps stderr in its logs.
+type secret struct{ v *string }
+
+func (s secret) String() string     { return "" }
+func (s secret) Set(v string) error { *s.v = v; return nil }
+
+// explain adds which key a refused request needed: the client cannot know which side it serves.
+func explain(err error, keyHint string) error {
+	var he *client.HTTPError
+	if errors.As(err, &he) && he.Status == http.StatusUnauthorized {
+		return fmt.Errorf("%w; %s", err, keyHint)
+	}
+	return err
 }
 
 // attrs collects repeated --attr key=value flags.
@@ -122,8 +191,8 @@ func runChanges(
 		say(stderr, "horo changes:", err)
 		return exitUsage
 	}
-	return report(stderr, "horo changes",
-		writeChanges(stdout, c.output, location(c.utc), cl.Changes(ctx, q)))
+	return report(stderr, "horo changes", explain(
+		writeChanges(stdout, c.output, location(c.utc), cl.Changes(ctx, q)), readerHint))
 }
 
 // window sets q's window from --since, or from --from and --to; giving both is an error rather
@@ -184,14 +253,14 @@ func runShow(
 	}
 	ch, found, err := cl.Change(ctx, ref)
 	if err != nil {
-		return report(stderr, "horo show", err)
+		return report(stderr, "horo show", explain(err, readerHint))
 	}
 	if !found {
 		sayf(stderr, "horo show: no change %q\n", ref)
 		return exitNotFound
 	}
-	return report(stderr, "horo show",
-		writeShow(stdout, c.output, location(c.utc), ch, cl.Events(ctx, ref)))
+	return report(stderr, "horo show", explain(
+		writeShow(stdout, c.output, location(c.utc), ch, cl.Events(ctx, ref)), readerHint))
 }
 
 func location(utc bool) *time.Location {

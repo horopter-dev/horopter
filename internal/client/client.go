@@ -23,17 +23,18 @@ type Client struct {
 	http *http.Client
 }
 
-// New returns a Client for the egress at baseURL, authenticating with key, a reader key.
+// New returns a Client for the Horopter service at baseURL — egress to read, ingress to post —
+// authenticating with key, which must suit that side.
 func New(baseURL, key string) (*Client, error) {
 	if baseURL == "" {
-		return nil, errors.New("no egress URL: set --egress-url or HOROPTER_EGRESS_URL")
+		return nil, errors.New("no URL given")
 	}
 	if key == "" {
-		return nil, errors.New("no key: set --key or HOROPTER_EGRESS_KEY to a reader key")
+		return nil, errors.New("no key given")
 	}
 	base, err := url.Parse(strings.TrimSuffix(baseURL, "/"))
 	if err != nil {
-		return nil, fmt.Errorf("egress URL %q: %w", baseURL, err)
+		return nil, fmt.Errorf("URL %q: %w", baseURL, err)
 	}
 	return &Client{base: base, key: key, http: &http.Client{Timeout: time.Minute}}, nil
 }
@@ -78,10 +79,9 @@ type HTTPError struct {
 
 func (e *HTTPError) Error() string {
 	if e.Status == http.StatusUnauthorized {
-		return fmt.Sprintf("egress refused the key (401): %s; HOROPTER_EGRESS_KEY must be a reader key",
-			e.Message)
+		return fmt.Sprintf("the key was refused (401): %s", e.Message)
 	}
-	return fmt.Sprintf("egress answered %d: %s", e.Status, e.Message)
+	return fmt.Sprintf("Horopter answered %d: %s", e.Status, e.Message)
 }
 
 // Changes yields every change q selects, following next until it is absent or q.Limit rows

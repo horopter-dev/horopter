@@ -145,3 +145,17 @@ func TestTableOutputNeutralisesControlCharacters(t *testing.T) {
 	require.Equal(t, 0, code)
 	assert.JSONEq(t, hostile, strings.TrimSpace(out), "jsonl is egress's object, unchanged")
 }
+
+// TestUsageNeverPrintsTheKey: flag's usage output prints a flag's default, the key comes from
+// the environment, and CI logs stderr — so a mistyped flag would publish the key.
+func TestUsageNeverPrintsTheKey(t *testing.T) {
+	env := map[string]string{
+		"HOROPTER_EGRESS_URL": "http://x", "HOROPTER_EGRESS_KEY": "horo_SECRET",
+	}
+	var out, errOut bytes.Buffer
+	code := run([]string{"changes", "--bogus"}, func(k string) string { return env[k] },
+		&out, &errOut, false)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, errOut.String(), "-key")
+	assert.NotContains(t, errOut.String(), "horo_SECRET")
+}

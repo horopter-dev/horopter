@@ -128,7 +128,7 @@ func TestNextResolvesUnderAPathPrefix(t *testing.T) {
 
 func TestAnErrorAnswerCarriesEgresssMessage(t *testing.T) {
 	for status, want := range map[int]string{
-		http.StatusUnauthorized: "a reader key",
+		http.StatusUnauthorized: "the key was refused",
 		http.StatusBadRequest:   "attr.x is not filterable",
 	} {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
