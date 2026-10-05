@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"horopter.dev/horopter/internal/client"
@@ -35,7 +36,7 @@ func run(args []string, env func(string) string, stdout, stderr io.Writer, tty b
 		usage(stderr)
 		return exitUsage
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := interruptible()
 	defer stop()
 	switch args[0] {
 	case "changes":
@@ -44,11 +45,48 @@ func run(args []string, env func(string) string, stdout, stderr io.Writer, tty b
 		return runShow(ctx, args[1:], env, stdout, stderr, tty)
 	case "event":
 		return runEvent(ctx, args[1:], env, stdout, stderr)
+	case "run":
+		return runRun(ctx, args[1:], env, stdout, stderr)
 	default:
 		sayf(stderr, "horo: unknown command %q\n", args[0])
 		usage(stderr)
 		return exitUsage
 	}
+}
+
+// interruptible is a context that ends when SIGINT or SIGTERM arrives, with the signal as its
+// cause. horo keeps running, so it can still record how a wrapped command ended.
+func interruptible() (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		select {
+		case s := <-signals:
+			if sig, ok := s.(syscall.Signal); ok {
+				cancel(interrupted{sig})
+			}
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, func() {
+		signal.Stop(signals)
+		cancel(nil)
+	}
+}
+
+// interrupted is the cause of run's context ending on a signal.
+type interrupted struct{ sig syscall.Signal }
+
+func (i interrupted) Error() string { return "interrupted by " + i.sig.String() }
+
+// signalExit is the shell's exit code for the signal that ended ctx.
+func signalExit(ctx context.Context) int {
+	var i interrupted
+	if errors.As(context.Cause(ctx), &i) {
+		return 128 + int(i.sig)
+	}
+	return 128 + int(syscall.SIGINT)
 }
 
 func usage(w io.Writer) {
