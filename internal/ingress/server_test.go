@@ -1127,9 +1127,14 @@ func TestEveryNonProbeRouteRequiresACredential(t *testing.T) {
 			"route %q is registered without the authenticator, so no credential guards "+
 				"it; the credential is the only boundary on the write side of the log",
 			r.pattern)
-		assert.Equal(t, "CapAppend", r.capability,
-			"route %q requires capability %q, not the append capability a write route "+
-				"on the write side of the log needs", r.pattern, r.capability)
+		want := "CapAppend"
+		if strings.Contains(r.pattern, " /v1/admin/") {
+			want = "CapAdmin"
+		}
+		assert.Equal(t, want, r.capability,
+			"route %q requires capability %q, not %q: a write route on the write side of "+
+				"the log needs append, and an admin route needs admin",
+			r.pattern, r.capability, want)
 	}
 	for _, want := range unauthenticatedProbeRoutes {
 		assert.Contains(t, patterns, want,
