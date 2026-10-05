@@ -1,0 +1,16 @@
+# mutation: 06-network-error-not-retried
+# guards: a refused connection (ingress restarting) is retried until the deadline
+# package: ./internal/client/ ./cmd/horo/
+# expect: none predicted; the only no-answer tests end at the deadline whether or not they retry
+
+diff --git a/internal/client/post.go b/internal/client/post.go
+index e0f0bcf..b81b93e 100644
+--- a/internal/client/post.go
++++ b/internal/client/post.go
+@@ -125,5 +125,5 @@ func retryable(err error) bool {
+ 	if errors.As(err, &he) {
+ 		return he.Status == http.StatusServiceUnavailable
+ 	}
+-	return true
++	return false
+ }

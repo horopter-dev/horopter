@@ -1,0 +1,16 @@
+# mutation: 19-foreground-any-tty
+# guards: horo shares the terminal only when its process group is the tty's foreground group
+# package: ./cmd/horo/
+# expect: none predicted; tests open only /dev/null and a missing path, which fail before the comparison
+
+diff --git a/cmd/horo/tty.go b/cmd/horo/tty.go
+index 45f1358..2157d33 100644
+--- a/cmd/horo/tty.go
++++ b/cmd/horo/tty.go
+@@ -17,5 +17,5 @@ func inForeground(ttyPath string) bool {
+ 	}
+ 	defer func() { _ = tty.Close() }()
+ 	pgrp, err := unix.IoctlGetInt(int(tty.Fd()), unix.TIOCGPGRP)
+-	return err == nil && pgrp == unix.Getpgrp()
++	return err == nil && pgrp > 0
+ }

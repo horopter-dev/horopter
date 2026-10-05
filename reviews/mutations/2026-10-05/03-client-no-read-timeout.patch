@@ -1,0 +1,18 @@
+# mutation: 03-client-no-read-timeout
+# guards: a read against an egress that accepts and never answers ends
+# package: ./internal/client/ ./cmd/horo/
+# expect: none predicted; no read test uses a silent server
+
+diff --git a/internal/client/client.go b/internal/client/client.go
+index 699a1c2..5004509 100644
+--- a/internal/client/client.go
++++ b/internal/client/client.go
+@@ -36,7 +36,7 @@ func New(baseURL, key string) (*Client, error) {
+ 	if err != nil {
+ 		return nil, fmt.Errorf("URL %q: %w", baseURL, err)
+ 	}
+-	return &Client{base: base, key: key, http: &http.Client{Timeout: time.Minute}}, nil
++	return &Client{base: base, key: key, http: &http.Client{}}, nil
+ }
+ 
+ // ChangeQuery selects changes overlapping From..To. Limit caps the total across pages; zero

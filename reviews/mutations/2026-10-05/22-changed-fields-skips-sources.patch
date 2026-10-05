@@ -1,0 +1,17 @@
+# mutation: 22-changed-fields-skips-sources
+# guards: a re-fold that repairs a corrupted source set reports sources as altered
+# package: ./internal/store/postgres/ ./internal/ingress/
+# expect: none predicted; the repair tests corrupt title and first_seen_at only
+
+diff --git a/internal/store/postgres/refold.go b/internal/store/postgres/refold.go
+index 395a9c6..3d7e223 100644
+--- a/internal/store/postgres/refold.go
++++ b/internal/store/postgres/refold.go
+@@ -274,7 +274,6 @@ func changedFields(before core.Change, found bool, after core.Change) []string {
+ 		{"start", !sameInstant(&before.Start, &after.Start)},
+ 		{"started_at", !sameInstant(before.StartedAt, after.StartedAt)},
+ 		{"first_seen_at", !sameInstant(&before.FirstSeenAt, &after.FirstSeenAt)},
+-		{"sources", !slices.Equal(before.Sources, after.Sources)},
+ 	} {
+ 		if c.differs {
+ 			moved = append(moved, c.name)

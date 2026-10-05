@@ -1,0 +1,18 @@
+# mutation: 05-retry-every-5xx
+# guards: only 503 (and no answer) is retried; a 500 fails at once
+# package: ./internal/client/ ./cmd/horo/
+# expect: none predicted; tests cover 503, 400 and 404, never 500
+
+diff --git a/internal/client/post.go b/internal/client/post.go
+index e0f0bcf..e3c3b29 100644
+--- a/internal/client/post.go
++++ b/internal/client/post.go
+@@ -123,7 +123,7 @@ func eventBody(ev NewEvent) map[string]any {
+ func retryable(err error) bool {
+ 	var he *HTTPError
+ 	if errors.As(err, &he) {
+-		return he.Status == http.StatusServiceUnavailable
++		return he.Status >= http.StatusInternalServerError
+ 	}
+ 	return true
+ }

@@ -1,0 +1,18 @@
+# mutation: 23-refold-store-error-500
+# guards: a store failure during a re-fold answers 503, the one status horo refold retries
+# package: ./internal/ingress/
+# expect: none predicted; no ingress test makes the store fail during a re-fold
+
+diff --git a/internal/ingress/refold.go b/internal/ingress/refold.go
+index f8cbbbc..b0b6fa5 100644
+--- a/internal/ingress/refold.go
++++ b/internal/ingress/refold.go
+@@ -52,7 +52,7 @@ func (s *Server) postRefold(w http.ResponseWriter, r *http.Request) {
+ 	if err != nil {
+ 		slog.ErrorContext(r.Context(), "re-fold failed", "error", err,
+ 			"tenant", tenantID, "ref", ref.String())
+-		writeError(w, http.StatusServiceUnavailable, "could not re-fold the change; the store "+
++		writeError(w, http.StatusInternalServerError, "could not re-fold the change; the store "+
+ 			"is temporarily unavailable — this request may be retried")
+ 		return
+ 	}

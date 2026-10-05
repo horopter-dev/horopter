@@ -1,0 +1,17 @@
+# mutation: 10-json-array-no-separator
+# guards: horo --output json writes a valid array for two or more rows
+# package: ./cmd/horo/
+# expect: none predicted; the json tests have one row or none
+
+diff --git a/cmd/horo/output.go b/cmd/horo/output.go
+index aebaaa8..c3bada0 100644
+--- a/cmd/horo/output.go
++++ b/cmd/horo/output.go
+@@ -162,7 +162,6 @@ func writeArray(w io.Writer, rows iter.Seq2[json.RawMessage, error]) error {
+ 		if _, err := fmt.Fprintf(w, "%s%s", sep, raw); err != nil {
+ 			return err
+ 		}
+-		sep = ","
+ 	}
+ 	_, err := io.WriteString(w, "]\n")
+ 	return err

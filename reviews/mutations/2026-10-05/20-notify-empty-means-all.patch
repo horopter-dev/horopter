@@ -1,0 +1,20 @@
+# mutation: 20-notify-empty-means-all
+# guards: with every requested signal inherited as ignored, notify registers nothing (Notify with none means all)
+# package: ./cmd/horo/
+# expect: none predicted; the nohup test leaves SIGTERM and SIGINT catchable, so keep is never empty
+
+diff --git a/cmd/horo/child.go b/cmd/horo/child.go
+index 05031e5..b516714 100644
+--- a/cmd/horo/child.go
++++ b/cmd/horo/child.go
+@@ -58,9 +58,7 @@ func notify(c chan<- os.Signal, sigs ...os.Signal) {
+ 			keep = append(keep, s)
+ 		}
+ 	}
+-	if len(keep) > 0 {
+-		signal.Notify(c, keep...)
+-	}
++	signal.Notify(c, keep...)
+ }
+ 
+ // runChild runs argv with stdin, stdout and stderr passed through, forwarding the given signals

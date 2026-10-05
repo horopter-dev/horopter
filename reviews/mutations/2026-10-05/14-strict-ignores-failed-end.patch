@@ -1,0 +1,19 @@
+# mutation: 14-strict-ignores-failed-end
+# guards: under --strict an unconfirmed end exits 1, not the command's code
+# package: ./cmd/horo/
+# expect: none predicted; the only failed-end test is not --strict
+
+diff --git a/cmd/horo/run.go b/cmd/horo/run.go
+index 39163f3..ebe10ac 100644
+--- a/cmd/horo/run.go
++++ b/cmd/horo/run.go
+@@ -169,9 +169,6 @@ func (x *runner) finish(ctx context.Context, started bool, out outcome) int {
+ 	}
+ 	sayf(x.stderr, "horo: could not confirm the end was recorded (%v). If the change is still "+
+ 		"open, close it with:\n  %s\n", explain(err, producerHint), x.closeCommand(out.word, at))
+-	if x.strict {
+-		return exitError
+-	}
+ 	return out.exitCode
+ }
+ 
