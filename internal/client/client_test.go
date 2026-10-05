@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -209,4 +210,57 @@ func TestAnErrorMidSequenceEndsTheIterationWithIt(t *testing.T) {
 	require.ErrorAs(t, last, &he)
 	assert.Equal(t, http.StatusInternalServerError, he.Status)
 	assert.Equal(t, 2, calls, "the error ends the iteration")
+}
+
+// TestChangesSendsEveryFilterAsEgressExpects pins the query the client sends. Every fake in
+// this file ignores the query string, so a filter sent under the wrong name — an attribute
+// without its "attr." prefix — was silently dropped by egress and unfiltered rows came back,
+// with no test to notice.
+func TestChangesSendsEveryFilterAsEgressExpects(t *testing.T) {
+	var got url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()
+		_, _ = w.Write([]byte(`{"changes":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL, "k")
+	require.NoError(t, err)
+	from := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+	q := client.ChangeQuery{
+		From: from, To: from.Add(time.Hour), Subject: "acme/prod", Type: "deployment.started",
+		Status: "failed", Locus: "ci", Source: "github", Attrs: map[string]string{"env": "prod"},
+	}
+	for _, err := range c.Changes(context.Background(), q) {
+		require.NoError(t, err)
+	}
+	assert.Equal(t, url.Values{
+		"from": {"2026-10-05T09:00:00Z"}, "to": {"2026-10-05T10:00:00Z"},
+		"subject": {"acme/prod"}, "type": {"deployment.started"}, "status": {"failed"},
+		"locus": {"ci"}, "source": {"github"}, "attr.env": {"prod"},
+	}, got)
+}
+
+// TestAReadAgainstASilentEgressEnds: a server that accepts the connection and never answers
+// must not hold a read for ever — in CI, a hung horo changes holds the job until its own
+// timeout.
+func TestAReadAgainstASilentEgressEnds(t *testing.T) {
+	client.SetHTTPTimeout(t, 200*time.Millisecond)
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-release
+	}))
+	t.Cleanup(func() { close(release); srv.Close() })
+	c, err := client.New(srv.URL, "k")
+	require.NoError(t, err)
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := c.Change(context.Background(), "ci/d1")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		assert.Error(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("a read against a silent egress must end")
+	}
 }

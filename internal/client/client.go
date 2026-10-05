@@ -36,8 +36,12 @@ func New(baseURL, key string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("URL %q: %w", baseURL, err)
 	}
-	return &Client{base: base, key: key, http: &http.Client{Timeout: time.Minute}}, nil
+	return &Client{base: base, key: key, http: &http.Client{Timeout: httpTimeout}}, nil
 }
+
+// httpTimeout bounds one request end to end, so a server that accepts and never answers cannot
+// hold a read forever. A variable so a test can shorten it.
+var httpTimeout = time.Minute
 
 // ChangeQuery selects changes overlapping From..To. Limit caps the total across pages; zero
 // reads them all.

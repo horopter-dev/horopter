@@ -3,9 +3,11 @@ package client_test
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -105,4 +107,68 @@ func TestPostNeverSendsSource(t *testing.T) {
 	assert.NotContains(t, (*bodies)[0], "source")
 	assert.Equal(t, "started", (*bodies)[0]["lifecycle"])
 	assert.Equal(t, "2026-10-05T09:00:00Z", (*bodies)[0]["occurred_at"])
+}
+
+// TestPostDoesNotRetryA500: only a 503 means "retry later". A 500 retried for the whole window
+// holds a deploy for 30 seconds before reporting an error it already had.
+func TestPostDoesNotRetryA500(t *testing.T) {
+	srv, bodies := ingress(t, http.StatusInternalServerError)
+	c, err := client.New(srv.URL, "k")
+	require.NoError(t, err)
+	_, err = c.Post(context.Background(), event(), time.Now().Add(5*time.Second))
+	var he *client.HTTPError
+	require.ErrorAs(t, err, &he)
+	assert.Equal(t, http.StatusInternalServerError, he.Status)
+	assert.Len(t, *bodies, 1)
+}
+
+// TestPostRetriesARefusedConnection: during an ingress restart the port refuses connections
+// for a moment. That is the case retries exist for; giving up at once loses horo run's start
+// or end although the window had time left.
+func TestPostRetriesARefusedConnection(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := l.Addr().String()
+	require.NoError(t, l.Close())
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"01J9","ref":"ci/r","correlation_ref":"r","created":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		l2, err := net.Listen("tcp", addr)
+		if err != nil {
+			return
+		}
+		srv.Listener = l2
+		srv.Start()
+	}()
+	c, err := client.New("http://"+addr, "k")
+	require.NoError(t, err)
+	got, err := c.Post(context.Background(), event(), time.Now().Add(5*time.Second))
+	require.NoError(t, err, "a refused connection must be retried within the window")
+	assert.True(t, got.Created)
+}
+
+// TestPostRetriesAfterAHungAttempt: each attempt has its own timeout, so one hung attempt
+// costs that much of the window, not all of it.
+func TestPostRetriesAfterAHungAttempt(t *testing.T) {
+	client.SetAttemptTimeout(t, 200*time.Millisecond)
+	var calls atomic.Int32
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			<-release
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"01J9","ref":"ci/r","correlation_ref":"r","created":true}`))
+	}))
+	t.Cleanup(func() { close(release); srv.Close() })
+	c, err := client.New(srv.URL, "k")
+	require.NoError(t, err)
+	_, err = c.Post(context.Background(), event(), time.Now().Add(3*time.Second))
+	require.NoError(t, err, "the second attempt must answer")
+	assert.EqualValues(t, 2, calls.Load())
 }

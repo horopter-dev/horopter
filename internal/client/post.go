@@ -13,8 +13,8 @@ import (
 )
 
 // attemptTimeout caps one request, so a server that never answers costs at most this much of
-// the caller's deadline before the next attempt.
-const attemptTimeout = 5 * time.Second
+// the caller's deadline before the next attempt. A variable so a test can shorten it.
+var attemptTimeout = 5 * time.Second
 
 // NewEvent is one event to append. It never carries a source: ingress takes that from the key.
 type NewEvent struct {
