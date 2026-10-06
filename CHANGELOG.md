@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/horopter-dev/horopter/compare/v0.5.0...v0.5.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **egress:** refuse subject patterns too costly for Postgres to compile ([#58](https://github.com/horopter-dev/horopter/issues/58)) ([b83d34c](https://github.com/horopter-dev/horopter/commit/b83d34cd5bf4c77f0fb539613da30ec87d2dc21f))
+
 ## [0.5.0](https://github.com/horopter-dev/horopter/compare/v0.4.1...v0.5.0) (2026-10-06)
 
 ### Features
