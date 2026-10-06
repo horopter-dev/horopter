@@ -27,13 +27,16 @@ type ChangeKey struct {
 // unexported: NewChangeQuery is the only way to set it, so a query naming no tenant is a
 // compile error, not a struct literal that happens to select nothing.
 type ChangeQuery struct {
-	tenant  string
-	From    time.Time
-	To      time.Time
-	Subject string
-	Type    string
-	Status  string
-	Locus   string
+	tenant string
+	From   time.Time
+	To     time.Time
+	// Subjects matches a change when any subject in its scope matches any of the patterns: a
+	// subject first seen no later than the change's end, or any while it is open
+	// (core.Change.SubjectFirstSeen). The zero value is no filter.
+	Subjects core.SubjectPatterns
+	Type     string
+	Status   string
+	Locus    string
 	// Source filters for one system among a change's Sources: a change HAS several,
 	// a caller FILTERS for one. Matches when Source is any member of the set.
 	Source string
@@ -494,9 +497,11 @@ func (s *Store) queryChangesWithinBytes(
 // bound parameters. Sorting the allowlist also makes the generated SQL deterministic, which
 // Go's map iteration order is not.
 func appendChangeFilters(sb *strings.Builder, args []any, q ChangeQuery) []any {
-	if q.Subject != "" {
-		args = append(args, q.Subject)
-		fmt.Fprintf(sb, " AND subject = $%d", len(args))
+	if !q.Subjects.IsZero() {
+		args = append(args, q.Subjects.Regexp())
+		fmt.Fprintf(sb, ` AND EXISTS (SELECT 1 FROM jsonb_each_text(subject_first_seen) s
+			WHERE s.key ~ $%d AND (end_at IS NULL
+			OR s.value::bigint <= (extract(epoch FROM end_at) * 1000000)::bigint))`, len(args))
 	}
 	if q.Type != "" {
 		args = append(args, q.Type)

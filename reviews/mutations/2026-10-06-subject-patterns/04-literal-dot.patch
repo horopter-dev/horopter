@@ -1,0 +1,18 @@
+# mutation: 04-literal-dot
+# guards: a . in a pattern is a literal dot
+# package: ./internal/core/
+# expect: TestSubjectPatternsMatch
+
+diff --git a/internal/core/subjectpattern.go b/internal/core/subjectpattern.go
+index 8f73ead..1b3f466 100644
+--- a/internal/core/subjectpattern.go
++++ b/internal/core/subjectpattern.go
+@@ -204,7 +204,7 @@ func writeLiteral(b *strings.Builder, c byte) {
+ }
+ 
+ func isASCIIPunct(c byte) bool {
+-	return c < 0x80 && strings.IndexByte("\\.+*?()|[]{}^$-/#&~", c) >= 0
++	return c < 0x80 && strings.IndexByte("\\+*?()|[]{}^$-/#&~", c) >= 0
+ }
+ 
+ // checkRanges refuses a reversed range in any class of g, a pattern path.Match has already

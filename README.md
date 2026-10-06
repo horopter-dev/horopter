@@ -708,17 +708,26 @@ envelope.
 
 ## Filtering changes
 
-`GET /v1/changes` and both adapter routes take the same filters, all exact equality, all
-optional, all combining with AND:
+`GET /v1/changes` and both adapter routes take the same filters, all optional, all combining
+with AND:
 
 | parameter | matches |
 |---|---|
-| `subject` | the change's subject |
+| `subject` | a pattern matched against every subject the change touched up to its end — repeat it to OR several |
 | `type` | the change's type |
 | `status` | the change's status |
 | `locus` | the namespace the ref was issued under — the part of a stored ref before its `/` |
 | `source` | the source of a credential that reported the change — matches if it is any of them |
 | `attr.<key>` | an attribute's exact value |
+
+**`subject` is a pattern.** It uses the syntax of a credential's `--subject-pattern` (Go's
+`path.Match`: `*` within one `/`-separated segment, `?` one character, `[...]` a class, `\`
+escapes) plus `{a,b}` alternation, and matches a change if **any** subject among its events
+matches — not only the last event's. A subject first seen after the change ended does not count, so
+a later drift correction does not widen an old rollout. `subject=*/lastlight/*` finds every change
+that touched the `lastlight` namespace; `subject=*/{lastlight,logging}/*` adds `logging`. A
+malformed pattern, one that is not valid UTF-8, or one with a reversed range such as `[9-0]` is
+answered **400**. The other filters are exact.
 
 An empty value is no filter, so `?status=` and an omitted `status` mean the same thing. That
 holds for an allowlisted `attr.<key>` too. It does **not** make an unfilterable key

@@ -174,7 +174,8 @@ func runChanges(
 	since := fs.Duration("since", 24*time.Hour, "how far back from now")
 	from := fs.String("from", "", "window start, RFC 3339")
 	to := fs.String("to", "", "window end, RFC 3339")
-	fs.StringVar(&q.Subject, "subject", "", "exact subject")
+	fs.StringVar(&q.Subject, "subject", "",
+		"subject pattern: path.Match glob plus {a,b}, matching any subject the change touched")
 	fs.StringVar(&q.Type, "type", "", "exact type")
 	fs.StringVar(&q.Status, "status", "", "exact status")
 	fs.StringVar(&q.Locus, "locus", "", "exact locus")

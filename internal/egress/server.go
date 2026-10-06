@@ -435,7 +435,12 @@ func (s *Server) changesFor(
 		s.readFailed(w, r, adapter, err)
 		return nil, false, false
 	}
-	q.Subject = r.URL.Query().Get("subject")
+	subjects, err := core.ParseSubjectPatterns(r.URL.Query()["subject"])
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return nil, false, false
+	}
+	q.Subjects = subjects
 	q.Type = r.URL.Query().Get("type")
 	q.Status = r.URL.Query().Get("status")
 	q.Ref = r.URL.Query().Get("ref")
