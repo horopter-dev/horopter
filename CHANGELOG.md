@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.1](https://github.com/horopter-dev/horopter/compare/v0.4.0...v0.4.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **telemetry:** keep the request host out of HTTP exemplars ([06b6a67](https://github.com/horopter-dev/horopter/commit/06b6a67847291b69ffc644f5f555b76d54385e45))
+* **telemetry:** keep the request host out of HTTP exemplars ([ffa39fc](https://github.com/horopter-dev/horopter/commit/ffa39fc7b1ae411acbe66a909ced0b754df87c3f)), closes [#50](https://github.com/horopter-dev/horopter/issues/50)
+
 ## [0.4.0](https://github.com/horopter-dev/horopter/compare/v0.3.0...v0.4.0) (2026-10-05)
 
 ### Features
