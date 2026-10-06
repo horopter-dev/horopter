@@ -1,0 +1,19 @@
+# mutation: 01-star-runs-kept
+# guards: a run of stars compiles to one wildcard
+# package: ./internal/core/
+# expect: TestSubjectPatternsCollapseStarRuns
+
+diff --git a/internal/core/subjectpattern.go b/internal/core/subjectpattern.go
+index 5955fb4..9a50d0a 100644
+--- a/internal/core/subjectpattern.go
++++ b/internal/core/subjectpattern.go
+@@ -164,9 +164,6 @@ func globToRegexp(g string) string {
+ 		case '*':
+ 			// A run of stars means one star within a segment; emitting each made Postgres
+ 			// spend seconds compiling the backtracking it implies.
+-			for i+1 < len(g) && g[i+1] == '*' {
+-				i++
+-			}
+ 			b.WriteString("[^/]*")
+ 		case '?':
+ 			b.WriteString("[^/]")

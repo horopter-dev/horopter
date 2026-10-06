@@ -1,0 +1,18 @@
+# mutation: 02-no-regexp-cap
+# guards: the compiled expression is bounded before Postgres sees it
+# package: ./internal/core/
+# expect: TestSubjectPatternsRefuseARegexpPostgresWouldNotCompile
+
+diff --git a/internal/core/subjectpattern.go b/internal/core/subjectpattern.go
+index 5955fb4..e774f43 100644
+--- a/internal/core/subjectpattern.go
++++ b/internal/core/subjectpattern.go
+@@ -54,7 +54,7 @@ func ParseSubjectPatterns(raw []string) (SubjectPatterns, error) {
+ 		return SubjectPatterns{}, nil
+ 	}
+ 	re := "^(" + strings.Join(alts, "|") + ")$"
+-	if len(re) > maxSubjectRegexpBytes {
++	if false {
+ 		return SubjectPatterns{}, fmt.Errorf("%w: compiles to more than %d bytes",
+ 			ErrBadSubjectPattern, maxSubjectRegexpBytes)
+ 	}
