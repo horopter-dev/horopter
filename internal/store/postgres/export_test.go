@@ -85,3 +85,6 @@ func SetAfterDeleteHook(fn func()) { afterDeleteHook = fn }
 // NewChangeQuery's allowlist check cannot be bypassed by assigning it after
 // construction, which would silently return every row rather than refusing the key.
 func AttributesOf(q ChangeQuery) map[string]string { return q.attributes }
+
+// ChangeColumns exposes the columns a change read returns, so a test sizes rows as reads do.
+const ChangeColumns = changeColumns

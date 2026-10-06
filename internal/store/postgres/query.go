@@ -55,9 +55,9 @@ type ChangeQuery struct {
 	// After, when set, selects only rows strictly after it in (start_at, ref) order.
 	After *ChangeKey
 	// MaxRowTextBytes cuts the result after the leading rows whose row text, summed in order,
-	// fits within it; zero means no cut. Row text is a row's size as Postgres renders the whole
-	// row as text, octet_length(row::text). A cut that discards rows reports the result
-	// truncated.
+	// fits within it; zero means no cut. Row text is the size of the columns a read returns, as
+	// Postgres renders them, octet_length(ROW(columns)::text). A cut that discards rows reports
+	// the result truncated.
 	MaxRowTextBytes int64
 }
 
@@ -127,9 +127,9 @@ type EventQuery struct {
 	// AfterID, when set, selects only events whose id sorts after it.
 	AfterID string
 	// MaxRowTextBytes cuts the result after the leading rows whose row text, summed in order,
-	// fits within it; zero means no cut. Row text is a row's size as Postgres renders the whole
-	// row as text, octet_length(row::text). A cut that discards rows reports the result
-	// truncated.
+	// fits within it; zero means no cut. Row text is the size of the columns a read returns, as
+	// Postgres renders them, octet_length(ROW(columns)::text). A cut that discards rows reports
+	// the result truncated.
 	MaxRowTextBytes int64
 }
 
@@ -180,6 +180,10 @@ type selection struct {
 	sql   string
 	args  []any
 	order string
+	// columns are the columns the read returns. Sizing measures these and nothing else: a
+	// column a read never returns (a change's subject_first_seen, locus, end_effective) costs
+	// the response nothing, so it must not count against the budget.
+	columns string
 }
 
 // changeColumns are the columns scanChanges reads, in its order.
@@ -216,7 +220,9 @@ func changeSelection(q ChangeQuery) selection {
 		args = append(args, limit)
 		fmt.Fprintf(&sb, " LIMIT $%d", len(args))
 	}
-	return selection{sql: sb.String(), args: args, order: "start_at ASC, ref ASC"}
+	return selection{
+		sql: sb.String(), args: args, order: "start_at ASC, ref ASC", columns: changeColumns,
+	}
 }
 
 // eventSelection selects the event rows q reads. See ListEvents for the ref predicate.
@@ -258,7 +264,7 @@ func eventSelection(q EventQuery) selection {
 		args = append(args, limit)
 		query += fmt.Sprintf(" LIMIT $%d", len(args))
 	}
-	return selection{sql: query, args: args, order: "id ASC"}
+	return selection{sql: query, args: args, order: "id ASC", columns: eventColumns}
 }
 
 // byteCutSQL wraps sel so it returns only the leading rows whose row text, summed in sel's
@@ -269,17 +275,17 @@ func eventSelection(q EventQuery) selection {
 // The running sum is taken over rows already limited to sel's own over-fetch (the caller's
 // limit plus one), so it never scans past them, and it is filtered one level up because a WHERE
 // clause is applied before the window functions at its own level.
-func byteCutSQL(columns string, sel selection, budgetArg int) string {
+func byteCutSQL(sel selection, budgetArg int) string {
 	return fmt.Sprintf(`
 		SELECT %[1]s, more FROM (
 			SELECT l.*,
-			       sum(octet_length(l::text))
+			       sum(octet_length(ROW(%[1]s)::text))
 			         OVER (ORDER BY %[2]s ROWS UNBOUNDED PRECEDING) AS running,
 			       lead(true, 1, false) OVER (ORDER BY %[2]s) AS more
 			FROM (%[3]s) l
 		) w
 		WHERE running <= $%[4]d
-		ORDER BY %[2]s`, columns, sel.order, sel.sql, budgetArg)
+		ORDER BY %[2]s`, sel.columns, sel.order, sel.sql, budgetArg)
 }
 
 // anyRows reports whether sel selects any row. A byte cut that returns no rows cannot tell
@@ -350,7 +356,7 @@ func (s *Store) listEventsWithinBytes(
 	ctx context.Context, q EventQuery, sel selection,
 ) ([]core.Event, bool, error) {
 	args := append(slices.Clip(sel.args), q.MaxRowTextBytes)
-	rows, err := s.pool.Query(ctx, byteCutSQL(eventColumns, sel, len(args)), args...)
+	rows, err := s.pool.Query(ctx, byteCutSQL(sel, len(args)), args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("list events within %d bytes for tenant %q: %w",
 			q.MaxRowTextBytes, q.tenant, err)
@@ -462,7 +468,7 @@ func (s *Store) queryChangesWithinBytes(
 	ctx context.Context, q ChangeQuery, sel selection,
 ) ([]core.Change, bool, error) {
 	args := append(slices.Clip(sel.args), q.MaxRowTextBytes)
-	rows, err := s.pool.Query(ctx, byteCutSQL(changeColumns, sel, len(args)), args...)
+	rows, err := s.pool.Query(ctx, byteCutSQL(sel, len(args)), args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("query changes within %d bytes for tenant %q: %w",
 			q.MaxRowTextBytes, q.tenant, err)
@@ -603,7 +609,8 @@ func (s *Store) estimate(
 
 	query := fmt.Sprintf(`
 		SELECT count(*), coalesce(sum(b), 0), coalesce((array_agg(b ORDER BY %s))[1], 0)
-		FROM (SELECT octet_length(l::text) AS b, l.* FROM (%s) l) s`, sel.order, sel.sql)
+		FROM (SELECT octet_length(ROW(%s)::text) AS b, l.* FROM (%s) l) s`,
+		sel.order, sel.columns, sel.sql)
 	err = s.pool.QueryRow(ctx, query, sel.args...).Scan(
 		&est.Rows, &est.TotalBytes, &est.FirstRowBytes)
 	if err != nil {
