@@ -44,7 +44,8 @@ func changeRowBytes(t *testing.T, s *postgres.Store, tn, ref string) int64 {
 	t.Helper()
 	var n int64
 	require.NoError(t, s.Pool().QueryRow(context.Background(),
-		`SELECT octet_length(c::text) FROM change c WHERE c.tenant = $1 AND c.ref = $2`,
+		`SELECT octet_length(ROW(`+postgres.ChangeColumns+`)::text) FROM change c
+		 WHERE c.tenant = $1 AND c.ref = $2`,
 		tn, ref).Scan(&n))
 	return n
 }
@@ -217,4 +218,34 @@ func TestAByteCutOfAnEmptyReadIsNotTruncated(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got)
 	assert.False(t, truncated)
+}
+
+// TestReadSizingIgnoresColumnsReadsDoNotReturn: subject_first_seen is never returned by a read,
+// so it must not make one look larger — neither to the estimate admission reserves memory by,
+// nor to the byte cut that trims a result to its budget.
+func TestReadSizingIgnoresColumnsReadsDoNotReturn(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 10, 6, 16, 0, 0, 0, time.UTC)
+	ev := mkEvent(tn, eventID(t, "sized"), "k-"+uniqueToken(), "sized-"+uniqueToken(),
+		"deployment.started", at)
+	_, _, err := s.AppendEvent(ctx, ev)
+	require.NoError(t, err)
+	q := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0, nil)
+	before, err := s.EstimateChanges(ctx, q)
+	require.NoError(t, err)
+
+	_, err = s.Pool().Exec(ctx, `UPDATE change SET subject_first_seen =
+		(SELECT jsonb_object_agg('Deployment/ns/object-' || i, i) FROM generate_series(1, 500) i)
+		WHERE tenant = $1`, tn)
+	require.NoError(t, err)
+
+	after, err := s.EstimateChanges(ctx, q)
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "a column reads never return must not size a read")
+
+	q.MaxRowTextBytes = before.TotalBytes
+	got, truncated, err := s.QueryChanges(ctx, q)
+	require.NoError(t, err)
+	assert.Len(t, got, 1)
+	assert.False(t, truncated, "the byte cut must budget the returned columns only")
 }
