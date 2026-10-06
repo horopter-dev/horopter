@@ -2,16 +2,26 @@
 
 ## [0.5.0](https://github.com/horopter-dev/horopter/compare/v0.4.1...v0.5.0) (2026-10-06)
 
-
 ### Features
 
-* **egress:** match subject= as a glob against every subject a change touched ([#57](https://github.com/horopter-dev/horopter/issues/57)) ([ec810ea](https://github.com/horopter-dev/horopter/commit/ec810ea457fc68fa276379d7c6522cc7eec100f9))
-* **ingress:** record the objects each Flux apply changed ([#54](https://github.com/horopter-dev/horopter/issues/54)) ([0387417](https://github.com/horopter-dev/horopter/commit/0387417a0e70fc5d8d02c9699cb7c02e9622551b))
+* **egress:** `subject` is now a pattern, matched against **every** subject a change touched up
+  to its end rather than only its last event's. It uses a credential's `--subject-pattern`
+  syntax (`path.Match`: `*` within one `/` segment, `?`, `[...]`) plus `{a,b}` alternation;
+  repeat `subject` to OR several. `subject=*/lastlight/*` finds every change that touched the
+  `lastlight` namespace. A malformed pattern, invalid UTF-8 or a reversed range such as `[9-0]`
+  is answered `400`. **Behaviour change:** a plain `subject=X` now also matches a change in which
+  any earlier event had subject `X`. ([#57](https://github.com/horopter-dev/horopter/pull/57))
+* **ingress:** the Flux route records kustomize-controller's `Progressing` changeset, one event
+  per changed object (`Deployment/lastlight/cloudflared configured`) on the rollout's change, so a
+  change records what a commit changed. **Behaviour change:** these events' subjects are the
+  applied objects, so a Flux credential issued with `--subject-pattern` is now answered `403` on
+  every changeset; issue the Flux credential unscoped.
+  ([#54](https://github.com/horopter-dev/horopter/pull/54))
 
+### Upgrading
 
-### Code Refactoring
-
-* **store:** keep each change's subjects and when each first appeared ([#55](https://github.com/horopter-dev/horopter/issues/55)) ([0e3309f](https://github.com/horopter-dev/horopter/commit/0e3309f5638fca35796c7a3c55e643eb72d63ca1))
+* Schema version 10: `horopter-migrate` adds `change.subject_first_seen` and backfills it from
+  the event log. ([#55](https://github.com/horopter-dev/horopter/pull/55))
 
 ## [0.4.1](https://github.com/horopter-dev/horopter/compare/v0.4.0...v0.4.1) (2026-10-06)
 
