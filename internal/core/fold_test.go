@@ -1,6 +1,7 @@
 package core_test
 
 import (
+	"crypto/rand"
 	"maps"
 	"testing"
 	"time"
@@ -553,4 +554,44 @@ func TestFoldDoesNotRepeatASource(t *testing.T) {
 	c := core.Fold(nil, ev("01K5A000000000000000000001"))
 	c = core.Fold(&c, ev("01K5A000000000000000000002"))
 	assert.Equal(t, []string{"github"}, c.Sources)
+}
+
+func foldPtr(c core.Change) *core.Change { return &c }
+
+func TestFoldKeepsEachSubjectsEarliestTime(t *testing.T) {
+	at := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)
+	mk := func(subject string, d time.Duration) core.Event {
+		return core.Event{Tenant: "t", Locus: core.LocusFromRow("flux"),
+			ID: core.NewULID(at, rand.Reader), Type: "x.annotated", Subject: subject,
+			OccurredAt: at.Add(d), CorrelationRef: core.RefFromRow("flux/r"),
+			Lifecycle: core.LifecycleNone}
+	}
+	a, b, aEarly := mk("Deployment/a/x", time.Minute), mk("Service/a/y", 2*time.Minute),
+		mk("Deployment/a/x", 0)
+
+	forward := core.Fold(foldPtr(core.Fold(foldPtr(core.Fold(nil, a)), b)), aEarly)
+	backward := core.Fold(foldPtr(core.Fold(foldPtr(core.Fold(nil, aEarly)), b)), a)
+
+	want := map[string]int64{
+		"Deployment/a/x": at.UnixMicro(),
+		"Service/a/y":    at.Add(2 * time.Minute).UnixMicro(),
+	}
+	assert.Equal(t, want, forward.SubjectFirstSeen)
+	assert.Equal(t, want, backward.SubjectFirstSeen, "a running minimum is order-independent")
+}
+
+func TestFoldNeverSharesTheSubjectMapWithCur(t *testing.T) {
+	at := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)
+	cur := core.Change{SubjectFirstSeen: map[string]int64{"s": at.UnixMicro()}}
+	core.Fold(&cur, core.Event{Tenant: "t", Locus: core.LocusFromRow("flux"),
+		ID: core.NewULID(at, rand.Reader), Type: "x.annotated", Subject: "other",
+		OccurredAt: at, Lifecycle: core.LifecycleNone, CorrelationRef: core.RefFromRow("flux/r")})
+	assert.Equal(t, map[string]int64{"s": at.UnixMicro()}, cur.SubjectFirstSeen)
+}
+
+func TestFoldStartsWithAnEmptyNotNilSubjectMap(t *testing.T) {
+	now := time.Now()
+	got := core.Fold(nil, core.Event{Tenant: "t", Locus: core.LocusFromRow("ci"),
+		Type: "x.started", OccurredAt: now, ID: core.NewULID(now, rand.Reader)})
+	assert.NotNil(t, got.SubjectFirstSeen, "pgx writes a nil map as NULL, which NOT NULL refuses")
 }

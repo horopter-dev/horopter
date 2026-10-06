@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"time"
 
@@ -254,7 +255,7 @@ func (s *Store) RefoldRef(
 // allChangeFields names every field changedFields compares, sorted.
 var allChangeFields = []string{
 	"actor", "attributes", "end", "first_seen_at", "last_event_id", "sources",
-	"start", "started_at", "status", "subject", "title", "type",
+	"start", "started_at", "status", "subject", "subject_first_seen", "title", "type",
 }
 
 // changedFields names every field of the stored change a re-fold changed, sorted. Unlike
@@ -275,6 +276,7 @@ func changedFields(before core.Change, found bool, after core.Change) []string {
 		{"started_at", !sameInstant(before.StartedAt, after.StartedAt)},
 		{"first_seen_at", !sameInstant(&before.FirstSeenAt, &after.FirstSeenAt)},
 		{"sources", !slices.Equal(before.Sources, after.Sources)},
+		{"subject_first_seen", !maps.Equal(before.SubjectFirstSeen, after.SubjectFirstSeen)},
 	} {
 		if c.differs {
 			moved = append(moved, c.name)
@@ -288,8 +290,8 @@ func changedFields(before core.Change, found bool, after core.Change) []string {
 // rules are not commutative, listed in RebuildProjection's doc comment: assigned
 // unconditionally (Subject, Type, LastEventID), guarded non-empty (Title, Actor), merged
 // last-wins per key (Attributes), and guarded on End (Status, End). The commutative
-// fields — Start, StartedAt, FirstSeenAt, Sources — cannot differ between two orders and
-// are deliberately absent.
+// fields — Start, StartedAt, FirstSeenAt, Sources, SubjectFirstSeen — cannot differ
+// between two orders and are deliberately absent.
 //
 // A table rather than a chain of ifs: eight branches would put this function over the
 // project's cyclomatic limit of 8 on its own.

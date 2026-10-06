@@ -1,0 +1,18 @@
+# mutation: 03-backfill-max
+# guards: the backfill takes each subject's earliest time
+# package: ./internal/store/postgres/
+# expect: TestMigration0010BackfillsEachSubjectsEarliestTime
+
+diff --git a/internal/store/postgres/migrations/0010_subject_first_seen.sql b/internal/store/postgres/migrations/0010_subject_first_seen.sql
+index e6ebf66..9240108 100644
+--- a/internal/store/postgres/migrations/0010_subject_first_seen.sql
++++ b/internal/store/postgres/migrations/0010_subject_first_seen.sql
+@@ -16,7 +16,7 @@ UPDATE change c SET subject_first_seen = s.m
+                CASE WHEN correlation_ref <> '' THEN correlation_ref
+                     ELSE locus || '/' || id END AS ref,
+                subject,
+-               min((extract(epoch FROM occurred_at) * 1000000)::bigint) AS first_us
++               max((extract(epoch FROM occurred_at) * 1000000)::bigint) AS first_us
+           FROM event
+          WHERE subject <> ''
+          GROUP BY 1, 2, 3

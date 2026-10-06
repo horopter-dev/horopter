@@ -797,3 +797,29 @@ func TestAnEventIDCollisionIsNotTakenForAConcurrentDuplicate(t *testing.T) {
 	require.ErrorAs(t, err, &pgErr, "the store must surface Postgres's own violation")
 	assert.Equal(t, "event_pkey", pgErr.ConstraintName)
 }
+
+// TestAppendKeepsEarlierSubjects pins that the locked read feeding Fold carries the subject
+// map: without it, each append would fold onto an empty map and keep only its own subject.
+func TestAppendKeepsEarlierSubjects(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)
+	ref := "subjects-" + uniqueToken()
+	first := mkEvent(tn, eventID(t, "a"), "k-a-"+uniqueToken(), ref, "deployment.started", at)
+	first.Subject = "Deployment/a/x"
+	second := mkEvent(tn, eventID(t, "b"), "k-b-"+uniqueToken(), ref, "deployment.annotated",
+		at.Add(time.Minute))
+	second.Subject = "Service/a/y"
+	for _, ev := range []core.Event{first, second} {
+		_, _, err := s.AppendEvent(ctx, ev)
+		require.NoError(t, err)
+	}
+
+	var got map[string]int64
+	require.NoError(t, s.Pool().QueryRow(ctx,
+		`SELECT subject_first_seen FROM change WHERE tenant = $1 AND ref = $2`,
+		tn, core.RefFor(first).String()).Scan(&got))
+	assert.Equal(t, map[string]int64{
+		"Deployment/a/x": at.UnixMicro(),
+		"Service/a/y":    at.Add(time.Minute).UnixMicro(),
+	}, got)
+}
