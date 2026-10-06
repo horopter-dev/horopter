@@ -236,3 +236,64 @@ func TestSnakeCase(t *testing.T) {
 		assert.Equal(t, want, snakeCase(in), in)
 	}
 }
+
+func changeset(msg, revision string) fluxEvent {
+	fe := fluxEv("Kustomization", "apps", "Progressing", "info", rev(revision))
+	fe.Message = msg
+	return fe
+}
+
+func TestFluxChangesetRecordsOneEventPerObject(t *testing.T) {
+	recs, ignored, err := mapFluxEvent(changeset(
+		"Deployment/lastlight/cloudflared configured\nNamespace/lastlight created", fluxRev))
+	require.NoError(t, err)
+	require.Empty(t, ignored)
+	require.Len(t, recs, 2)
+	head := "Kustomization/flux-system/apps/" + fluxRev + "/Progressing/"
+	assert.Equal(t, fluxRecord{
+		Type: "flux.kustomization.applied", Subject: "Deployment/lastlight/cloudflared",
+		Title: "Deployment/lastlight/cloudflared configured", OccurredAt: fluxAt, Ref: fluxRev,
+		Key: head + "Deployment/lastlight/cloudflared", Lifecycle: core.LifecycleNone,
+		Attributes: map[string]any{
+			"kind": "Kustomization", "namespace": "flux-system", "name": "apps",
+			"reason": "Progressing", "severity": "info", "revision": fluxRev,
+			"action": "configured",
+		},
+	}, recs[0])
+	assert.Equal(t, "Namespace/lastlight", recs[1].Subject, "a cluster-scoped object is Kind/name")
+	assert.Equal(t, head+"Namespace/lastlight", recs[1].Key)
+	assert.Equal(t, "created", recs[1].Attributes["action"])
+}
+
+func TestFluxChangesetToleratesCRLFAndBlankLines(t *testing.T) {
+	recs, ignored, err := mapFluxEvent(changeset(
+		"Deployment/a/b configured\r\n\r\nService/a/b created\r\n", fluxRev))
+	require.NoError(t, err)
+	require.Empty(t, ignored)
+	require.Len(t, recs, 2)
+	assert.Equal(t, "Deployment/a/b", recs[0].Subject)
+	assert.Equal(t, "Service/a/b created", recs[1].Title, "no trailing \\r")
+}
+
+func TestFluxChangesetSkipsALineWithNoAction(t *testing.T) {
+	recs, _, err := mapFluxEvent(changeset("garbage\nDeployment/a/b configured", fluxRev))
+	require.NoError(t, err)
+	require.Len(t, recs, 1)
+	assert.Equal(t, "Deployment/a/b", recs[0].Subject)
+}
+
+func TestFluxChangesetIgnoredCases(t *testing.T) {
+	oci := "latest@sha256:" + strings.Repeat("a", 64)
+	for name, tc := range map[string]struct{ msg, rev, why string }{
+		"no revision":      {"Deployment/a/b configured", "", "not a Git SHA-1 revision"},
+		"a non-Git source": {"Deployment/a/b configured", oci, "not a Git SHA-1 revision"},
+		"no object lines":  {"garbage\n\n", fluxRev, "no object lines"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			recs, ignored, err := mapFluxEvent(changeset(tc.msg, tc.rev))
+			require.NoError(t, err)
+			assert.Empty(t, recs)
+			assert.Contains(t, ignored, tc.why)
+		})
+	}
+}

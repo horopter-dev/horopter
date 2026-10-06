@@ -203,3 +203,57 @@ func TestANativeEventCannotPreemptAFluxKey(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	assert.Equal(t, fluxResponse{Recorded: 1, Created: 1}, decodeFlux(t, rec))
 }
+
+func changesetBody(ks, revision string, at time.Time, msg string) string {
+	return fmt.Sprintf(`{"involvedObject":{"kind":"Kustomization","namespace":"flux-system",
+		"name":%q},"severity":"info","timestamp":%q,"message":%q,"reason":"Progressing",
+		"metadata":{"revision":%q}}`, ks, at.Format(time.RFC3339), msg, revision)
+}
+
+func TestFluxChangesetJoinsTheRolloutWithoutMovingIt(t *testing.T) {
+	f := newIngressFixture(t)
+	tenant, key := seedCredential(t, f.store, "flux", "")
+	r, ks := uniqueRevision(t), "apps-"+uniqueToken()
+	t0 := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)
+	t1, t2 := t0.Add(5*time.Second), t0.Add(9*time.Second)
+
+	require.Equal(t, http.StatusCreated, postFlux(t, f.srv, key, fluxBody("GitRepository",
+		"flux-system-"+uniqueToken(), "NewArtifact", "info", r, t0)).Code)
+	msg := "Deployment/lastlight/cloudflared configured\nService/lastlight/lastlight created"
+	applied := postFlux(t, f.srv, key, changesetBody(ks, r, t1, msg))
+	require.Equal(t, http.StatusCreated, applied.Code, applied.Body.String())
+	assert.Equal(t, fluxResponse{Recorded: 2, Created: 2}, decodeFlux(t, applied))
+	require.Equal(t, http.StatusCreated, postFlux(t, f.srv, key, fluxBody("Kustomization", ks,
+		"ReconciliationSucceeded", "info", r, t2)).Code)
+
+	status, start, end := changeRow(t, f.store, tenant, "flux/"+r)
+	assert.Equal(t, "completed", status)
+	assert.True(t, start.Equal(t0), "NewArtifact still starts it, got %v", start)
+	require.NotNil(t, end)
+	assert.True(t, end.Equal(t2), "the success still ends it, got %v", *end)
+
+	again := postFlux(t, f.srv, key, changesetBody(ks, r, t1, msg))
+	assert.Equal(t, fluxResponse{Recorded: 2, Created: 0}, decodeFlux(t, again),
+		"a redelivered changeset is all duplicates")
+	assert.Equal(t, 1, countKey(t, f.store,
+		"flux/Kustomization/flux-system/"+ks+"/"+r+"/Progressing/Deployment/lastlight/cloudflared"))
+}
+
+func TestFluxChangesetOnAnUnseenRevisionIsClosedByItsOutcome(t *testing.T) {
+	f := newIngressFixture(t)
+	tenant, key := seedCredential(t, f.store, "flux", "")
+	r, ks := uniqueRevision(t), "apps-"+uniqueToken()
+	t0 := time.Date(2026, 10, 6, 10, 0, 0, 0, time.UTC)
+
+	require.Equal(t, http.StatusCreated, postFlux(t, f.srv, key,
+		changesetBody(ks, r, t0, "Deployment/a/b configured")).Code)
+	status, _, end := changeRow(t, f.store, tenant, "flux/"+r)
+	assert.Equal(t, "in_progress", status, "a none event on a new ref opens it")
+	assert.Nil(t, end)
+
+	require.Equal(t, http.StatusCreated, postFlux(t, f.srv, key, fluxBody("Kustomization", ks,
+		"ReconciliationSucceeded", "info", r, t0.Add(3*time.Second))).Code)
+	status, _, end = changeRow(t, f.store, tenant, "flux/"+r)
+	assert.Equal(t, "completed", status, "the same run's outcome closes it")
+	assert.NotNil(t, end)
+}
