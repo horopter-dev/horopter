@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.1](https://github.com/horopter-dev/horopter/compare/v0.4.0...v0.4.1) (2026-10-06)
+
+### Bug Fixes
+
+* **telemetry:** HTTP metric exemplars no longer carry the request's `Host`. A caller using a
+  long host name, such as Flux calling ingress by its full service name, pushed an exemplar
+  past Prometheus's 128-rune label limit, so the exemplar was dropped and every scrape logged
+  `exemplar labels have … runes, exceeding the limit of 128`. Exemplars now carry only their
+  trace and span IDs. ([#51](https://github.com/horopter-dev/horopter/pull/51), closes
+  [#50](https://github.com/horopter-dev/horopter/issues/50))
+
 ## [0.4.0](https://github.com/horopter-dev/horopter/compare/v0.3.0...v0.4.0) (2026-10-05)
 
 ### Features
