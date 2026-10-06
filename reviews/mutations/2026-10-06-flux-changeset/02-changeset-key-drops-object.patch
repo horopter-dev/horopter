@@ -1,0 +1,18 @@
+# mutation: 02-changeset-key-drops-object
+# guards: two objects in one changeset keep distinct keys
+# package: ./internal/ingress/
+# expect: TestFluxChangesetRecordsOneEventPerObject
+
+diff --git a/internal/ingress/flux.go b/internal/ingress/flux.go
+index e1c9ac7..c49ae2e 100644
+--- a/internal/ingress/flux.go
++++ b/internal/ingress/flux.go
+@@ -138,7 +138,7 @@ func mapChangeset(fe fluxEvent, rev, key string) ([]fluxRecord, string) {
+ 			continue
+ 		}
+ 		object := line[:cut]
+-		rec := fe.record("flux.kustomization.applied", core.LifecycleNone, rev, key+"/"+object)
++		rec := fe.record("flux.kustomization.applied", core.LifecycleNone, rev, key)
+ 		rec.Subject, rec.Title = object, fluxTitle(line)
+ 		rec.Attributes["action"] = line[cut+1:]
+ 		recs = append(recs, rec)

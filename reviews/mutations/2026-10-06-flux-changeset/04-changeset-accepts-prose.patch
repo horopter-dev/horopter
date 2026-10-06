@@ -1,0 +1,18 @@
+# mutation: 04-changeset-accepts-prose
+# guards: a Progressing event carrying prose records nothing
+# package: ./internal/ingress/
+# expect: TestFluxIgnores
+
+diff --git a/internal/ingress/flux.go b/internal/ingress/flux.go
+index e1c9ac7..cb5d1a1 100644
+--- a/internal/ingress/flux.go
++++ b/internal/ingress/flux.go
+@@ -134,7 +134,7 @@ func mapChangeset(fe fluxEvent, rev, key string) ([]fluxRecord, string) {
+ 	for _, line := range strings.Split(fe.Message, "\n") {
+ 		line = strings.TrimSpace(line)
+ 		cut := strings.LastIndexByte(line, ' ')
+-		if cut <= 0 || cut == len(line)-1 || !isObjectPath(line[:cut]) {
++		if cut <= 0 || cut == len(line)-1 {
+ 			continue
+ 		}
+ 		object := line[:cut]
