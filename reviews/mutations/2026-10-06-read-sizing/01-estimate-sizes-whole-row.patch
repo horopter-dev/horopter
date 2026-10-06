@@ -1,0 +1,20 @@
+# mutation: 01-estimate-sizes-whole-row
+# guards: an unreturned column does not size a read
+# package: ./internal/store/postgres/
+# expect: TestReadSizingIgnoresColumnsReadsDoNotReturn
+
+diff --git a/internal/store/postgres/query.go b/internal/store/postgres/query.go
+index ce7843f..565cbae 100644
+--- a/internal/store/postgres/query.go
++++ b/internal/store/postgres/query.go
+@@ -609,8 +609,8 @@ func (s *Store) estimate(
+ 
+ 	query := fmt.Sprintf(`
+ 		SELECT count(*), coalesce(sum(b), 0), coalesce((array_agg(b ORDER BY %s))[1], 0)
+-		FROM (SELECT octet_length(ROW(%s)::text) AS b, l.* FROM (%s) l) s`,
+-		sel.order, sel.columns, sel.sql)
++		FROM (SELECT octet_length(l::text) AS b, l.* FROM (%s) l) s`,
++		sel.order, sel.sql)
+ 	err = s.pool.QueryRow(ctx, query, sel.args...).Scan(
+ 		&est.Rows, &est.TotalBytes, &est.FirstRowBytes)
+ 	if err != nil {
