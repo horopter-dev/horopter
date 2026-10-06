@@ -725,7 +725,9 @@ with AND:
 escapes) plus `{a,b}` alternation, and matches a change if **any** subject among its events
 matches — not only the last event's. A subject first seen after the change ended does not count, so
 a later drift correction does not widen an old rollout. `subject=*/lastlight/*` finds every change
-that touched the `lastlight` namespace; `subject=*/{lastlight,logging}/*` adds `logging`. A
+that touched the `lastlight` namespace; `subject=*/{lastlight,logging}/*` adds `logging`. Every
+comma inside braces separates alternatives, and `\,` does not escape one; outside braces a comma
+is literal, so give an alternative that contains one its own `subject` parameter. A
 malformed pattern, one that is not valid UTF-8, or one with a reversed range such as `[9-0]` is
 answered **400**. The other filters are exact.
 
