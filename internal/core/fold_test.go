@@ -502,8 +502,11 @@ func TestFoldTitleStillFallsBackToTypeWhenNoEventTitlesIt(t *testing.T) {
 }
 
 // A later event that DOES carry a title replaces the earlier one.
+// TestFoldLaterNonEmptyTitleWins pins the fallback rule, which applies when no start event has
+// a title: here neither event is a start. A titled start takes precedence over both
+// (TestFoldTitlesAChangeByItsStart).
 func TestFoldLaterNonEmptyTitleWins(t *testing.T) {
-	first := ev("01A", "dep-7", "deployment.started", t10)
+	first := ev("01A", "dep-7", "deployment.progressed", t10)
 	first.Title = "Deploy v2.5.0"
 	second := ev("01B", "dep-7", "deployment.completed", t20)
 	second.Title = "Deploy v2.5.1"
@@ -594,4 +597,64 @@ func TestFoldStartsWithAnEmptyNotNilSubjectMap(t *testing.T) {
 	got := core.Fold(nil, core.Event{Tenant: "t", Locus: core.LocusFromRow("ci"),
 		Type: "x.started", OccurredAt: now, ID: core.NewULID(now, rand.Reader)})
 	assert.NotNil(t, got.SubjectFirstSeen, "pgx writes a nil map as NULL, which NOT NULL refuses")
+}
+
+func titled(typ string, lc core.Lifecycle, title string, at time.Time) core.Event {
+	return core.Event{Tenant: "t", Locus: core.LocusFromRow("flux"),
+		ID: core.NewULID(at, rand.Reader), Type: typ, Subject: "s", Title: title,
+		OccurredAt: at, CorrelationRef: core.RefFromRow("flux/r"), Lifecycle: lc}
+}
+
+// foldAll folds evs in the order given.
+func foldAll(evs ...core.Event) core.Change {
+	var c *core.Change
+	for _, ev := range evs {
+		next := core.Fold(c, ev)
+		c = &next
+	}
+	return *c
+}
+
+func TestFoldTitlesAChangeByItsStart(t *testing.T) {
+	at := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)
+	start := titled("deploy.started", core.LifecycleUnspecified, "Deploy v2.5.0", at)
+	done := titled("deploy.completed", core.LifecycleUnspecified, "Done", at.Add(time.Minute))
+	for name, c := range map[string]core.Change{
+		"start first": foldAll(start, done),
+		"start last":  foldAll(done, start),
+	} {
+		assert.Equal(t, "Deploy v2.5.0", c.Title, name)
+		require.NotNil(t, c.TitleStartedAt, name)
+		assert.True(t, c.TitleStartedAt.Equal(at), name)
+	}
+}
+
+func TestFoldTitlesByTheEarliestTitledStart(t *testing.T) {
+	at := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)
+	early := titled("x.started", core.LifecycleUnspecified, "early", at)
+	late := titled("x.started", core.LifecycleUnspecified, "late", at.Add(time.Second))
+	assert.Equal(t, "early", foldAll(early, late).Title)
+	assert.Equal(t, "early", foldAll(late, early).Title)
+
+	b := titled("x.started", core.LifecycleUnspecified, "b", at)
+	a := titled("y.begun", core.LifecycleUnspecified, "a", at)
+	assert.Equal(t, "a", foldAll(b, a).Title, "a tie on time goes to the smaller title")
+	assert.Equal(t, "a", foldAll(a, b).Title)
+}
+
+func TestFoldKeepsTheOldTitleRuleWithoutATitledStart(t *testing.T) {
+	at := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)
+	untitled := titled("x.started", core.LifecycleUnspecified, "", at)
+	done := titled("x.completed", core.LifecycleUnspecified, "Done", at.Add(time.Minute))
+	c := foldAll(untitled, done)
+	assert.Equal(t, "Done", c.Title, "an untitled start leaves the last non-empty rule in charge")
+	assert.Nil(t, c.TitleStartedAt)
+
+	none := titled("x.started", core.LifecycleNone, "named started, asserts nothing", at)
+	c = foldAll(none, done)
+	assert.Equal(t, "Done", c.Title, "lifecycle none is not a start, whatever the type says")
+	assert.Nil(t, c.TitleStartedAt)
+
+	explicit := titled("x.annotated", core.LifecycleStarted, "explicit start", at)
+	assert.Equal(t, "explicit start", foldAll(done, explicit).Title)
 }

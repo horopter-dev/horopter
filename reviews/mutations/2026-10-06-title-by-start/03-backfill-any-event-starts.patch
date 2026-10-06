@@ -1,0 +1,18 @@
+# mutation: 03-backfill-any-event-starts
+# guards: the backfill counts only start events
+# package: ./internal/store/postgres/
+# expect: TestMigration0011TitlesAChangeByItsEarliestTitledStart
+
+diff --git a/internal/store/postgres/migrations/0011_title_by_start.sql b/internal/store/postgres/migrations/0011_title_by_start.sql
+index 77d8139..e7412c6 100644
+--- a/internal/store/postgres/migrations/0011_title_by_start.sql
++++ b/internal/store/postgres/migrations/0011_title_by_start.sql
+@@ -24,7 +24,7 @@ UPDATE change c SET title = s.title, title_started_at = s.at
+           FROM event
+          WHERE title <> ''
+            AND (lifecycle = 'started'
+-                OR (lifecycle = '' AND (type LIKE '%.started' OR type LIKE '%.begun')))
++                OR lifecycle = '')
+       ) starts
+      ORDER BY tenant, ref, at, title COLLATE "C"
+   ) s

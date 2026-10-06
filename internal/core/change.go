@@ -103,6 +103,12 @@ type Change struct {
 	// scope when it first appeared no later than the change's end; that bound is applied when
 	// reading, because an out-of-order terminal event can move the end earlier.
 	SubjectFirstSeen map[string]int64
+	// TitleStartedAt is the occurred_at of the start event whose title the change holds, nil
+	// when no start event had one and Title came from the fallback rule (last non-empty title,
+	// else the first event's type). A start describes what changed and later events describe
+	// how it went, so the earliest titled start names the change — earliest by occurred_at,
+	// a tie going to the smaller title, so the result does not depend on arrival order.
+	TitleStartedAt *time.Time
 }
 
 // IsOpen reports whether the change is still in flight. An open change renders

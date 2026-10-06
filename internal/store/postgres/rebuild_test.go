@@ -321,3 +321,34 @@ func TestRebuildReproducesSubjectFirstSeen(t *testing.T) {
 	require.NoError(t, s.RebuildProjection(ctx, tn))
 	assert.Equal(t, before, projectionRowsForTenant(t, s.Pool(), tn))
 }
+
+// TestRebuildReproducesTitlesByStart: the live fold sees these in arrival order and the
+// rebuild in id order, and the title must come out the same — the earliest titled start's,
+// though a later titled outcome arrived first and a second, later-occurring start arrived last.
+func TestRebuildReproducesTitlesByStart(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 10, 6, 15, 0, 0, 0, time.UTC)
+	ref := "titles-" + uniqueToken()
+	for _, e := range []struct {
+		typ, title string
+		d          time.Duration
+	}{
+		{"deploy.completed", "Done", 2 * time.Minute},
+		{"deploy.started", "Deploy v2.5.0", 0},
+		{"deploy.progressed", "Halfway", time.Minute},
+		{"deploy.started", "Deploy v2.5.0 (retry)", 30 * time.Second},
+	} {
+		ev := mkEvent(tn, eventID(t, e.title), "k-"+uniqueToken(), ref, e.typ, at.Add(e.d))
+		ev.Title = e.title
+		_, _, err := s.AppendEvent(ctx, ev)
+		require.NoError(t, err)
+	}
+	before := projectionRowsForTenant(t, s.Pool(), tn)
+	require.Len(t, before, 1)
+	for _, row := range before {
+		assert.Contains(t, row, `"title": "Deploy v2.5.0"`)
+	}
+
+	require.NoError(t, s.RebuildProjection(ctx, tn))
+	assert.Equal(t, before, projectionRowsForTenant(t, s.Pool(), tn))
+}

@@ -1,0 +1,18 @@
+# mutation: 02-no-title-tiebreak
+# guards: two starts at one instant are ordered by title
+# package: ./internal/core/
+# expect: TestFoldTitlesByTheEarliestTitledStart
+
+diff --git a/internal/core/fold.go b/internal/core/fold.go
+index cea50ad..045dffd 100644
+--- a/internal/core/fold.go
++++ b/internal/core/fold.go
+@@ -146,7 +146,7 @@ func foldTitle(out *Change, ev Event) {
+ // earlierTitle orders two titled starts: by time, then by title, so either fold order agrees.
+ func earlierTitle(at time.Time, title string, heldAt time.Time, held string) bool {
+ 	heldAt = heldAt.Truncate(time.Microsecond)
+-	return at.Before(heldAt) || (at.Equal(heldAt) && title < held)
++	return at.Before(heldAt) || false
+ }
+ 
+ // Fold applies one event to a change and returns the result. cur is nil for

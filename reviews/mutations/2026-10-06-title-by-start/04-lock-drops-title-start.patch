@@ -1,0 +1,18 @@
+# mutation: 04-lock-drops-title-start
+# guards: the locked read feeds Fold the held title start
+# package: ./internal/store/postgres/
+# expect: TestRebuildReproducesTitlesByStart
+
+diff --git a/internal/store/postgres/append.go b/internal/store/postgres/append.go
+index 2ec3616..bafb250 100644
+--- a/internal/store/postgres/append.go
++++ b/internal/store/postgres/append.go
+@@ -529,7 +529,7 @@ func lockAndLoadChange(
+ 		tenantID, ref,
+ 	).Scan(&c.Tenant, &storedRef, &c.Subject, &c.Type, &c.Title, &c.Actor,
+ 		&c.Start, &startedAt, &c.FirstSeenAt, &endAt, &st, &c.Attributes,
+-		&c.LastEventID, &c.Sources, &c.SubjectFirstSeen, &c.TitleStartedAt)
++		&c.LastEventID, &c.Sources, &c.SubjectFirstSeen, new(*time.Time))
+ 	if errors.Is(err, pgx.ErrNoRows) {
+ 		return core.Change{}, false, nil
+ 	}

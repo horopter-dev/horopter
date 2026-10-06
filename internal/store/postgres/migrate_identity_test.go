@@ -524,3 +524,51 @@ func TestMigration0010BackfillsEachSubjectsEarliestTime(t *testing.T) {
 		"Service/a/y":    at.Add(2 * time.Minute).UnixMicro(),
 	}, got)
 }
+
+// TestMigration0011TitlesAChangeByItsEarliestTitledStart pins the backfill to core.Fold's title
+// rule: a change with a titled start event takes that start's title and time, and a change
+// without one keeps its title and gets no start time.
+func TestMigration0011TitlesAChangeByItsEarliestTitledStart(t *testing.T) {
+	ctx := context.Background()
+	pool, _ := freshDatabase(t)
+	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+
+	for _, e := range []struct {
+		ref, typ, title string
+		d               time.Duration
+	}{
+		{"r-start", "deploy.started", "Deploy v2.5.0", 0},
+		{"r-start", "deploy.completed", "Done", time.Minute},
+		{"r-plain", "deploy.progressed", "Halfway", 0},
+		{"r-plain", "deploy.completed", "Done", time.Minute},
+	} {
+		mustExec(t, pool, `INSERT INTO event
+			(id, tenant, schema_version, source, type, subject, title, occurred_at, received_at,
+			 correlation_ref)
+			VALUES ($1, 'acme', 1, 'ci', $2, 'acme/prod', $3, $4, $4, $5)`,
+			core.NewULID(at.Add(e.d), rand.Reader), e.typ, e.title, at.Add(e.d), e.ref)
+	}
+	for _, ref := range []string{"r-start", "r-plain"} {
+		mustExec(t, pool, `INSERT INTO change
+			(tenant, ref, subject, type, title, actor, started_at, first_seen_at, end_at,
+			 status, attributes, last_event_id)
+			VALUES ('acme', $1, 'acme/prod', 'deploy.completed', 'Done', '', NULL, $2, $3,
+			        'completed', '{}'::jsonb, '')`, ref, at, at.Add(time.Minute))
+	}
+
+	_, err := postgres.Migrate(ctx, pool)
+	require.NoError(t, err)
+
+	var title string
+	var startedAt *time.Time
+	require.NoError(t, pool.QueryRow(ctx, `SELECT title, title_started_at FROM change
+		WHERE ref = 'legacy/r-start'`).Scan(&title, &startedAt))
+	assert.Equal(t, "Deploy v2.5.0", title)
+	require.NotNil(t, startedAt)
+	assert.True(t, startedAt.Equal(at))
+
+	require.NoError(t, pool.QueryRow(ctx, `SELECT title, title_started_at FROM change
+		WHERE ref = 'legacy/r-plain'`).Scan(&title, &startedAt))
+	assert.Equal(t, "Done", title, "no titled start: the stored title stands")
+	assert.Nil(t, startedAt)
+}
