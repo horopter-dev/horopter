@@ -287,3 +287,37 @@ func TestFailedRebuildStillRecordsItsTenant(t *testing.T) {
 	assert.Equal(t, []string{"0"},
 		spanAttrValues(rec, "RebuildProjection", "horopter.rebuild.events"))
 }
+
+// TestRebuildReproducesSubjectFirstSeen compares whole rows, subject_first_seen included, after
+// appends that exercise the map: several subjects, one repeated earlier than its first
+// arrival, and an older terminal event arriving last, which moves the end earlier. The
+// incremental path folds in arrival order and the rebuild in id order; the map must agree.
+func TestRebuildReproducesSubjectFirstSeen(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 10, 6, 14, 0, 0, 0, time.UTC)
+	ref := "rebuild-subjects-" + uniqueToken()
+	for _, e := range []struct {
+		subject, typ string
+		d            time.Duration
+		lc           core.Lifecycle
+	}{
+		{"GitRepository/flux-system/flux-system", "flux.artifact.new", 0, core.LifecycleStarted},
+		{"Deployment/a/x", "flux.kustomization.applied", 5 * time.Second, core.LifecycleNone},
+		{"Kustomization/flux-system/apps", "flux.kustomization.succeeded", 9 * time.Second,
+			core.LifecycleCompleted},
+		{"Deployment/a/x", "flux.kustomization.applied", 2 * time.Second, core.LifecycleNone},
+		{"Service/a/y", "flux.kustomization.applied", time.Hour, core.LifecycleNone},
+		{"Kustomization/flux-system/apps", "flux.kustomization.failed", 3 * time.Second,
+			core.LifecycleFailed},
+	} {
+		ev := mkEvent(tn, eventID(t, e.subject), "k-"+uniqueToken(), ref, e.typ, at.Add(e.d))
+		ev.Subject, ev.Lifecycle = e.subject, e.lc
+		_, _, err := s.AppendEvent(ctx, ev)
+		require.NoError(t, err)
+	}
+	before := projectionRowsForTenant(t, s.Pool(), tn)
+	require.Len(t, before, 1)
+
+	require.NoError(t, s.RebuildProjection(ctx, tn))
+	assert.Equal(t, before, projectionRowsForTenant(t, s.Pool(), tn))
+}
