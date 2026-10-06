@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.5.0](https://github.com/horopter-dev/horopter/compare/v0.4.1...v0.5.0) (2026-10-06)
+
+### Features
+
+* **egress:** `subject` is now a pattern, matched against **every** subject a change touched up
+  to its end rather than only its last event's. It uses a credential's `--subject-pattern`
+  syntax (`path.Match`: `*` within one `/` segment, `?`, `[...]`) plus `{a,b}` alternation;
+  repeat `subject` to OR several. `subject=*/lastlight/*` finds every change that touched the
+  `lastlight` namespace. A malformed pattern, invalid UTF-8 or a reversed range such as `[9-0]`
+  is answered `400`. **Behaviour change:** a plain `subject=X` now also matches a change in which
+  any earlier event had subject `X`. ([#57](https://github.com/horopter-dev/horopter/pull/57))
+* **ingress:** the Flux route records kustomize-controller's `Progressing` changeset, one event
+  per changed object (`Deployment/lastlight/cloudflared configured`) on the rollout's change, so a
+  change records what a commit changed. **Behaviour change:** these events' subjects are the
+  applied objects, so a Flux credential issued with `--subject-pattern` is now answered `403` on
+  every changeset; issue the Flux credential unscoped.
+  ([#54](https://github.com/horopter-dev/horopter/pull/54))
+
+### Upgrading
+
+* Schema version 10: `horopter-migrate` adds `change.subject_first_seen` and backfills it from
+  the event log. ([#55](https://github.com/horopter-dev/horopter/pull/55))
+
 ## [0.4.1](https://github.com/horopter-dev/horopter/compare/v0.4.0...v0.4.1) (2026-10-06)
 
 ### Bug Fixes
