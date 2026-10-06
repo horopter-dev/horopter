@@ -268,3 +268,26 @@ func TestFluxChangesetIsRefusedToASubjectScopedCredential(t *testing.T) {
 		time.Date(2026, 10, 6, 11, 0, 0, 0, time.UTC), "Deployment/a/b configured"))
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 }
+
+// TestFluxRolloutIsTitledByItsCommit joins this route's commit title to the fold's start rule:
+// the Kustomization's later success carries its own message, and the change keeps the commit's.
+func TestFluxRolloutIsTitledByItsCommit(t *testing.T) {
+	f := newIngressFixture(t)
+	tenant, key := seedCredential(t, f.store, "flux", "")
+	r, ks := uniqueRevision(t), "apps-"+uniqueToken()
+	t0 := time.Date(2026, 10, 6, 16, 0, 0, 0, time.UTC)
+	newArtifact := fmt.Sprintf(`{"involvedObject":{"kind":"GitRepository","namespace":"flux-system",
+		"name":%q},"severity":"info","timestamp":%q,
+		"message":"stored artifact for commit 'fix(horopter): roll out v0.5.2'",
+		"reason":"NewArtifact","metadata":{"revision":%q}}`,
+		"flux-system-"+uniqueToken(), t0.Format(time.RFC3339), r)
+	require.Equal(t, http.StatusCreated, postFlux(t, f.srv, key, newArtifact).Code)
+	require.Equal(t, http.StatusCreated, postFlux(t, f.srv, key, fluxBody("Kustomization", ks,
+		"ReconciliationSucceeded", "info", r, t0.Add(9*time.Second))).Code)
+
+	var title string
+	require.NoError(t, f.store.Pool().QueryRow(context.Background(),
+		`SELECT title FROM change WHERE tenant = $1 AND ref = $2`,
+		tenant.String(), "flux/"+r).Scan(&title))
+	assert.Equal(t, "fix(horopter): roll out v0.5.2", title)
+}

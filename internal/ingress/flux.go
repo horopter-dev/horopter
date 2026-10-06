@@ -92,7 +92,23 @@ func mapGitRepository(fe fluxEvent) ([]fluxRecord, string) {
 		return nil, fmt.Sprintf("revision %q is not a Git SHA-1 revision", rev)
 	}
 	key := fe.objectPath() + "/" + rev + "/NewArtifact"
-	return []fluxRecord{fe.record("flux.artifact.new", core.LifecycleStarted, rev, key)}, ""
+	rec := fe.record("flux.artifact.new", core.LifecycleStarted, rev, key)
+	rec.Title = commitTitle(fe.Message)
+	return []fluxRecord{rec}, ""
+}
+
+// storedArtifact is source-controller's NewArtifact message for a Git source, which quotes
+// the commit's subject (truncated by Flux to about 50 characters).
+var storedArtifact = regexp.MustCompile(`^stored artifact for commit '(.*)'$`)
+
+// commitTitle titles a change by the commit it rolls out: the subject source-controller
+// quotes, or the message's own title when it is not in that form. A change is titled by its
+// start, so this is what an annotation of the rollout shows.
+func commitTitle(msg string) string {
+	if m := storedArtifact.FindStringSubmatch(strings.TrimSpace(fluxTitle(msg))); m != nil {
+		return m[1]
+	}
+	return fluxTitle(msg)
 }
 
 func mapKustomization(fe fluxEvent) ([]fluxRecord, string) {

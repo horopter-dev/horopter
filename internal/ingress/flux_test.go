@@ -312,3 +312,19 @@ func TestFluxChangesetSkipsLinesThatAreNotObjects(t *testing.T) {
 	require.Len(t, recs, 1)
 	assert.Equal(t, "Deployment/a/b", recs[0].Subject)
 }
+
+func TestFluxNewArtifactIsTitledByItsCommit(t *testing.T) {
+	for _, tc := range []struct{ msg, want string }{
+		{"stored artifact for commit 'fix(horopter): roll out v0.5.2'",
+			"fix(horopter): roll out v0.5.2"},
+		{"stored artifact for commit 'Merge pull request #589 from yo61/fix/horopter-v0....'",
+			"Merge pull request #589 from yo61/fix/horopter-v0...."},
+		{"stored artifact for commit 'it's quoted'", "it's quoted"},
+		{"stored artifact: revision 'refs/heads/main'",
+			"stored artifact: revision 'refs/heads/main'"},
+	} {
+		fe := fluxEv("GitRepository", "flux-system", "NewArtifact", "info", rev(fluxRev))
+		fe.Message = tc.msg
+		assert.Equal(t, tc.want, mapOne(t, fe).Title, tc.msg)
+	}
+}
