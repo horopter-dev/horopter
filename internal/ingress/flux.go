@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -107,6 +108,8 @@ func mapKustomization(fe fluxEvent) ([]fluxRecord, string) {
 			return []fluxRecord{point}, ""
 		}
 		return []fluxRecord{fe.record(failed, core.LifecycleFailed, rev, key), point}, ""
+	case fe.Reason == "Progressing":
+		return mapChangeset(fe, rev, key)
 	case fe.Reason != "ReconciliationSucceeded":
 		return nil, fmt.Sprintf("Kustomization reason %s is not recorded", fe.Reason)
 	case !gitRevision.MatchString(rev):
@@ -115,6 +118,45 @@ func mapKustomization(fe fluxEvent) ([]fluxRecord, string) {
 	return []fluxRecord{
 		fe.record("flux.kustomization.succeeded", core.LifecycleCompleted, rev, key),
 	}, ""
+}
+
+// mapChangeset records each object a Kustomization's apply changed: one event per line of its
+// Progressing message, "<object> <action>", on the revision's change. Lifecycle none, because
+// these say what the rollout touched and move neither its start nor its end
+// (horopter-internal docs/superpowers/specs/2026-10-06-grafana-annotations-design.md §2).
+// A line whose object is not Kind/name or Kind/namespace/name is skipped, so a Progressing
+// event carrying prose rather than a changeset records nothing.
+func mapChangeset(fe fluxEvent, rev, key string) ([]fluxRecord, string) {
+	if !gitRevision.MatchString(rev) {
+		return nil, fmt.Sprintf("revision %q is not a Git SHA-1 revision", rev)
+	}
+	var recs []fluxRecord
+	for _, line := range strings.Split(fe.Message, "\n") {
+		line = strings.TrimSpace(line)
+		cut := strings.LastIndexByte(line, ' ')
+		if cut <= 0 || cut == len(line)-1 || !isObjectPath(line[:cut]) {
+			continue
+		}
+		object := line[:cut]
+		rec := fe.record("flux.kustomization.applied", core.LifecycleNone, rev, key+"/"+object)
+		rec.Subject, rec.Title = object, fluxTitle(line)
+		rec.Attributes["action"] = line[cut+1:]
+		recs = append(recs, rec)
+	}
+	if len(recs) == 0 {
+		return nil, "a Kustomization changeset with no object lines is not recorded"
+	}
+	return recs, ""
+}
+
+// isObjectPath reports whether s is Kind/name or Kind/namespace/name, as a changeset names
+// an object: two or three non-empty segments and no space.
+func isObjectPath(s string) bool {
+	parts := strings.Split(s, "/")
+	if strings.ContainsRune(s, ' ') || len(parts) < 2 || len(parts) > 3 {
+		return false
+	}
+	return !slices.Contains(parts, "")
 }
 
 func mapHelmRelease(fe fluxEvent) ([]fluxRecord, string) {

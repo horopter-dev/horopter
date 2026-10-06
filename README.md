@@ -864,12 +864,21 @@ records one change per Git revision, as `decisions/2026-10-04-flux-lifecycle-map
 | `GitRepository` `NewArtifact` | change start | `flux.artifact.new` | `started` |
 | Kustomization `ReconciliationSucceeded` | change end | `flux.kustomization.succeeded` | `completed` |
 | Kustomization, `severity: error` | change end and a point | `flux.kustomization.failed` | `failed`, `none` |
+| Kustomization `Progressing` | one event per changed object, on the revision's change | `flux.kustomization.applied` | `none` |
 | HelmRelease `…Succeeded` / `…Failed` | a point | `flux.helmrelease.<reason>` | `none` |
 
 The change's ref is the Git revision, e.g. `flux/refs/heads/main@sha1:…` under a `flux`
 credential. A Kustomization's later runs at the same revision repeat its key, so only its
 first outcome is folded. Anything else, including a non-Git revision, is answered
 `200 {"recorded": 0, "ignored": "<why>"}`, which notification-controller counts as delivered.
+
+A `Progressing` event is kustomize-controller's changeset, one changed object per line
+(`Deployment/lastlight/cloudflared configured`). Each line is recorded with the object as its
+subject and the action as its `action` attribute, so a rollout's change records what it changed.
+A line whose object is not `Kind/name` or `Kind/namespace/name` is skipped.
+Because these subjects are the applied objects rather than the Kustomization, issue the Flux
+credential **without** `--subject-pattern`: a pattern narrowed to `Kustomization/*/*` refuses every
+changeset with `403`, and no single pattern covers both `Kind/name` and `Kind/namespace/name`.
 
 A Flux `Provider` sends the key as a header from its secret:
 

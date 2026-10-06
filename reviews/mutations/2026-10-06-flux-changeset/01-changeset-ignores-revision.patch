@@ -1,0 +1,19 @@
+# mutation: 01-changeset-ignores-revision
+# guards: a changeset joins a change only at a Git SHA-1 revision
+# package: ./internal/ingress/
+# expect: TestFluxChangesetIgnoredCases
+
+diff --git a/internal/ingress/flux.go b/internal/ingress/flux.go
+index e1c9ac7..4eb4743 100644
+--- a/internal/ingress/flux.go
++++ b/internal/ingress/flux.go
+@@ -127,9 +127,6 @@ func mapKustomization(fe fluxEvent) ([]fluxRecord, string) {
+ // A line whose object is not Kind/name or Kind/namespace/name is skipped, so a Progressing
+ // event carrying prose rather than a changeset records nothing.
+ func mapChangeset(fe fluxEvent, rev, key string) ([]fluxRecord, string) {
+-	if !gitRevision.MatchString(rev) {
+-		return nil, fmt.Sprintf("revision %q is not a Git SHA-1 revision", rev)
+-	}
+ 	var recs []fluxRecord
+ 	for _, line := range strings.Split(fe.Message, "\n") {
+ 		line = strings.TrimSpace(line)
