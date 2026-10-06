@@ -1,0 +1,19 @@
+# mutation: 03-no-end-bound
+# guards: a subject first seen after the change ended is out of scope
+# package: ./internal/store/postgres/
+# expect: TestQueryChangesMatchesAnySubjectInScope
+
+diff --git a/internal/store/postgres/query.go b/internal/store/postgres/query.go
+index 2137f45..06df735 100644
+--- a/internal/store/postgres/query.go
++++ b/internal/store/postgres/query.go
+@@ -500,8 +500,7 @@ func appendChangeFilters(sb *strings.Builder, args []any, q ChangeQuery) []any {
+ 	if !q.Subjects.IsZero() {
+ 		args = append(args, q.Subjects.Regexp())
+ 		fmt.Fprintf(sb, ` AND EXISTS (SELECT 1 FROM jsonb_each_text(subject_first_seen) s
+-			WHERE s.key ~ $%d AND (end_at IS NULL
+-			OR s.value::bigint <= (extract(epoch FROM end_at) * 1000000)::bigint))`, len(args))
++			WHERE s.key ~ $%d)`, len(args))
+ 	}
+ 	if q.Type != "" {
+ 		args = append(args, q.Type)
