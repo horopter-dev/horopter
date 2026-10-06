@@ -879,8 +879,10 @@ records one change per Git revision, as `decisions/2026-10-04-flux-lifecycle-map
 | HelmRelease `…Succeeded` / `…Failed` | a point | `flux.helmrelease.<reason>` | `none` |
 
 The change's ref is the Git revision, e.g. `flux/refs/heads/main@sha1:…` under a `flux`
-credential. A Kustomization's later runs at the same revision repeat its key, so only its
-first outcome is folded. Anything else, including a non-Git revision, is answered
+credential. Its title is the commit's subject, as source-controller's `NewArtifact` quotes it
+(Flux truncates it to about 50 characters), since a change is titled by its start. A
+Kustomization's later runs at the same revision repeat its key, so only its first outcome is
+folded. Anything else, including a non-Git revision, is answered
 `200 {"recorded": 0, "ignored": "<why>"}`, which notification-controller counts as delivered.
 
 A `Progressing` event is kustomize-controller's changeset, one changed object per line
