@@ -90,10 +90,21 @@ func FuzzSubjectPatternAgreesWithPathMatch(f *testing.F) {
 }
 
 // outsideTheOracle reports inputs path.Match cannot judge: braces are this package's
-// extension, and invalid UTF-8 is refused before translation.
+// extension, invalid UTF-8 is refused before translation, and path.Match's * backtracks
+// through a subject byte by byte, so against a multi-byte rune it can match ? to a fragment of
+// one ("*??" matches the single rune U+16E16). The regexp matches by rune, which is right.
 func outsideTheOracle(pattern, subject string) bool {
 	return strings.ContainsAny(pattern, "{}") || pattern == "" || subject == "" ||
-		!utf8.ValidString(pattern)
+		!utf8.ValidString(pattern) || (strings.Contains(pattern, "*") && !isASCII(subject))
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 func agreesWithPathMatch(t *testing.T, pattern, subject string) {
@@ -114,4 +125,22 @@ func agreesWithPathMatch(t *testing.T, pattern, subject string) {
 	re, cerr := regexp.Compile(p.Regexp())
 	require.NoError(t, cerr, "translation of %q is not a valid regexp: %s", pattern, p.Regexp())
 	assert.Equal(t, want, re.MatchString(subject), "%q ~ %q via %s", pattern, subject, p.Regexp())
+}
+
+// TestSubjectPatternsCollapseStarRuns: ** means what * means within a segment, and a run of
+// stars is what made Postgres spend seconds compiling one pattern.
+func TestSubjectPatternsCollapseStarRuns(t *testing.T) {
+	many, err := ParseSubjectPatterns([]string{"a" + strings.Repeat("*", 500) + "b"})
+	require.NoError(t, err)
+	one, err := ParseSubjectPatterns([]string{"a*b"})
+	require.NoError(t, err)
+	assert.Equal(t, one.Regexp(), many.Regexp())
+}
+
+// TestSubjectPatternsRefuseARegexpPostgresWouldNotCompile: every alternative is within the
+// per-pattern limits, but together they would exceed Postgres's regex complexity limit, which
+// it reports as an error the caller would see as a 500.
+func TestSubjectPatternsRefuseARegexpPostgresWouldNotCompile(t *testing.T) {
+	_, err := ParseSubjectPatterns([]string{strings.Repeat("{a,b}", 6) + strings.Repeat("x", 900)})
+	assert.ErrorIs(t, err, ErrBadSubjectPattern)
 }

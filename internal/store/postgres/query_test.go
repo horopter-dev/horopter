@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -850,4 +851,20 @@ func TestQueryChangesScopeFollowsAnEarlierEnd(t *testing.T) {
 	got, _, err = s.QueryChanges(ctx, q)
 	require.NoError(t, err)
 	assert.Empty(t, got, "an older outcome moved the end before the subject; scope follows it")
+}
+
+// TestQueryChangesWithAStarHeavyPatternIsCheap guards the regex Postgres compiles: 1,023 stars
+// before a literal once took Postgres 21.7s to compile. The bound is loose on purpose; it
+// catches a regression to seconds, not a slow machine.
+func TestQueryChangesWithAStarHeavyPatternIsCheap(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 10, 6, 13, 0, 0, 0, time.UTC)
+	appendSubject(t, s, tn, "stars-"+uniqueToken(), "Deployment/lastlight/cloudflared",
+		"flux.kustomization.applied", at, core.LifecycleNone)
+	q := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0, nil)
+	q.Subjects = mustSubjects(t, strings.Repeat("*", 1023)+"q")
+	start := time.Now()
+	_, _, err := s.QueryChanges(ctx, q)
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), 3*time.Second)
 }

@@ -19,6 +19,10 @@ var errReversedRange = errors.New("reversed range")
 const (
 	maxSubjectPatternBytes = 1024
 	maxSubjectAlternatives = 64
+	// maxSubjectRegexpBytes bounds the expression Postgres compiles for one request. Its
+	// compile cost, not the match, is what a hostile pattern spends, and past its own
+	// complexity limit Postgres refuses the query outright.
+	maxSubjectRegexpBytes = 4096
 )
 
 // SubjectPatterns is a set of subject globs, any of which may match: path.Match's syntax, as a
@@ -49,7 +53,12 @@ func ParseSubjectPatterns(raw []string) (SubjectPatterns, error) {
 	if len(alts) == 0 {
 		return SubjectPatterns{}, nil
 	}
-	return SubjectPatterns{regexp: "^(" + strings.Join(alts, "|") + ")$"}, nil
+	re := "^(" + strings.Join(alts, "|") + ")$"
+	if len(re) > maxSubjectRegexpBytes {
+		return SubjectPatterns{}, fmt.Errorf("%w: compiles to more than %d bytes",
+			ErrBadSubjectPattern, maxSubjectRegexpBytes)
+	}
+	return SubjectPatterns{regexp: re}, nil
 }
 
 // patternAlternatives validates one raw pattern and returns the regular expression for each
@@ -153,6 +162,11 @@ func globToRegexp(g string) string {
 	for i := 0; i < len(g); i++ {
 		switch c := g[i]; c {
 		case '*':
+			// A run of stars means one star within a segment; emitting each made Postgres
+			// spend seconds compiling the backtracking it implies.
+			for i+1 < len(g) && g[i+1] == '*' {
+				i++
+			}
 			b.WriteString("[^/]*")
 		case '?':
 			b.WriteString("[^/]")
