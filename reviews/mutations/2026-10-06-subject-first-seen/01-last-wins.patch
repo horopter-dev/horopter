@@ -1,0 +1,18 @@
+# mutation: 01-last-wins
+# guards: a subject keeps its earliest time, in any fold order
+# package: ./internal/core/
+# expect: TestFoldKeepsEachSubjectsEarliestTime
+
+diff --git a/internal/core/fold.go b/internal/core/fold.go
+index 2551217..5b4683a 100644
+--- a/internal/core/fold.go
++++ b/internal/core/fold.go
+@@ -114,7 +114,7 @@ func mergedSubjectFirstSeen(cur *Change, ev Event) map[string]int64 {
+ 		return out
+ 	}
+ 	at := ev.OccurredAt.UnixMicro()
+-	if prev, ok := out[ev.Subject]; !ok || at < prev {
++	if _, ok := out[ev.Subject]; true || !ok {
+ 		out[ev.Subject] = at
+ 	}
+ 	return out
