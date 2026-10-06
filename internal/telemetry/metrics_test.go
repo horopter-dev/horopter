@@ -91,6 +91,63 @@ func TestHTTPMetricsDropTheRequestHost(t *testing.T) {
 	assert.Equal(t, "caller-chosen.example", address, "the telemetry span must keep the host")
 }
 
+// TestHTTPMetricsExportWithoutErrorsForAnyHost pins that a sampled request's exemplar
+// survives the scrape whatever Host it arrived with. Prometheus refuses an exemplar whose
+// labels exceed 128 runes and the exporter reports each refusal through otel.Handle, so a
+// long Host — Flux calls ingress by its full service name — logged a warning per scrape.
+func TestHTTPMetricsExportWithoutErrorsForAnyHost(t *testing.T) {
+	for name, host := range map[string]string{
+		"a pod IP, as kubelet's probes send": "10.244.2.243:8080",
+		"a full service name, as Flux sends": "horopter-ingress.horopter.svc.cluster.local:8080",
+	} {
+		t.Run(name, func(t *testing.T) {
+			setTelemetryEnv(t)
+			restoreGlobalProviders(t)
+			recordTraces(t)
+			logged := captureSlog(t)
+
+			tel, err := Setup(context.Background(), "horopter-test")
+			require.NoError(t, err)
+			defer tel.Flush()
+
+			handler := otelhttp.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}), "")
+			req := httptest.NewRequest(http.MethodPost, "/v1/events/flux", nil)
+			req.Host = host
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+
+			exemplars := exemplarLabelNames(t, tel.registry, "http_server_")
+			require.Contains(t, exemplars, "trace_id", "the request's exemplar must still be exported")
+			assert.NotContains(t, exemplars, "server_address")
+			assert.NotContains(t, exemplars, "server_port")
+			assert.NotContains(t, logged.String(), "opentelemetry reported an error")
+		})
+	}
+}
+
+// exemplarLabelNames returns every label name on every histogram bucket exemplar whose family
+// name starts with prefix.
+func exemplarLabelNames(t *testing.T, registry *prometheus.Registry, prefix string) []string {
+	t.Helper()
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	var names []string
+	for _, family := range families {
+		if !strings.HasPrefix(family.GetName(), prefix) {
+			continue
+		}
+		for _, series := range family.GetMetric() {
+			for _, bucket := range series.GetHistogram().GetBucket() {
+				for _, label := range bucket.GetExemplar().GetLabel() {
+					names = append(names, label.GetName())
+				}
+			}
+		}
+	}
+	return names
+}
+
 // freePort returns a port nothing is listening on, by binding :0 and releasing it. Another
 // process could take the port in between; that race is preferred to adding anything to
 // production code for tests.
