@@ -2,11 +2,25 @@
 
 ## [0.6.0](https://github.com/horopter-dev/horopter/compare/v0.5.2...v0.6.0) (2026-10-06)
 
-
 ### Features
 
-* **core:** a change is titled by its start ([#64](https://github.com/horopter-dev/horopter/issues/64)) ([cedfd24](https://github.com/horopter-dev/horopter/commit/cedfd2421653016f409353fc1957038034fa1059))
-* **ingress:** title a Flux rollout by its commit subject ([#65](https://github.com/horopter-dev/horopter/issues/65)) ([04ab911](https://github.com/horopter-dev/horopter/commit/04ab911ecad1fb88a2edaa29ff92e9fe3fe2c338))
+* **core:** a change is titled by its **start**: the title of its earliest start event that has
+  one, instead of its last event's. The start says what changed; later events say how it went,
+  and keep their titles on themselves. Without a titled start the old rule stands (last
+  non-empty title, else the first event's type). **Behaviour change:** a change whose start
+  and outcome both carry titles now shows the start's — e.g. "Deploy v2.5.0" rather than
+  "Done". ([#64](https://github.com/horopter-dev/horopter/pull/64))
+* **ingress:** a Flux rollout is titled by its commit: the subject source-controller's
+  `NewArtifact` quotes (truncated by Flux to about 50 characters), so a Grafana annotation of
+  the rollout reads as the commit rather than `Reconciliation finished in …`.
+  ([#65](https://github.com/horopter-dev/horopter/pull/65))
+
+### Upgrading
+
+* Schema version 11: `horopter-migrate` adds `change.title_started_at` and **retitles existing
+  changes** that have a titled start event by the same rule, so a rebuild afterwards changes
+  nothing. Existing Flux rollouts take their `NewArtifact` title as it was stored, in the
+  `stored artifact for commit '…'` form; rollouts after the upgrade show the bare subject.
 
 ## [0.5.2](https://github.com/horopter-dev/horopter/compare/v0.5.1...v0.5.2) (2026-10-06)
 
