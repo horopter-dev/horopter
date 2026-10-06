@@ -52,6 +52,10 @@ const fluxSeverityError = "error"
 
 const maxFluxTitle = 200
 
+// maxFluxMetadataBytes bounds the event metadata copied into attributes, in bytes of JSON, so
+// that a large annotation cannot push an event over the store's attribute cap.
+const maxFluxMetadataBytes = 1024
+
 // gitRevision matches a Git SHA-1 revision as Flux reports it, e.g.
 // refs/heads/main@sha1:<40 hex>. Only these join a change: an OCI source's latest@sha256:…
 // needs the mapping record's collision check first.
@@ -69,18 +73,54 @@ func mapFluxEvent(fe fluxEvent) ([]fluxRecord, string, error) {
 	case fe.Timestamp.IsZero():
 		return nil, "", errors.New("the Flux event has no timestamp")
 	}
+	recs, ignored := mapFluxObject(fe)
+	extra := fluxMetadataAttributes(fe.Metadata)
+	for _, rec := range recs {
+		for k, v := range extra {
+			if _, taken := rec.Attributes[k]; !taken {
+				rec.Attributes[k] = v
+			}
+		}
+	}
+	return recs, ignored, nil
+}
+
+func mapFluxObject(fe fluxEvent) ([]fluxRecord, string) {
 	switch fe.InvolvedObject.Kind {
 	case "GitRepository":
-		recs, ignored := mapGitRepository(fe)
-		return recs, ignored, nil
+		return mapGitRepository(fe)
 	case "Kustomization":
-		recs, ignored := mapKustomization(fe)
-		return recs, ignored, nil
+		return mapKustomization(fe)
 	case "HelmRelease":
-		recs, ignored := mapHelmRelease(fe)
-		return recs, ignored, nil
+		return mapHelmRelease(fe)
 	}
-	return nil, fmt.Sprintf("kind %s is not recorded", fe.InvolvedObject.Kind), nil
+	return nil, fmt.Sprintf("kind %s is not recorded", fe.InvolvedObject.Kind)
+}
+
+// fluxOwnMetadata are the keys Flux's controllers and notification-controller set themselves
+// (fluxcd/pkg apis/event/v1 metadata.go, and an Alert's summary). The route maps the ones it
+// needs; the rest are not producer data. Every other key came from an
+// event.toolkit.fluxcd.io/ annotation on the object, an Alert's eventMetadata, or a controller
+// value such as helm-controller's app-version, and notification-controller has already
+// stripped the prefix, so they cannot be told apart by name.
+var fluxOwnMetadata = map[string]bool{
+	"revision": true, "originRevision": true, "token": true, "commit": true,
+	"commit_status": true, "change_request": true, "summary": true,
+}
+
+// fluxMetadataAttributes is the event metadata kept as attributes: every key that is not
+// Flux's own, or none at all if together they exceed maxFluxMetadataBytes.
+func fluxMetadataAttributes(meta map[string]string) map[string]any {
+	extra := map[string]any{}
+	for k, v := range meta {
+		if !fluxOwnMetadata[k] {
+			extra[k] = v
+		}
+	}
+	if encoded, err := json.Marshal(extra); err != nil || len(encoded) > maxFluxMetadataBytes {
+		return nil
+	}
+	return extra
 }
 
 func mapGitRepository(fe fluxEvent) ([]fluxRecord, string) {

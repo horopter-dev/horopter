@@ -180,6 +180,54 @@ func TestFluxARepeatedHelmReleaseFailureIsOnePoint(t *testing.T) {
 	assert.Equal(t, got.Key, mapOne(t, failed(fluxAt.Add(time.Hour))).Key)
 }
 
+func TestFluxMetadataBecomesAttributes(t *testing.T) {
+	got := mapOne(t, fluxEv("HelmRelease", "podinfo", "UpgradeSucceeded", "info",
+		map[string]string{
+			"revision": "6.5.0", "token": "d1", "app-version": "v6.5.0", "team": "platform",
+		}))
+	assert.Equal(t, "v6.5.0", got.Attributes["app-version"],
+		"helm-controller's app-version, and any event.toolkit.fluxcd.io/ annotation, is kept")
+	assert.Equal(t, "platform", got.Attributes["team"])
+}
+
+func TestFluxMetadataKeepsNoneOfFluxsOwnKeys(t *testing.T) {
+	got := mapOne(t, fluxEv("HelmRelease", "podinfo", "UpgradeSucceeded", "info",
+		map[string]string{
+			"revision": "6.5.0", "token": "d1", "originRevision": "o", "commit": "c",
+			"commit_status": "update", "change_request": "1", "summary": "s",
+		}))
+	for _, key := range []string{
+		"token", "originRevision", "commit", "commit_status", "change_request", "summary",
+	} {
+		assert.NotContains(t, got.Attributes, key)
+	}
+	assert.Equal(t, "6.5.0", got.Attributes["revision"])
+}
+
+func TestFluxMetadataCannotOverwriteTheRoutesAttributes(t *testing.T) {
+	got := mapOne(t, fluxEv("HelmRelease", "podinfo", "UpgradeSucceeded", "info",
+		map[string]string{
+			"revision": "6.5.0", "kind": "Spoofed", "severity": "x", "chart_version": "0.0.1",
+		}))
+	assert.Equal(t, "HelmRelease", got.Attributes["kind"])
+	assert.Equal(t, "info", got.Attributes["severity"])
+	assert.Equal(t, "6.5.0", got.Attributes["chart_version"])
+}
+
+// TestFluxMetadataOverItsBudgetIsDropped keeps an oversized annotation from costing the event:
+// the store rejects attributes over its cap, so copied metadata that would push them there is
+// left out whole, and the route's own attributes are still recorded.
+func TestFluxMetadataOverItsBudgetIsDropped(t *testing.T) {
+	got := mapOne(t, fluxEv("HelmRelease", "podinfo", "UpgradeSucceeded", "info",
+		map[string]string{
+			"revision": "6.5.0", "app-version": "v6.5.0",
+			"notes": strings.Repeat("x", maxFluxMetadataBytes),
+		}))
+	assert.NotContains(t, got.Attributes, "notes")
+	assert.NotContains(t, got.Attributes, "app-version")
+	assert.Equal(t, "6.5.0", got.Attributes["chart_version"])
+}
+
 func TestFluxHelmReleaseWithoutTokenOrRevisionIsStillRecorded(t *testing.T) {
 	got := mapOne(t, fluxEv("HelmRelease", "podinfo", "UninstallSucceeded", "info", nil))
 	assert.Equal(t, "HelmRelease/flux-system/podinfo///UninstallSucceeded/2026-10-05T14:40:02Z",

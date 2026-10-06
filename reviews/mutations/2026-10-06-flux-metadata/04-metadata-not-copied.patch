@@ -1,0 +1,18 @@
+# mutation: 04-metadata-not-copied
+# guards: non-Flux metadata becomes attributes
+# package: ./internal/ingress/
+# expect: TestFluxMetadataBecomesAttributes
+
+diff --git a/internal/ingress/flux.go b/internal/ingress/flux.go
+index 3d8d687..d0d9256 100644
+--- a/internal/ingress/flux.go
++++ b/internal/ingress/flux.go
+@@ -78,7 +78,7 @@ func mapFluxEvent(fe fluxEvent) ([]fluxRecord, string, error) {
+ 	for _, rec := range recs {
+ 		for k, v := range extra {
+ 			if _, taken := rec.Attributes[k]; !taken {
+-				rec.Attributes[k] = v
++				_ = v
+ 			}
+ 		}
+ 	}

@@ -1,0 +1,18 @@
+# mutation: 03-no-budget
+# guards: metadata over its budget is dropped
+# package: ./internal/ingress/
+# expect: TestFluxMetadataOverItsBudgetIsDropped
+
+diff --git a/internal/ingress/flux.go b/internal/ingress/flux.go
+index 3d8d687..d85024f 100644
+--- a/internal/ingress/flux.go
++++ b/internal/ingress/flux.go
+@@ -117,7 +117,7 @@ func fluxMetadataAttributes(meta map[string]string) map[string]any {
+ 			extra[k] = v
+ 		}
+ 	}
+-	if encoded, err := json.Marshal(extra); err != nil || len(encoded) > maxFluxMetadataBytes {
++	if encoded, err := json.Marshal(extra); err != nil || len(encoded) > maxFluxMetadataBytes*100 {
+ 		return nil
+ 	}
+ 	return extra
