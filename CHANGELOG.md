@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/horopter-dev/horopter/compare/v0.5.1...v0.5.2) (2026-10-06)
+
+
+### Bug Fixes
+
+* **egress:** size reads by the columns they return ([#61](https://github.com/horopter-dev/horopter/issues/61)) ([acf7781](https://github.com/horopter-dev/horopter/commit/acf778107255c96812aee63adcde76c9b6d7f43c))
+
 ## [0.5.1](https://github.com/horopter-dev/horopter/compare/v0.5.0...v0.5.1) (2026-10-06)
 
 
