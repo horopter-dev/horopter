@@ -908,6 +908,22 @@ spec:
 An `Alert`'s event sources match a namespace exactly, so list every namespace holding a
 `GitRepository`, `Kustomization` or `HelmRelease` you want recorded.
 
+Event metadata becomes attributes, and so tags in Grafana. That covers every key except the
+ones Flux sets for its own use (`revision`, `originRevision`, `token`, `commit`,
+`commit_status`, `change_request`, `summary`). It includes helm-controller's `app-version`,
+which comes from the chart's `appVersion`. You can add your own keys with annotations on the
+object, which Flux copies into its events:
+
+```yaml
+metadata:
+  annotations:
+    event.toolkit.fluxcd.io/team: platform   # recorded as the attribute team: platform
+```
+
+A key the route sets itself, such as `kind` or `chart_version`, keeps the route's value. If the
+copied keys together exceed 1 KiB of JSON, none of them are kept, and the event is recorded
+without them.
+
 ## Type suffixes and the lifecycle field
 
 Every event asserts something about its change's lifecycle: whether a projection opens,
