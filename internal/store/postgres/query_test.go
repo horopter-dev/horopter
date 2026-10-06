@@ -824,6 +824,8 @@ func TestQueryChangesMatchesAnySubjectInScope(t *testing.T) {
 	assert.Equal(t, 0, find("*/drifted/*"), "a subject first seen after the end is out of scope")
 	assert.Equal(t, 1, find("*/drifted/*", "*/lastlight/*"), "repeated patterns OR")
 	assert.Equal(t, 0, find("*/monitoring/*"))
+	assert.Equal(t, 1, find("Kustomization/*/*"),
+		"the subject of the event that sets the end is in scope: the bound is <=, not <")
 
 	q := changeQuery(t, tn, at.Add(-time.Hour), at.Add(2*time.Hour), 0, nil)
 	q.Subjects, q.Type = mustSubjects(t, "*/lastlight/*"), "deployment.started"
@@ -867,4 +869,38 @@ func TestQueryChangesWithAStarHeavyPatternIsCheap(t *testing.T) {
 	_, _, err := s.QueryChanges(ctx, q)
 	require.NoError(t, err)
 	assert.Less(t, time.Since(start), 3*time.Second)
+}
+
+// TestQueryChangesMatchesMetacharacterSubjectsInPostgres pins what the fuzzer cannot: the
+// fuzzer checks the translation with Go's regexp, and the store runs it through Postgres's
+// ~. Each subject is matched by a pattern of itself and not by a near miss.
+func TestQueryChangesMatchesMetacharacterSubjectsInPostgres(t *testing.T) {
+	ctx, s := context.Background(), newStore(t)
+	at := time.Date(2026, 10, 6, 15, 0, 0, 0, time.UTC)
+	for _, tc := range []struct{ subject, pattern, nearMiss string }{
+		{"K/a.b/n", "K/a.b/n", "K/axb/n"},
+		{"K/a+b/n", "K/a+b/n", "K/aab/n"},
+		{"K/(x)/n", "K/(x)/n", "K/x/n"},
+		{"K/a|b/n", "K/a|b/n", "K/a/n"},
+		{"K/d]/n", "K/[[:digit:]]/n", "K/1/n"},
+		{"K/=/n", "K/[=a=]/n", "K/b/n"},
+		{"K/x$y/n", "K/x$y/n", "K/x/n"},
+	} {
+		t.Run(tc.subject, func(t *testing.T) {
+			tn := tenant(t) // one per case, so no case's near miss is another's match
+			ref := "meta-" + uniqueToken()
+			appendSubject(t, s, tn, ref, tc.subject, "x.annotated", at, core.LifecycleNone)
+			appendSubject(t, s, tn, ref+"-miss", tc.nearMiss, "x.annotated", at,
+				core.LifecycleNone)
+			q := changeQuery(t, tn, at.Add(-time.Minute), at.Add(time.Minute), 0, nil)
+			q.Subjects = mustSubjects(t, tc.pattern)
+			got, _, err := s.QueryChanges(ctx, q)
+			require.NoError(t, err)
+			var refs []string
+			for _, c := range got {
+				refs = append(refs, c.Ref.String())
+			}
+			assert.Equal(t, []string{"ci/" + ref}, refs, "%q ~ %q in Postgres", tc.pattern, tc.subject)
+		})
+	}
 }
