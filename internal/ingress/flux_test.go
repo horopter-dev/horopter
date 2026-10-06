@@ -297,3 +297,18 @@ func TestFluxChangesetIgnoredCases(t *testing.T) {
 		})
 	}
 }
+
+// TestFluxChangesetSkipsLinesThatAreNotObjects drives isObjectPath directly: each line has a
+// space, so it reaches the object check, and only the last names an object.
+func TestFluxChangesetSkipsLinesThatAreNotObjects(t *testing.T) {
+	recs, _, err := mapFluxEvent(changeset(strings.Join([]string{
+		"Reconciliation in progress",
+		"Deployment configured",
+		"a/b/c/d configured",
+		"Deployment//x configured",
+		"Deployment/a/b configured",
+	}, "\n"), fluxRev))
+	require.NoError(t, err)
+	require.Len(t, recs, 1)
+	assert.Equal(t, "Deployment/a/b", recs[0].Subject)
+}

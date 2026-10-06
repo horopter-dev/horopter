@@ -1,7 +1,7 @@
 # mutation: 04-changeset-accepts-prose
 # guards: a Progressing event carrying prose records nothing
 # package: ./internal/ingress/
-# expect: TestFluxIgnores
+# expect: TestFluxChangesetSkipsLinesThatAreNotObjects
 
 diff --git a/internal/ingress/flux.go b/internal/ingress/flux.go
 index e1c9ac7..cb5d1a1 100644
