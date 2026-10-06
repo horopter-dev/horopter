@@ -893,7 +893,7 @@ func TestRefoldRefRecreatesAMissingChange(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{
 		"actor", "attributes", "end", "first_seen_at", "last_event_id", "sources",
-		"start", "started_at", "status", "subject", "title", "type",
+		"start", "started_at", "status", "subject", "subject_first_seen", "title", "type",
 	}, got.Altered)
 	assert.Equal(t, want, oneChange(ctx, t, s, tn, "ci/d1"))
 }
@@ -956,4 +956,24 @@ func TestRefoldRefReportsARepairedStartAndSources(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"sources", "start", "started_at"}, got.Altered)
 	assert.Equal(t, want, oneChange(ctx, t, s, tn, "ci/d1"))
+}
+
+// TestRefoldReportsACorruptedSubjectMap: subject_first_seen is derived like sources, so a
+// hand-corrupted one is what an operator refolds to repair, and the refold must name it.
+func TestRefoldReportsACorruptedSubjectMap(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)
+	ev := mkEvent(tn, eventID(t, "sfs"), "k-sfs-"+uniqueToken(), "sfs-"+uniqueToken(),
+		"deployment.started", at)
+	_, _, err := s.AppendEvent(ctx, ev)
+	require.NoError(t, err)
+	ref := core.RefFor(ev)
+	_, err = s.Pool().Exec(ctx,
+		`UPDATE change SET subject_first_seen = '{"wrong": 1}' WHERE tenant = $1 AND ref = $2`,
+		tn, ref.String())
+	require.NoError(t, err)
+
+	res, err := s.RefoldRef(ctx, tn, ref)
+	require.NoError(t, err)
+	assert.Contains(t, res.Altered, "subject_first_seen")
 }

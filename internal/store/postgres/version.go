@@ -15,7 +15,7 @@ import (
 // read from the SQL: a daemon has to be able to refuse a schema newer than the one its
 // binary was built against, and an old binary run against a newer database records that
 // database's true, higher version precisely so this assertion fails loudly.
-const ExpectedSchemaVersion = 9
+const ExpectedSchemaVersion = 10
 
 // SchemaVersion reads the version recorded by the migration.
 func (s *Store) SchemaVersion(ctx context.Context) (int, error) {

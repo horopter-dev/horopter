@@ -96,6 +96,13 @@ type Change struct {
 	// change. The union is commutative, so a rebuild reproduces it whatever order the log
 	// replays in.
 	Sources []string
+	// SubjectFirstSeen maps every contributing event's subject to the earliest occurred_at
+	// among that subject's events, in Unix microseconds — the precision Postgres stores, so
+	// the incremental fold and migration 0010's backfill agree exactly. A running minimum, so
+	// a rebuild reproduces it whatever order the log replays in. A subject is in a change's
+	// scope when it first appeared no later than the change's end; that bound is applied when
+	// reading, because an out-of-order terminal event can move the end earlier.
+	SubjectFirstSeen map[string]int64
 }
 
 // IsOpen reports whether the change is still in flight. An open change renders

@@ -488,3 +488,39 @@ func TestLifecycleVocabularyIsEnforced(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "event_lifecycle_vocabulary")
 }
+
+// TestMigration0010BackfillsEachSubjectsEarliestTime pins the backfill to core.Fold's rule:
+// each subject maps to the minimum occurred_at of its events, in microseconds. A subject seen
+// twice is what tells a minimum from a last-wins or an arbitrary pick.
+func TestMigration0010BackfillsEachSubjectsEarliestTime(t *testing.T) {
+	ctx := context.Background()
+	pool, _ := freshDatabase(t)
+	at := time.Date(2026, 9, 14, 10, 0, 0, 123456000, time.UTC)
+
+	for _, e := range []struct {
+		subject string
+		d       time.Duration
+	}{{"Deployment/a/x", time.Minute}, {"Service/a/y", 2 * time.Minute}, {"Deployment/a/x", 0}} {
+		mustExec(t, pool, `INSERT INTO event
+			(id, tenant, schema_version, source, type, subject, occurred_at, received_at,
+			 correlation_ref)
+			VALUES ($1, 'acme', 1, 'flux', 'x.annotated', $2, $3, $3, 'r-1')`,
+			core.NewULID(at.Add(e.d), rand.Reader), e.subject, at.Add(e.d))
+	}
+	mustExec(t, pool, `INSERT INTO change
+		(tenant, ref, subject, type, title, actor, started_at, first_seen_at, end_at,
+		 status, attributes, last_event_id)
+		VALUES ('acme', 'r-1', 'Deployment/a/x', 'x.annotated', 'x.annotated', '', NULL, $1,
+		        NULL, 'in_progress', '{}'::jsonb, '')`, at)
+
+	_, err := postgres.Migrate(ctx, pool)
+	require.NoError(t, err)
+
+	var got map[string]int64
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT subject_first_seen FROM change WHERE ref = 'legacy/r-1'`).Scan(&got))
+	assert.Equal(t, map[string]int64{
+		"Deployment/a/x": at.UnixMicro(),
+		"Service/a/y":    at.Add(2 * time.Minute).UnixMicro(),
+	}, got)
+}

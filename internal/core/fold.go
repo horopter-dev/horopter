@@ -1,6 +1,7 @@
 package core
 
 import (
+	"maps"
 	"slices"
 	"strings"
 )
@@ -101,6 +102,24 @@ func mergedSources(cur *Change, ev Event) []string {
 	return out
 }
 
+// mergedSubjectFirstSeen returns cur's subject map with ev's subject at the earlier of its two
+// times, in a fresh map: Fold's purity forbids sharing one with cur. Never nil, because pgx
+// writes a nil map as SQL NULL and the column is NOT NULL.
+func mergedSubjectFirstSeen(cur *Change, ev Event) map[string]int64 {
+	out := map[string]int64{}
+	if cur != nil {
+		maps.Copy(out, cur.SubjectFirstSeen)
+	}
+	if ev.Subject == "" {
+		return out
+	}
+	at := ev.OccurredAt.UnixMicro()
+	if prev, ok := out[ev.Subject]; !ok || at < prev {
+		out[ev.Subject] = at
+	}
+	return out
+}
+
 // Fold applies one event to a change and returns the result. cur is nil for
 // the first event of a ref, but a zero-value *Change (as produced by, e.g.,
 // `c := m[ref]; m[ref] = Fold(&c, ev)` over a map[Ref]Change) must yield
@@ -126,6 +145,7 @@ func Fold(cur *Change, ev Event) Change {
 	out.Subject = ev.Subject
 	out.Type = ev.Type
 	out.Sources = mergedSources(cur, ev)
+	out.SubjectFirstSeen = mergedSubjectFirstSeen(cur, ev)
 	// Last NON-EMPTY wins. Actor is optional on both ingest paths, so an event carrying
 	// none is ordinary traffic; an unconditional assignment let any such event blank the
 	// actor a previous event had recorded, and a rebuild reproduced the erasure rather
