@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/horopter-dev/horopter/compare/v0.4.1...v0.5.0) (2026-10-06)
+
+
+### Features
+
+* **egress:** match subject= as a glob against every subject a change touched ([#57](https://github.com/horopter-dev/horopter/issues/57)) ([ec810ea](https://github.com/horopter-dev/horopter/commit/ec810ea457fc68fa276379d7c6522cc7eec100f9))
+* **ingress:** record the objects each Flux apply changed ([#54](https://github.com/horopter-dev/horopter/issues/54)) ([0387417](https://github.com/horopter-dev/horopter/commit/0387417a0e70fc5d8d02c9699cb7c02e9622551b))
+
+
+### Code Refactoring
+
+* **store:** keep each change's subjects and when each first appeared ([#55](https://github.com/horopter-dev/horopter/issues/55)) ([0e3309f](https://github.com/horopter-dev/horopter/commit/0e3309f5638fca35796c7a3c55e643eb72d63ca1))
+
 ## [0.4.1](https://github.com/horopter-dev/horopter/compare/v0.4.0...v0.4.1) (2026-10-06)
 
 ### Bug Fixes
