@@ -20,6 +20,7 @@ import (
 	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/sdk/instrumentation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/exemplar"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 )
 
@@ -82,12 +83,39 @@ func newPrometheusReader() (*prometheus.Registry, sdkmetric.Reader, error) {
 // — unauthenticated on egress — could otherwise create a new series per request. Telemetry
 // spans keep both attributes: otelhttp.WithServerName would have bounded the metrics too,
 // but it overwrites the attributes on spans as well.
+//
+// The SDK keeps the attributes a filter removes on the measurement's exemplar, so the view
+// also drops them there. Kept, they put the caller's Host back into the export, and a long
+// one pushes the exemplar past Prometheus's 128-rune limit: the exporter then drops it and
+// reports an error on every scrape.
 func withoutRequestHost() sdkmetric.View {
 	return sdkmetric.NewView(
 		sdkmetric.Instrument{Name: "*", Scope: instrumentation.Scope{Name: otelhttp.ScopeName}},
-		sdkmetric.Stream{AttributeFilter: attribute.NewDenyKeysFilter(
-			semconv.ServerAddressKey, semconv.ServerPortKey)},
+		sdkmetric.Stream{
+			AttributeFilter: attribute.NewDenyKeysFilter(
+				semconv.ServerAddressKey, semconv.ServerPortKey),
+			ExemplarReservoirProviderSelector: withoutFilteredAttributes,
+		},
 	)
+}
+
+// withoutFilteredAttributes selects the SDK's default exemplar reservoir for agg, wrapped so
+// that it never stores the attributes the view filtered out.
+func withoutFilteredAttributes(agg sdkmetric.Aggregation) exemplar.ReservoirProvider {
+	provider := sdkmetric.DefaultExemplarReservoirProviderSelector(agg)
+	return func(kept attribute.Set) exemplar.Reservoir {
+		return filteredAttributesDropped{provider(kept)}
+	}
+}
+
+// filteredAttributesDropped is an exemplar.Reservoir that offers each measurement without its
+// filtered attributes.
+type filteredAttributesDropped struct{ exemplar.Reservoir }
+
+func (r filteredAttributesDropped) Offer(
+	ctx context.Context, t time.Time, val exemplar.Value, _ []attribute.KeyValue,
+) {
+	r.Reservoir.Offer(ctx, t, val, nil)
 }
 
 // otlpMetricReader returns the OTLP periodic reader as a provider option, or no option when
