@@ -65,3 +65,11 @@ func cutEventQuery(t *testing.T, tn string, limit int, budget int64) postgres.Ev
 	q.MaxRowTextBytes = budget
 	return q
 }
+
+// mustSubjects parses subject patterns for a ChangeQuery, failing the test on a bad one.
+func mustSubjects(t *testing.T, raw ...string) core.SubjectPatterns {
+	t.Helper()
+	p, err := core.ParseSubjectPatterns(raw)
+	require.NoError(t, err)
+	return p
+}

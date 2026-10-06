@@ -97,7 +97,7 @@ func TestEstimateChangesAppliesTheQuerysFiltersAndLimit(t *testing.T) {
 	require.NoError(t, err)
 
 	filtered := sizedWindow(t, tn, 10)
-	filtered.Subject = "acme/prod"
+	filtered.Subjects = mustSubjects(t, "acme/prod")
 	est, err := s.EstimateChanges(ctx, filtered)
 	require.NoError(t, err)
 	assert.Equal(t, postgres.ReadEstimate{
@@ -105,7 +105,7 @@ func TestEstimateChangesAppliesTheQuerysFiltersAndLimit(t *testing.T) {
 	}, est, "the subject filter must exclude the other change")
 
 	limited := sizedWindow(t, tn, 1)
-	limited.Subject = "acme/prod"
+	limited.Subjects = mustSubjects(t, "acme/prod")
 	est, err = s.EstimateChanges(ctx, limited)
 	require.NoError(t, err)
 	got, truncated, err := s.QueryChanges(ctx, limited)

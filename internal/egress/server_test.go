@@ -1738,3 +1738,25 @@ func TestFollowingNextAcrossSubSecondStartsReturnsEachChangeOnce(t *testing.T) {
 		assert.Equal(t, 1, n, "%s returned %d times", ref, n)
 	}
 }
+
+func TestSubjectPatternsFilterEveryChangeRoute(t *testing.T) {
+	h, s, tn := newServer(t)
+	key := readerKey(t, s, tn)
+	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
+	seedChange(t, s, seedSpec{tenant: tn, ref: "ci/dep-1", source: "github"}, at)
+
+	window := "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
+	assert.Equal(t, []string{"ci/dep-1"},
+		refsIn(t, get(t, h, key, "/v1/changes?tenant="+tn+window+"&subject=acme/*")))
+	assert.Empty(t, refsIn(t, get(t, h, key, "/v1/changes?tenant="+tn+window+"&subject=other/*")))
+
+	for _, route := range []string{
+		"/v1/changes?tenant=" + tn + window,
+		"/adapters/grafana/annotations?from=1789376400000&to=1789383600000",
+		"/adapters/otlp/spans?from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z",
+	} {
+		rec := get(t, h, key, route+"&subject=%5B")
+		assert.Equal(t, http.StatusBadRequest, rec.Code, route)
+		assert.Contains(t, rec.Body.String(), "bad subject pattern", route)
+	}
+}

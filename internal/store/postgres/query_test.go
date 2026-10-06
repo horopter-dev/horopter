@@ -98,7 +98,7 @@ func TestQueryChangesFiltersBySubjectTypeAndStatus(t *testing.T) {
 	assert.Equal(t, "ci/d2", byType[0].Ref.String())
 
 	subjectQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0, nil)
-	subjectQuery.Subject = "other/stack"
+	subjectQuery.Subjects = mustSubjects(t, "other/stack")
 	none, _, err := s.QueryChanges(ctx, subjectQuery)
 	require.NoError(t, err)
 	assert.Empty(t, none)
@@ -132,8 +132,9 @@ func TestQueryChangesCombinesFiltersAndLimit(t *testing.T) {
 	require.NoError(t, err)
 
 	combinedQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0, nil)
-	combinedQuery.Subject, combinedQuery.Type, combinedQuery.Status =
-		"acme/prod", "deployment.completed", "completed"
+	combinedQuery.Subjects = mustSubjects(t, "acme/prod")
+	combinedQuery.Type, combinedQuery.Status =
+		"deployment.completed", "completed"
 	combined, _, err := s.QueryChanges(ctx, combinedQuery)
 	require.NoError(t, err)
 	require.Len(t, combined, 2,
@@ -143,8 +144,9 @@ func TestQueryChangesCombinesFiltersAndLimit(t *testing.T) {
 	assert.Equal(t, "ci/multi-b", combined[1].Ref.String())
 
 	limitedQuery := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 1, nil)
-	limitedQuery.Subject, limitedQuery.Type, limitedQuery.Status =
-		"acme/prod", "deployment.completed", "completed"
+	limitedQuery.Subjects = mustSubjects(t, "acme/prod")
+	limitedQuery.Type, limitedQuery.Status =
+		"deployment.completed", "completed"
 	limited, _, err := s.QueryChanges(ctx, limitedQuery)
 	require.NoError(t, err)
 	require.Len(t, limited, 1, "limit must cap the combined-filter result set")
@@ -786,4 +788,66 @@ func TestChangesSharingAStartAreOrderedByRef(t *testing.T) {
 		refs[i] = c.Ref.String()
 	}
 	assert.Equal(t, []string{"ci/a", "ci/b", "ci/c"}, refs)
+}
+
+func appendSubject(t *testing.T, s *postgres.Store, tn, ref, subject, typ string, at time.Time,
+	lc core.Lifecycle) {
+	t.Helper()
+	ev := mkEvent(tn, eventID(t, ref+subject), "k-"+uniqueToken(), ref, typ, at)
+	ev.Subject, ev.Lifecycle = subject, lc
+	_, _, err := s.AppendEvent(context.Background(), ev)
+	require.NoError(t, err)
+}
+
+func TestQueryChangesMatchesAnySubjectInScope(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)
+	ref := "rollout-" + uniqueToken()
+	appendSubject(t, s, tn, ref, "GitRepository/flux-system/flux-system", "flux.artifact.new",
+		at, core.LifecycleStarted)
+	appendSubject(t, s, tn, ref, "Deployment/lastlight/cloudflared",
+		"flux.kustomization.applied", at.Add(5*time.Second), core.LifecycleNone)
+	appendSubject(t, s, tn, ref, "Kustomization/flux-system/apps",
+		"flux.kustomization.succeeded", at.Add(9*time.Second), core.LifecycleCompleted)
+	appendSubject(t, s, tn, ref, "Deployment/drifted/x", "flux.kustomization.applied",
+		at.Add(time.Hour), core.LifecycleNone)
+
+	find := func(raw ...string) int {
+		q := changeQuery(t, tn, at.Add(-time.Hour), at.Add(2*time.Hour), 0, nil)
+		q.Subjects = mustSubjects(t, raw...)
+		got, _, err := s.QueryChanges(ctx, q)
+		require.NoError(t, err)
+		return len(got)
+	}
+	assert.Equal(t, 1, find("*/lastlight/*"), "a non-last event's subject matches")
+	assert.Equal(t, 0, find("*/drifted/*"), "a subject first seen after the end is out of scope")
+	assert.Equal(t, 1, find("*/drifted/*", "*/lastlight/*"), "repeated patterns OR")
+	assert.Equal(t, 0, find("*/monitoring/*"))
+
+	q := changeQuery(t, tn, at.Add(-time.Hour), at.Add(2*time.Hour), 0, nil)
+	q.Subjects, q.Type = mustSubjects(t, "*/lastlight/*"), "deployment.started"
+	got, _, err := s.QueryChanges(ctx, q)
+	require.NoError(t, err)
+	assert.Empty(t, got, "patterns AND with the other filters")
+}
+
+func TestQueryChangesScopeFollowsAnEarlierEnd(t *testing.T) {
+	ctx, s, tn := context.Background(), newStore(t), tenant(t)
+	at := time.Date(2026, 10, 6, 11, 0, 0, 0, time.UTC)
+	ref := "late-" + uniqueToken()
+	appendSubject(t, s, tn, ref, "Deployment/a/x", "flux.kustomization.applied",
+		at.Add(5*time.Second), core.LifecycleNone)
+	appendSubject(t, s, tn, ref, "Kustomization/flux-system/apps", "flux.kustomization.succeeded",
+		at.Add(10*time.Second), core.LifecycleCompleted)
+	q := changeQuery(t, tn, at.Add(-time.Hour), at.Add(time.Hour), 0, nil)
+	q.Subjects = mustSubjects(t, "*/a/*")
+	got, _, err := s.QueryChanges(ctx, q)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "in scope while the end is after it")
+
+	appendSubject(t, s, tn, ref, "Kustomization/flux-system/apps", "flux.kustomization.failed",
+		at.Add(2*time.Second), core.LifecycleFailed)
+	got, _, err = s.QueryChanges(ctx, q)
+	require.NoError(t, err)
+	assert.Empty(t, got, "an older outcome moved the end before the subject; scope follows it")
 }
