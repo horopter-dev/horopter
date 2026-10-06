@@ -876,6 +876,9 @@ A `Progressing` event is kustomize-controller's changeset, one changed object pe
 (`Deployment/lastlight/cloudflared configured`). Each line is recorded with the object as its
 subject and the action as its `action` attribute, so a rollout's change records what it changed.
 A line whose object is not `Kind/name` or `Kind/namespace/name` is skipped.
+Because these subjects are the applied objects rather than the Kustomization, issue the Flux
+credential **without** `--subject-pattern`: a pattern narrowed to `Kustomization/*/*` refuses every
+changeset with `403`, and no single pattern covers both `Kind/name` and `Kind/namespace/name`.
 
 A Flux `Provider` sends the key as a header from its secret:
 

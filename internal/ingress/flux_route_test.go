@@ -257,3 +257,14 @@ func TestFluxChangesetOnAnUnseenRevisionIsClosedByItsOutcome(t *testing.T) {
 	assert.Equal(t, "completed", status, "the same run's outcome closes it")
 	assert.NotNil(t, end)
 }
+
+// TestFluxChangesetIsRefusedToASubjectScopedCredential pins what the README says: a
+// changeset's subjects are the applied objects, not the Kustomization, so a credential
+// narrowed to Kustomization/*/* is refused the whole request rather than storing part of it.
+func TestFluxChangesetIsRefusedToASubjectScopedCredential(t *testing.T) {
+	f := newIngressFixture(t)
+	_, key := seedCredential(t, f.store, "flux", "Kustomization/*/*")
+	rec := postFlux(t, f.srv, key, changesetBody("apps-"+uniqueToken(), uniqueRevision(t),
+		time.Date(2026, 10, 6, 11, 0, 0, 0, time.UTC), "Deployment/a/b configured"))
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+}
