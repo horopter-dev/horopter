@@ -4,6 +4,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 )
 
 // StatusForType reports the terminal status implied by an event type, and
@@ -120,6 +121,34 @@ func mergedSubjectFirstSeen(cur *Change, ev Event) map[string]int64 {
 	return out
 }
 
+// foldTitle names the change by its earliest titled start event, which is commutative, and
+// otherwise by the fallback described in Fold. A start's time is compared at the microsecond
+// precision Postgres stores it at, so a live fold and a rebuild agree on which start is
+// earlier even when a producer sent nanoseconds.
+func foldTitle(out *Change, ev Event) {
+	if a, _ := classify(ev); a == assertsStart && ev.Title != "" {
+		at := ev.OccurredAt.Truncate(time.Microsecond)
+		if out.TitleStartedAt == nil || earlierTitle(at, ev.Title, *out.TitleStartedAt, out.Title) {
+			out.Title, out.TitleStartedAt = ev.Title, &at
+		}
+		return
+	}
+	if out.TitleStartedAt != nil {
+		return
+	}
+	if ev.Title != "" {
+		out.Title = ev.Title
+	} else if out.Title == "" {
+		out.Title = ev.Type
+	}
+}
+
+// earlierTitle orders two titled starts: by time, then by title, so either fold order agrees.
+func earlierTitle(at time.Time, title string, heldAt time.Time, held string) bool {
+	heldAt = heldAt.Truncate(time.Microsecond)
+	return at.Before(heldAt) || (at.Equal(heldAt) && title < held)
+}
+
 // Fold applies one event to a change and returns the result. cur is nil for
 // the first event of a ref, but a zero-value *Change (as produced by, e.g.,
 // `c := m[ref]; m[ref] = Fold(&c, ev)` over a map[Ref]Change) must yield
@@ -155,8 +184,9 @@ func Fold(cur *Change, ev Event) Change {
 		out.Actor = ev.Actor
 	}
 	out.LastEventID = ev.ID
-	// Last NON-EMPTY wins, for the same reason as Actor above. An unconditional
-	// assignment did not merely blank a recorded title: the fallback below then
+	// The earliest titled START wins (foldTitle); without one, last NON-EMPTY wins, for the
+	// same reason as Actor above. An unconditional assignment did not merely blank a
+	// recorded title: the fallback below then
 	// substituted the LATER event's type, turning "Deploy v2.5.0 to prod" into
 	// "deployment.annotated". A plausible-looking wrong answer is worse than an empty
 	// one, and it reaches the egress JSON, the Grafana annotation title and the OTLP
@@ -170,11 +200,7 @@ func Fold(cur *Change, ev Event) Change {
 	// Removing that means not storing the fallback at all and having every renderer
 	// apply it — none does today, since the stored title is never empty — which changes
 	// what the API returns and is out of scope here.
-	if ev.Title != "" {
-		out.Title = ev.Title
-	} else if out.Title == "" {
-		out.Title = ev.Type
-	}
+	foldTitle(&out, ev)
 	// FirstSeenAt is the INFERENCE: the earliest occurred_at of any event folded onto
 	// the ref, which is evidence the change must have existed by then. It is a running
 	// minimum, so it does not matter which event carries it or when that event arrives.

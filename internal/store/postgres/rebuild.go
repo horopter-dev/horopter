@@ -98,12 +98,13 @@ func lockRebuildWrite(ctx context.Context, tx pgx.Tx, tenantID string) error {
 // For a ref whose drift predates this version, a rebuild can still produce a different
 // Subject, Type, Title, Actor, attribute set, LastEventID, End or Status than what live
 // folding holds, under four different rules. Subject, Type and LastEventID are assigned
-// unconditionally: "the last event folded wins". Title and Actor are guarded non-empty, so
-// their rule is "the last NON-EMPTY event folded wins" — a reorder still moves them
-// between two events that both carry one, but an event carrying none cannot blank what a
-// previous event recorded, which is why the guard exists. Attributes MERGE, so the set of
-// keys is a union and commutative — no reorder loses or gains one — while the value at a
-// key that two events both set follows last-wins like the first group; a query filtering
+// unconditionally: "the last event folded wins". Actor, and Title when no start event carries
+// one, are guarded non-empty, so their rule is "the last NON-EMPTY event folded wins" — a
+// reorder still moves them between two events that both carry one, but an event carrying none
+// cannot blank what a previous event recorded, which is why the guard exists. A titled start
+// fixes Title instead, by the earliest such start, which no reorder moves. Attributes MERGE,
+// so the set of keys is a union and commutative — no reorder loses or gains one — while the value
+// at a key that two events both set follows last-wins like the first group; a query filtering
 // on such a key can therefore match a different set of changes afterwards. End and Status follow
 // the fourth: "the last TERMINAL event folded wins". The guard on End being nil is what stops a
 // NON-terminal event moving them — a late annotation cannot reopen a change that already closed
