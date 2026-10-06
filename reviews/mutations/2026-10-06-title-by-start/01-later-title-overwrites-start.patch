@@ -1,0 +1,19 @@
+# mutation: 01-later-title-overwrites-start
+# guards: a titled start keeps the title against later events
+# package: ./internal/core/
+# expect: TestFoldTitlesAChangeByItsStart
+
+diff --git a/internal/core/fold.go b/internal/core/fold.go
+index cea50ad..b490463 100644
+--- a/internal/core/fold.go
++++ b/internal/core/fold.go
+@@ -133,9 +133,6 @@ func foldTitle(out *Change, ev Event) {
+ 		}
+ 		return
+ 	}
+-	if out.TitleStartedAt != nil {
+-		return
+-	}
+ 	if ev.Title != "" {
+ 		out.Title = ev.Title
+ 	} else if out.Title == "" {
