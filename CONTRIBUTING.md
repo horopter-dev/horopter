@@ -136,7 +136,7 @@ and `shfmt` over `hack/*.sh`, and parsing the standalone compose file. If you
 are touching the release configuration or the shell scripts, expect CI to be the
 first thing that tells you.
 
-## Commit messages
+## Commit messages and pull requests
 
 Commits follow [Conventional Commits][cc]. A `commit-msg` hook rejects a
 non-conforming message once you have run `prek install` above. CI does not check
@@ -146,18 +146,34 @@ commit messages, so that hook is the only thing that will tell you:
     feat(egress): return Retry-After when a read is shed
     chore: pin the dev compose stack to v0.1.0-dev.3
 
+Keep the subject in the imperative mood and under 72 characters.
+
+Pull requests are squash-merged; it is the only merge button. The squash commit
+takes the **pull request's title** as its subject, so that title is what lands on
+`main`, and it is the only conventional-commit line Release Please reads. The
+types on your branch's own commits are not read. Give the title a conventional
+type and write it as the changelog entry it will become. Nothing checks the title,
+so check it yourself before merging.
+
 The type matters beyond tidiness — it determines the next version number. `fix:`
 selects a patch bump, `feat:` a minor, and a `!` or a `BREAKING CHANGE:` footer a
 major (a minor while the project is pre-1.0). Choose it deliberately.
+
+Because each pull request becomes one changelog entry under one type, keep pull
+requests small and open them often:
+
+- **One user-visible change per pull request.** A change that is both a fix and a
+  feature is two pull requests; squashed together, one of them disappears from
+  the changelog, and a `feat:` under a `fix:` title ships as a patch.
+- **Open it when that change is ready**, rather than carrying the next change on
+  the same branch. Review fixes for the change belong in its pull request; they
+  squash away.
 
 Releases are cut by merging the release pull request. On every push to `main`,
 Release Please keeps one pull request open that bumps the version by those rules and
 adds the changes to `CHANGELOG.md`. Merging it tags the release, and the release
 workflow builds and publishes it. Nobody picks a version number or pushes a tag by
 hand.
-
-Keep the subject in the imperative mood and under 72 characters, and keep one
-logical change per commit.
 
 ## Tests
 
