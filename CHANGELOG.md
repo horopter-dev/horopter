@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/horopter-dev/horopter/compare/v0.6.0...v0.7.0) (2026-10-06)
+
+
+### Features
+
+* **ingress:** keep Flux event metadata as attributes ([#68](https://github.com/horopter-dev/horopter/issues/68)) ([cc001d9](https://github.com/horopter-dev/horopter/commit/cc001d92fed6fc1a02c2d2088830785422e57319))
+
 ## [0.6.0](https://github.com/horopter-dev/horopter/compare/v0.5.2...v0.6.0) (2026-10-06)
 
 ### Features
