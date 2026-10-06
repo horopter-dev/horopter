@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.0](https://github.com/horopter-dev/horopter/compare/v0.5.2...v0.6.0) (2026-10-06)
+
+
+### Features
+
+* **core:** a change is titled by its start ([#64](https://github.com/horopter-dev/horopter/issues/64)) ([cedfd24](https://github.com/horopter-dev/horopter/commit/cedfd2421653016f409353fc1957038034fa1059))
+* **ingress:** title a Flux rollout by its commit subject ([#65](https://github.com/horopter-dev/horopter/issues/65)) ([04ab911](https://github.com/horopter-dev/horopter/commit/04ab911ecad1fb88a2edaa29ff92e9fe3fe2c338))
+
 ## [0.5.2](https://github.com/horopter-dev/horopter/compare/v0.5.1...v0.5.2) (2026-10-06)
 
 
