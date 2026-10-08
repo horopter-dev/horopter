@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/horopter-dev/horopter/compare/v0.7.0...v0.7.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **egress:** give the read-too-large 422 a remedy that works ([#71](https://github.com/horopter-dev/horopter/issues/71)) ([bd8fa83](https://github.com/horopter-dev/horopter/commit/bd8fa838f6f6920578704af9e094c82e36a97736))
+
 ## [0.7.0](https://github.com/horopter-dev/horopter/compare/v0.6.0...v0.7.0) (2026-10-06)
 
 
