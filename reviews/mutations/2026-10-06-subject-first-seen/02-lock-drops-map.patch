@@ -4,15 +4,15 @@
 # expect: TestAppendKeepsEarlierSubjects
 
 diff --git a/internal/store/postgres/append.go b/internal/store/postgres/append.go
-index 1c8d566..3a38e13 100644
+index 2ec3616..2e80dbf 100644
 --- a/internal/store/postgres/append.go
 +++ b/internal/store/postgres/append.go
 @@ -529,7 +529,7 @@ func lockAndLoadChange(
  		tenantID, ref,
  	).Scan(&c.Tenant, &storedRef, &c.Subject, &c.Type, &c.Title, &c.Actor,
  		&c.Start, &startedAt, &c.FirstSeenAt, &endAt, &st, &c.Attributes,
--		&c.LastEventID, &c.Sources, &c.SubjectFirstSeen)
-+		&c.LastEventID, &c.Sources, new(map[string]int64))
+-		&c.LastEventID, &c.Sources, &c.SubjectFirstSeen, &c.TitleStartedAt)
++		&c.LastEventID, &c.Sources, new(map[string]int64), &c.TitleStartedAt)
  	if errors.Is(err, pgx.ErrNoRows) {
  		return core.Change{}, false, nil
  	}

@@ -46,7 +46,12 @@ tasks:
         if [ -n "{{.CLI_ARGS}}" ]; then
           hack/mutation-battery.sh {{.CLI_ARGS}}
         else
-          for d in reviews/mutations/*/; do hack/mutation-battery.sh "$d"; done
+          failed=0
+          for d in reviews/mutations/*/; do
+            echo "== $d"
+            hack/mutation-battery.sh "$d" || failed=1
+          done
+          exit "$failed"
         fi
   lint:
     desc: Run golangci-lint

@@ -4,15 +4,15 @@
 # expect: a test that a later append moving first_seen_at earlier is stored
 
 diff --git a/internal/store/postgres/append.go b/internal/store/postgres/append.go
-index 36cf441..f8402cf 100644
+index 2ec3616..5eb1c91 100644
 --- a/internal/store/postgres/append.go
 +++ b/internal/store/postgres/append.go
-@@ -562,7 +562,7 @@ func upsertChange(ctx context.Context, tx pgx.Tx, c core.Change) error {
+@@ -564,7 +564,7 @@ func upsertChange(ctx context.Context, tx pgx.Tx, c core.Change) error {
  		ON CONFLICT (tenant, ref) DO UPDATE SET
  		  subject=EXCLUDED.subject, type=EXCLUDED.type, title=EXCLUDED.title,
  		  actor=EXCLUDED.actor, started_at=EXCLUDED.started_at,
 -		  first_seen_at=EXCLUDED.first_seen_at, end_at=EXCLUDED.end_at,
 +		  end_at=EXCLUDED.end_at,
  		  status=EXCLUDED.status, attributes=EXCLUDED.attributes,
- 		  last_event_id=EXCLUDED.last_event_id, sources=EXCLUDED.sources`,
- 		c.Tenant, c.Ref.String(), c.Subject, c.Type, c.Title, c.Actor,
+ 		  last_event_id=EXCLUDED.last_event_id, sources=EXCLUDED.sources,
+ 		  subject_first_seen=EXCLUDED.subject_first_seen,

@@ -53,6 +53,20 @@ jobs:
         with:
           persist-credentials: false
 
+      # The battery needs a database and runs by hand, so a change that moves the code a patch
+      # mutates would otherwise break it unseen. This fails that pull request instead.
+      - name: Check every mutation patch still applies
+        run: |
+          set -euo pipefail
+          failed=0
+          for patch in reviews/mutations/*/*.patch; do
+            if ! git apply --check "$patch" 2> /dev/null; then
+              echo "::error file=${patch}::no longer applies; re-derive it against the current code"
+              failed=1
+            fi
+          done
+          exit "$failed"
+
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:

@@ -4,10 +4,10 @@
 # expect: a test that changes sharing a start are ordered by ref
 
 diff --git a/internal/store/postgres/query.go b/internal/store/postgres/query.go
-index 5d961b2..2e724a0 100644
+index ce7843f..eb45f72 100644
 --- a/internal/store/postgres/query.go
 +++ b/internal/store/postgres/query.go
-@@ -208,12 +208,12 @@ func changeSelection(q ChangeQuery) selection {
+@@ -215,13 +215,13 @@ func changeSelection(q ChangeQuery) selection {
  		args = append(args, q.After.Start.UTC(), q.After.Ref)
  		fmt.Fprintf(&sb, " AND (c.start_at, c.ref) > ($%d, $%d)", len(args)-1, len(args))
  	}
@@ -17,8 +17,9 @@ index 5d961b2..2e724a0 100644
  		args = append(args, limit)
  		fmt.Fprintf(&sb, " LIMIT $%d", len(args))
  	}
--	return selection{sql: sb.String(), args: args, order: "start_at ASC, ref ASC"}
-+	return selection{sql: sb.String(), args: args, order: "start_at ASC"}
+ 	return selection{
+-		sql: sb.String(), args: args, order: "start_at ASC, ref ASC", columns: changeColumns,
++		sql: sb.String(), args: args, order: "start_at ASC", columns: changeColumns,
+ 	}
  }
  
- // eventSelection selects the event rows q reads. See ListEvents for the ref predicate.
