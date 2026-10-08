@@ -82,7 +82,8 @@ func eventsURL(tn string) string { return "/v1/events?tenant=" + tn }
 func tooLargeBody(capacity int64) string {
 	return fmt.Sprintf(
 		`{"error":"the first row of this read is larger than egress's read memory limit of `+
-			`%d bytes allows; filter it out of the query, or raise HOROPTER_EGRESS_READ_MEMORY_BYTES"}`,
+			`%d bytes allows; narrow the read to a subject, type or status that row does not `+
+			`have (on /v1/events, to a ref), or raise HOROPTER_EGRESS_READ_MEMORY_BYTES"}`,
 		capacity)
 }
 

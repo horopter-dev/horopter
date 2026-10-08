@@ -294,6 +294,7 @@ func (s *Server) tooLarge(
 		"needed_bytes", est.FirstRowBytes*readExpansionFactor, "capacity_bytes", capacity)
 	writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf(
 		"the first row of this read is larger than egress's read memory limit of %d bytes "+
-			"allows; filter it out of the query, or raise HOROPTER_EGRESS_READ_MEMORY_BYTES",
+			"allows; narrow the read to a subject, type or status that row does not have "+
+			"(on /v1/events, to a ref), or raise HOROPTER_EGRESS_READ_MEMORY_BYTES",
 		capacity))
 }
