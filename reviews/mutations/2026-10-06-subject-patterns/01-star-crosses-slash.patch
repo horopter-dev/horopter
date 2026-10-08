@@ -4,13 +4,13 @@
 # expect: TestSubjectPatternsMatch
 
 diff --git a/internal/core/subjectpattern.go b/internal/core/subjectpattern.go
-index 8f73ead..f67674d 100644
+index 5955fb4..b0bd24c 100644
 --- a/internal/core/subjectpattern.go
 +++ b/internal/core/subjectpattern.go
-@@ -153,7 +153,7 @@ func globToRegexp(g string) string {
- 	for i := 0; i < len(g); i++ {
- 		switch c := g[i]; c {
- 		case '*':
+@@ -167,7 +167,7 @@ func globToRegexp(g string) string {
+ 			for i+1 < len(g) && g[i+1] == '*' {
+ 				i++
+ 			}
 -			b.WriteString("[^/]*")
 +			b.WriteString(".*")
  		case '?':

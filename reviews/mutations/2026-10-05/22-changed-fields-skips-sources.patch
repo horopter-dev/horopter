@@ -4,14 +4,14 @@
 # expect: none predicted; the repair tests corrupt title and first_seen_at only
 
 diff --git a/internal/store/postgres/refold.go b/internal/store/postgres/refold.go
-index 395a9c6..3d7e223 100644
+index 5fd25b0..fade854 100644
 --- a/internal/store/postgres/refold.go
 +++ b/internal/store/postgres/refold.go
-@@ -274,7 +274,6 @@ func changedFields(before core.Change, found bool, after core.Change) []string {
+@@ -276,7 +276,6 @@ func changedFields(before core.Change, found bool, after core.Change) []string {
  		{"start", !sameInstant(&before.Start, &after.Start)},
  		{"started_at", !sameInstant(before.StartedAt, after.StartedAt)},
  		{"first_seen_at", !sameInstant(&before.FirstSeenAt, &after.FirstSeenAt)},
 -		{"sources", !slices.Equal(before.Sources, after.Sources)},
+ 		{"subject_first_seen", !maps.Equal(before.SubjectFirstSeen, after.SubjectFirstSeen)},
+ 		{"title_started_at", !sameInstant(before.TitleStartedAt, after.TitleStartedAt)},
  	} {
- 		if c.differs {
- 			moved = append(moved, c.name)
