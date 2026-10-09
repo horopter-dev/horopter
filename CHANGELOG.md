@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.2](https://github.com/horopter-dev/horopter/compare/v0.7.1...v0.7.2) (2026-10-09)
+
+
+### Bug Fixes
+
+* **deps:** move to Go 1.27.2 and golang.org/x/net v0.60.0 ([#74](https://github.com/horopter-dev/horopter/issues/74)) ([3858d43](https://github.com/horopter-dev/horopter/commit/3858d4348feadd0bd1e0f35e5f1ab36a8935c058))
+
 ## [0.7.1](https://github.com/horopter-dev/horopter/compare/v0.7.0...v0.7.1) (2026-10-08)
 
 
