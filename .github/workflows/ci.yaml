@@ -18,15 +18,9 @@ concurrency:
 jobs:
   test:
     name: Build, lint and test
-    # Pinned rather than ubuntu-latest: that label migrates to Ubuntu 26.04 between
-    # 2026-10-19 and 2026-11-19, which would swap the runner under this workflow
-    # mid-migration. 24.04 is what ubuntu-latest resolves to today, so pinning changes
-    # nothing now and makes the eventual move a deliberate bump.
-    #
-    # Not 26.04 yet: actionlint 1.7.12 -- the latest release, and what the Lint workflows
-    # step below installs -- does not know that label and exits 1 on it. Revisit when it
-    # does; the image itself is ready (shellcheck 0.11.0, Docker 29.4.2, Compose 5.1.3).
-    runs-on: ubuntu-24.04
+    # Pinned rather than ubuntu-latest, so a new image arrives as a Renovate pull
+    # request instead of GitHub's switch.
+    runs-on: ubuntu-26.04
     # The suite is seconds and the whole job a few minutes. Without a bound, a service
     # container that never reports healthy wedges the job for the six-hour default.
     timeout-minutes: 15
@@ -120,11 +114,13 @@ jobs:
       # somebody remembered; running them here is what makes them a gate.
       - name: Lint workflows
         env:
-          # renovate: datasource=go depName=github.com/rhysd/actionlint
-          ACTIONLINT_VERSION: v1.7.12
+          # The maintained fork, github.com/kjanat/actionlint: upstream rhysd/actionlint
+          # stopped at 1.7.12, which rejects the ubuntu-26.04 runner label.
+          # renovate: datasource=go depName=actionlint.kjanat.dev
+          ACTIONLINT_VERSION: v1.17.0
         run: |
           set -euo pipefail
-          go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+          go install "actionlint.kjanat.dev/cmd/actionlint@${ACTIONLINT_VERSION}"
           actionlint
 
       - name: Audit workflows
@@ -163,15 +159,9 @@ jobs:
 
   release-check:
     name: Check the release configuration
-    # Pinned rather than ubuntu-latest: that label migrates to Ubuntu 26.04 between
-    # 2026-10-19 and 2026-11-19, which would swap the runner under this workflow
-    # mid-migration. 24.04 is what ubuntu-latest resolves to today, so pinning changes
-    # nothing now and makes the eventual move a deliberate bump.
-    #
-    # Not 26.04 yet: actionlint 1.7.12 -- the latest release, and what the Lint workflows
-    # step below installs -- does not know that label and exits 1 on it. Revisit when it
-    # does; the image itself is ready (shellcheck 0.11.0, Docker 29.4.2, Compose 5.1.3).
-    runs-on: ubuntu-24.04
+    # Pinned rather than ubuntu-latest, so a new image arrives as a Renovate pull
+    # request instead of GitHub's switch.
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - name: Check out the repository
