@@ -2,7 +2,7 @@
 # PR #1 was one of its bumps -- which means it has been running on defaults: no cooldown, no
 # grouping, and no say over which ecosystems it watches. This file is that say.
 #
-# Two ecosystems, deliberately, and Docker is not one of them. The only third-party image
+# Three ecosystems, deliberately, and Docker is not one of them. The only third-party image
 # either compose file names is `postgres:18`, which is already a floating tag that picks up
 # 18.x at pull time, so there is nothing for Dependabot to bump. Enabling the ecosystem would
 # instead put it in reach of `ghcr.io/horopter-dev/horopter-*`, whose tags in
@@ -48,6 +48,19 @@ updates:
       actions-minor-and-patch:
         patterns: ["*"]
         update-types: [minor, patch]
+    commit-message:
+      prefix: chore
+      include: scope
+
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      hooks:
+        patterns: ["*"]
     commit-message:
       prefix: chore
       include: scope
