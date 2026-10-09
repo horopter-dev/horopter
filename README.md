@@ -22,7 +22,8 @@ either daemon anywhere its port can be reached.
 ## Quick start
 
 Horopter is published as four container images — `horopter-ingress`, `horopter-egress`,
-`horopter-migrate` and `horoctl` — and a compose file that runs them. A release carries a
+`horopter-migrate` and `horoctl` — and a compose file that runs them. A fifth,
+`horopter-flux`, runs in a Kubernetes cluster beside Flux ([Flux](#flux)). A release carries a
 `docker-compose.yaml` release asset with that release's image tags already rendered in:
 
     curl -O https://github.com/horopter-dev/horopter/releases/download/v0.1.0/docker-compose.yaml
@@ -865,6 +866,47 @@ is missing, receipt time is used, since that is the earliest moment the system c
 to.
 
 ## Flux
+
+Two ways in: `horopter-flux`, a client that watches Flux's objects, and the older ingest route
+below, which it replaces.
+
+### horopter-flux
+
+`horopter-flux` runs in the cluster, watches GitRepositories, Kustomizations, HelmReleases and
+their Kubernetes Events read-only, and posts what they show with a producer key. It keeps no
+state: on start it derives every change from the objects' status, and its idempotency keys,
+prefixed with the `kube-system` Namespace's uid, make re-posting harmless.
+
+| Flux shows | recorded as | type | lifecycle |
+|---|---|---|---|
+| a GitRepository artifact at a new Git revision | commit change start | `flux.artifact.new` | `started` |
+| Kustomization Ready=True `ReconciliationSucceeded` | commit change end | `flux.kustomization.succeeded` | `completed` |
+| Kustomization Ready=False, except `DependencyNotReady` and `Progressing` | commit change end and a point | `flux.kustomization.failed` | `failed`, `none` |
+| Kustomization `Progressing` Event | one event per changed object | `flux.kustomization.applied` | `none` |
+| HelmRelease "Running 'install'/'upgrade' action" | release change start | `flux.helmrelease.<action>.started` | `started` |
+| that revision reaching `status.history`, deployed or failed | release change end | `flux.helmrelease.<action>.succeeded` / `.failed` | `completed`, `failed` |
+| a rollback remediating it | release change end | `flux.helmrelease.<action>.rolled_back` / `.rollback.failed` | `rolled_back`, `failed` |
+| HelmRelease Released=False `PendingRelease` | a point, and the open release change ends | `flux.helmrelease.pending_release` | `none` |
+| HelmRelease `DriftCorrected*`, `Test*`, `Uninstall*` Event | a point | `flux.helmrelease.<reason>` | `none` |
+
+A commit change's ref is the Git revision and its title the commit subject, from
+source-controller's `NewArtifact` Event; if that Event has expired, the title is the branch and
+short SHA (`main@b1f2477`). A release change's ref is
+`HelmRelease/<namespace>/<name>/<uid>/v<helm revision>` and its title the app version. Only
+Git sources start a commit change.
+
+It reads `HOROPTER_INGRESS_URL` and `HOROPTER_INGRESS_KEY`, and exits with status 2 if either is
+empty. Issue one key per cluster, without `--subject-pattern`, for the same reason as the route's
+below. The locus defaults to the source, so each cluster is its own correlation space:
+
+    horoctl admin keys issue --dsn "$DATABASE_URL" --tenant <tenant-id> --role producer \
+      --source flux-<cluster>
+
+It needs `get`, `list` and `watch` on `gitrepositories`, `kustomizations`, `helmreleases` and
+`events`, and `get` on the `kube-system` Namespace. An event Horopter refuses with a 4xx is
+logged at ERROR and dropped; one it cannot take (no answer, or 503) is retried with backoff.
+
+### The ingest route
 
 `POST /v1/events/flux` takes Flux notification-controller's `generic` provider payload and
 records one change per Git revision, as `decisions/2026-10-04-flux-lifecycle-mapping.md` in

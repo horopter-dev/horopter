@@ -1,0 +1,52 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: Disabled
+    kustomize.toolkit.fluxcd.io/ssa: Ignore
+  creationTimestamp: "2026-07-21T09:04:58Z"
+  finalizers:
+    - finalizers.fluxcd.io
+  generation: 5
+  labels:
+    app.kubernetes.io/instance: flux-system
+    app.kubernetes.io/managed-by: flux-operator
+    app.kubernetes.io/part-of: flux
+    app.kubernetes.io/version: v2.9.2
+    fluxcd.controlplane.io/name: flux
+    fluxcd.controlplane.io/namespace: flux-system
+    homelab.yo61.net/function: platform
+  name: flux-system
+  namespace: flux-system
+  resourceVersion: "40101464"
+  uid: 5667821f-e5d8-48e6-b2ea-02a421185f7f
+spec:
+  interval: 1m0s
+  provider: github
+  ref:
+    name: refs/heads/main
+  timeout: 60s
+  url: https://github.com/example/fleet.git
+status:
+  artifact:
+    digest: sha256:8c58e083f1567a834ae389df32b167adc4b4cff04de432b7aab4038bc2cc474a
+    lastUpdateTime: "2026-10-09T15:26:44Z"
+    path: gitrepository/flux-system/flux-system/b1f2477dc2c215154e22f674405c3fde594fd494.tar.gz
+    revision: refs/heads/main@sha1:b1f2477dc2c215154e22f674405c3fde594fd494
+    size: 1383513
+    url: http://source-controller.flux-system.svc.cluster.local./gitrepository/flux-system/flux-system/b1f2477dc2c215154e22f674405c3fde594fd494.tar.gz
+  conditions:
+    - lastTransitionTime: "2026-10-09T15:26:44Z"
+      message: stored artifact for revision 'refs/heads/main@sha1:b1f2477dc2c215154e22f674405c3fde594fd494'
+      observedGeneration: 5
+      reason: Succeeded
+      status: "True"
+      type: Ready
+    - lastTransitionTime: "2026-10-09T15:26:44Z"
+      message: stored artifact for revision 'refs/heads/main@sha1:b1f2477dc2c215154e22f674405c3fde594fd494'
+      observedGeneration: 5
+      reason: Succeeded
+      status: "True"
+      type: ArtifactInStorage
+  lastHandledReconcileAt: "2026-10-07T00:12:36.23799+01:00"
+  observedGeneration: 5

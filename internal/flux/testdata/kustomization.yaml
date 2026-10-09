@@ -1,0 +1,94 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  annotations:
+    reconcile.fluxcd.io/requestedAt: "2026-10-07T00:12:38.284621+01:00"
+  creationTimestamp: "2026-10-05T14:48:05Z"
+  finalizers:
+    - finalizers.fluxcd.io
+  generation: 1
+  labels:
+    kustomize.toolkit.fluxcd.io/name: flux-system
+    kustomize.toolkit.fluxcd.io/namespace: flux-system
+  name: horopter
+  namespace: flux-system
+  resourceVersion: "40092854"
+  uid: d63121ca-1364-4717-a255-770755c11e9c
+spec:
+  dependsOn:
+    - name: horopter-db
+    - name: apps
+  force: false
+  interval: 1h
+  path: ./apps/horopter/app
+  prune: true
+  retryInterval: 2m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  timeout: 10m
+status:
+  conditions:
+    - lastTransitionTime: "2026-10-09T16:30:12Z"
+      message: 'Applied revision: refs/heads/main@sha1:b1f2477dc2c215154e22f674405c3fde594fd494'
+      observedGeneration: 1
+      reason: ReconciliationSucceeded
+      status: "True"
+      type: Ready
+  history:
+    - digest: sha256:63eeb6d2d48d2cfe8f89101f904b910b4d0fcaf93a08c29e5591b2870e862500
+      firstReconciled: "2026-10-08T17:02:19Z"
+      lastReconciled: "2026-10-09T16:30:12Z"
+      lastReconciledDuration: 350.547439ms
+      lastReconciledStatus: ReconciliationSucceeded
+      metadata:
+        revision: refs/heads/main@sha1:b1f2477dc2c215154e22f674405c3fde594fd494
+      totalReconciliations: 26
+    - digest: sha256:5b652123b572b6b9fca377b2264b9685c1d6041e30b3422ff463e3a47de58eea
+      firstReconciled: "2026-10-06T23:14:08Z"
+      lastReconciled: "2026-10-08T16:42:53Z"
+      lastReconciledDuration: 280.291104ms
+      lastReconciledStatus: ReconciliationSucceeded
+      metadata:
+        revision: refs/heads/main@sha1:0af97fb2eb8b3c52309a7409b17202449107367e
+      totalReconciliations: 46
+    - digest: sha256:5110094bd180003ad1c9f2bdcd11425158b69b1211a4dbe862c8f6d658fabd13
+      firstReconciled: "2026-10-06T22:53:56Z"
+      lastReconciled: "2026-10-06T22:53:56Z"
+      lastReconciledDuration: 298.486434ms
+      lastReconciledStatus: ReconciliationSucceeded
+      metadata:
+        revision: refs/heads/main@sha1:5b856824ff4d6bcb1d60f1df45344e0df0e1d77c
+      totalReconciliations: 1
+    - digest: sha256:d8a320aeb58aeb9edcdbf9b48787c465904daa24223265b3b886e8af1c8614dc
+      firstReconciled: "2026-10-06T17:08:51Z"
+      lastReconciled: "2026-10-06T22:06:10Z"
+      lastReconciledDuration: 307.397369ms
+      lastReconciledStatus: ReconciliationSucceeded
+      metadata:
+        revision: refs/heads/main@sha1:0f340abe4216585611c41a7800dfa2386fa85212
+      totalReconciliations: 6
+    - digest: sha256:9861c42ccbbe8281865cd9f8e140903d98752e0013866eb954f8a92edd604128
+      firstReconciled: "2026-10-06T15:25:15Z"
+      lastReconciled: "2026-10-06T16:26:02Z"
+      lastReconciledDuration: 340.384671ms
+      lastReconciledStatus: ReconciliationSucceeded
+      metadata:
+        revision: refs/heads/main@sha1:85bdf85bde55b4f75a9dc4a36bb7aea195526e6e
+      totalReconciliations: 2
+  inventory:
+    entries:
+      - id: horopter_horopter-egress_gateway.networking.k8s.io_HTTPRoute
+        v: v1
+      - id: horopter_horopter_helm.toolkit.fluxcd.io_HelmRelease
+        v: v2
+      - id: horopter_horopter-db_monitoring.coreos.com_PodMonitor
+        v: v1
+      - id: horopter_horopter_monitoring.coreos.com_ServiceMonitor
+        v: v1
+      - id: horopter_horopter_source.toolkit.fluxcd.io_HelmRepository
+        v: v1
+  lastAppliedRevision: refs/heads/main@sha1:b1f2477dc2c215154e22f674405c3fde594fd494
+  lastAttemptedRevision: refs/heads/main@sha1:b1f2477dc2c215154e22f674405c3fde594fd494
+  lastHandledReconcileAt: "2026-10-07T00:12:38.284621+01:00"
+  observedGeneration: 1

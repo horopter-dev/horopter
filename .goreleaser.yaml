@@ -28,6 +28,13 @@ builds:
     goos: [linux]
     goarch: [amd64, arm64]
     flags: [-trimpath]
+  - id: horopter-flux
+    main: ./cmd/horopter-flux
+    binary: horopter-flux
+    env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
   # horoctl is the first binary here needing a non-Linux target: ingress, egress and
   # horopter-migrate exist to become container images, but operators run horoctl from a
   # laptop. darwin/amd64 is excluded rather than built and left unpublished.
@@ -89,6 +96,19 @@ kos:
     base_image: gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
     user: "65532:65532"
     repositories: [ghcr.io/horopter-dev/horopter-migrate]
+    platforms: [linux/amd64, linux/arm64]
+    tags: ["{{ .Tag }}"]
+    bare: true
+    preserve_import_paths: false
+    sbom: spdx
+    labels:
+      org.opencontainers.image.source: "{{ .GitURL }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+  - id: horopter-flux
+    build: horopter-flux
+    base_image: gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
+    user: "65532:65532"
+    repositories: [ghcr.io/horopter-dev/horopter-flux]
     platforms: [linux/amd64, linux/arm64]
     tags: ["{{ .Tag }}"]
     bare: true

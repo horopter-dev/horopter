@@ -1,0 +1,90 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  creationTimestamp: "2026-10-05T14:50:36Z"
+  finalizers:
+    - finalizers.fluxcd.io
+  generation: 11
+  labels:
+    kustomize.toolkit.fluxcd.io/name: horopter
+    kustomize.toolkit.fluxcd.io/namespace: flux-system
+  name: horopter
+  namespace: horopter
+  resourceVersion: "40076446"
+  uid: 10aedab5-4046-428a-a051-b87624e0544a
+spec:
+  chart:
+    spec:
+      chart: horopter
+      reconcileStrategy: ChartVersion
+      sourceRef:
+        kind: HelmRepository
+        name: horopter
+      version: 0.3.1
+  install:
+    remediation:
+      retries: 3
+  interval: 1h
+  timeout: 10m
+  upgrade:
+    remediation:
+      remediateLastFailure: false
+      retries: 0
+status:
+  conditions:
+    - lastTransitionTime: "2026-10-08T17:02:32Z"
+      message: Helm upgrade succeeded for release horopter/horopter.v10 with chart horopter@0.3.1
+      observedGeneration: 11
+      reason: UpgradeSucceeded
+      status: "True"
+      type: Ready
+    - lastTransitionTime: "2026-10-08T17:02:32Z"
+      message: Helm upgrade succeeded for release horopter/horopter.v10 with chart horopter@0.3.1
+      observedGeneration: 11
+      reason: UpgradeSucceeded
+      status: "True"
+      type: Released
+  helmChart: horopter/horopter-horopter
+  history:
+    - action: upgrade
+      apiVersion: v2
+      appVersion: v0.7.0
+      chartName: horopter
+      chartVersion: 0.3.1
+      configDigest: sha256:89e9590b98d8a88f7d8028d234383da6bb78dd7806d377c531cd2f19d504c35d
+      digest: sha256:1ebdba8ed318109cea4a27dbaa3b412425723991c0e12248cb19a834cffb5642
+      firstDeployed: "2026-10-05T14:50:39Z"
+      lastDeployed: "2026-10-08T17:02:21Z"
+      name: horopter
+      namespace: horopter
+      status: deployed
+      version: 10
+    - apiVersion: v2
+      appVersion: v0.7.0
+      chartName: horopter
+      chartVersion: 0.3.0
+      configDigest: sha256:89e9590b98d8a88f7d8028d234383da6bb78dd7806d377c531cd2f19d504c35d
+      digest: sha256:c41f7e03a4e72fe6e726fd4db557955717e2218d8b4f4c8f1380a7e5b984d8e7
+      firstDeployed: "2026-10-05T14:50:39Z"
+      lastDeployed: "2026-10-06T23:14:10Z"
+      name: horopter
+      namespace: horopter
+      status: superseded
+      version: 9
+  inventory:
+    entries:
+      - id: horopter_horopter-ingress__Service
+        v: v1
+      - id: horopter_horopter-egress__Service
+        v: v1
+      - id: horopter_horopter-ingress_apps_Deployment
+        v: v1
+      - id: horopter_horopter-egress_apps_Deployment
+        v: v1
+  lastAttemptedConfigDigest: sha256:89e9590b98d8a88f7d8028d234383da6bb78dd7806d377c531cd2f19d504c35d
+  lastAttemptedGeneration: 11
+  lastAttemptedReleaseAction: upgrade
+  lastAttemptedReleaseActionDuration: 10.665418204s
+  lastAttemptedRevision: 0.3.1
+  observedGeneration: 11
+  storageNamespace: horopter

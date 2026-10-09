@@ -1,0 +1,29 @@
+apiVersion: v1
+count: 1
+eventTime: null
+firstTimestamp: "2026-10-09T16:30:12Z"
+involvedObject:
+  apiVersion: kustomize.toolkit.fluxcd.io/v1
+  kind: Kustomization
+  name: horopter
+  namespace: flux-system
+  resourceVersion: "40066778"
+  uid: d63121ca-1364-4717-a255-770755c11e9c
+kind: Event
+lastTimestamp: "2026-10-09T16:30:12Z"
+message: Reconciliation finished in 398.326406ms, next run in 1h0m0s
+metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/commit_status: update
+    kustomize.toolkit.fluxcd.io/revision: refs/heads/main@sha1:b1f2477dc2c215154e22f674405c3fde594fd494
+  creationTimestamp: "2026-10-09T16:30:12Z"
+  name: horopter.18dce96e7cb024f1
+  namespace: flux-system
+  resourceVersion: "40092855"
+  uid: e47dd7ac-644f-4aa0-83ee-600303b09a5f
+reason: ReconciliationSucceeded
+reportingComponent: kustomize-controller
+reportingInstance: ""
+source:
+  component: kustomize-controller
+type: Normal
