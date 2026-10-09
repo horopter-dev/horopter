@@ -109,22 +109,31 @@ jobs:
 
       - name: Lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9.3.0
+        env:
+          # renovate: datasource=github-releases depName=golangci/golangci-lint
+          GOLANGCI_LINT_VERSION: v2.14.0
         with:
-          version: v2.14.0
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
 
       # actionlint and zizmor check this workflow itself. They were part of the branch's
       # verified state while being run by hand, which made them true only for as long as
       # somebody remembered; running them here is what makes them a gate.
       - name: Lint workflows
+        env:
+          # renovate: datasource=go depName=github.com/rhysd/actionlint
+          ACTIONLINT_VERSION: v1.7.12
         run: |
           set -euo pipefail
-          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
           actionlint
 
       - name: Audit workflows
         uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482  # v0.6.4
+        env:
+          # renovate: datasource=github-releases depName=zizmorcore/zizmor extractVersion=^v(?<version>.+)$
+          ZIZMOR_VERSION: 1.30.1
         with:
-          version: 1.30.1
+          version: ${{ env.ZIZMOR_VERSION }}
           inputs: .github/workflows/
           # This repository has no GitHub Advanced Security, so SARIF upload would fail.
           # Annotations are mutually exclusive with it and are what a reviewer sees.
@@ -180,12 +189,15 @@ jobs:
 
       - name: Install GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94  # v7.2.3
+        env:
+          # renovate: datasource=github-releases depName=goreleaser/goreleaser
+          GORELEASER_VERSION: v2.18.2
         with:
           distribution: goreleaser
           # Exact, not '~> v2': this is the tool that builds the released artefacts, so a
           # range would let two horopter tags be produced by different builders with nothing
           # in the repository recording which.
-          version: v2.18.2
+          version: ${{ env.GORELEASER_VERSION }}
           install-only: true
 
       # A broken release config should fail on the pull request, not on the tag, when the
@@ -209,8 +221,11 @@ jobs:
       # checkout.
       - name: Lint the shell scripts
         env:
+          # Not annotated for Renovate: a new version needs its checksum too, by hand.
           SHELLCHECK_VERSION: v0.11.0
           SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+          # renovate: datasource=go depName=mvdan.cc/sh/v3
+          SHFMT_VERSION: v3.14.1
         run: |
           set -euo pipefail
           tarball="${RUNNER_TEMP}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
@@ -221,7 +236,7 @@ jobs:
           shellcheck_bin="${RUNNER_TEMP}/shellcheck-${SHELLCHECK_VERSION}/shellcheck"
           "$shellcheck_bin" --version
           "$shellcheck_bin" hack/*.sh
-          go install mvdan.cc/sh/v3/cmd/shfmt@v3.14.1
+          go install "mvdan.cc/sh/v3/cmd/shfmt@${SHFMT_VERSION}"
           shfmt -i 2 -bn -ci -sr -d hack/*.sh
 
       # Nothing else parses the released compose file. HOROPTER_IMAGE_TAG is set to a literal

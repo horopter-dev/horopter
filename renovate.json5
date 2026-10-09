@@ -1,0 +1,79 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+
+  // Two bots update this repository, each owning different pins. Dependabot keeps the
+  // workflows' action SHAs and the pre-commit hooks (.github/dependabot.yaml). Renovate owns
+  // go.mod whole, the workflows' *_VERSION values and the ko base image. enabledManagers is
+  // what keeps them apart: a manager not listed here does not run, so Renovate never edits a
+  // file Dependabot owns. Renovate runs from horopter-dev/infrastructure's workflow, whose cron
+  // is the only schedule; do not add a `schedule` here.
+  extends: ["config:recommended", "customManagers:githubActionsVersions"],
+  enabledManagers: ["gomod", "custom.regex"],
+
+  // Policy shared by every horopter-dev repository Renovate updates; keep the copies alike.
+  semanticCommits: "enabled",
+  dependencyDashboard: true,
+  // The same cooldown as Dependabot's. Vulnerability fixes skip it.
+  minimumReleaseAge: "7 days",
+  // A release with no timestamp, such as an image on a registry other than Docker Hub, is
+  // proposed without the cooldown instead of never.
+  minimumReleaseAgeBehaviour: "timestamp-optional",
+  // The default hourly limit throttles a bot that runs continuously; a cron run is one hour.
+  prHourlyLimit: 0,
+  prConcurrentLimit: 10,
+  osvVulnerabilityAlerts: true,
+  vulnerabilityAlerts: {
+    // Release Please cuts a release for a fix and none for a chore.
+    semanticCommitType: "fix",
+    labels: ["security"],
+  },
+
+  postUpdateOptions: ["gomodTidy"],
+
+  packageRules: [
+    {
+      // Majors wait longer: they are the ones that get emergency-patched.
+      matchUpdateTypes: ["major"],
+      minimumReleaseAge: "14 days",
+    },
+    {
+      // A routine module bump cuts no release. config:recommended types a dependency update
+      // as fix(deps), which would release on every one.
+      matchManagers: ["gomod"],
+      semanticCommitType: "chore",
+    },
+    {
+      // Minors and patches arrive as one pull request, as they did from Dependabot.
+      matchManagers: ["gomod"],
+      matchDepTypes: ["require", "indirect"],
+      matchUpdateTypes: ["minor", "patch", "digest"],
+      groupName: "go modules (minor and patch)",
+    },
+    {
+      // The go directive is the Go that CI and releases build with, so it decides the
+      // standard library the binaries carry. Renovate leaves it alone unless told to bump it,
+      // and a new Go is a fix because it changes what ships.
+      matchManagers: ["gomod"],
+      matchDepNames: ["go"],
+      matchDepTypes: ["golang"],
+      rangeStrategy: "bump",
+      semanticCommitType: "fix",
+    },
+    {
+      matchFileNames: [".github/workflows/**"],
+      semanticCommitScope: "ci",
+    },
+  ],
+
+  customManagers: [
+    {
+      // ko's base image, pinned by digest so a moved tag arrives as a pull request.
+      customType: "regex",
+      managerFilePatterns: ["/^\\.goreleaser\\.yaml$/"],
+      matchStrings: [
+        "base_image: (?<depName>[^:\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]+)",
+      ],
+      datasourceTemplate: "docker",
+    },
+  ],
+}

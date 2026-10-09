@@ -97,7 +97,9 @@ jobs:
           distribution: goreleaser
           # Exact, not '~> v2'. The CI release-check job pins the same version, so what
           # validates the config on a pull request is what builds the artefacts on the tag.
-          version: v2.18.2
+          version: ${{ env.GORELEASER_VERSION }}
           args: release --clean
         env:
+          # renovate: datasource=github-releases depName=goreleaser/goreleaser
+          GORELEASER_VERSION: v2.18.2
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

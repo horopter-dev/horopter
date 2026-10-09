@@ -2,7 +2,10 @@
 # PR #1 was one of its bumps -- which means it has been running on defaults: no cooldown, no
 # grouping, and no say over which ecosystems it watches. This file is that say.
 #
-# Three ecosystems, deliberately, and Docker is not one of them. The only third-party image
+# go.mod is not here: Renovate updates it, with the workflows' *_VERSION values and the ko base
+# image, because Dependabot cannot move the go directive (renovate.json5). Each pin has one bot.
+#
+# Two ecosystems, deliberately, and Docker is not one of them. The only third-party image
 # either compose file names is `postgres:18`, which is already a floating tag that picks up
 # 18.x at pull time, so there is nothing for Dependabot to bump. Enabling the ecosystem would
 # instead put it in reach of `ghcr.io/horopter-dev/horopter-*`, whose tags in
@@ -12,29 +15,6 @@
 version: 2
 
 updates:
-  - package-ecosystem: gomod
-    directory: /
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    # A release published today can be yanked tomorrow. Waiting lets that happen to somebody
-    # else. Majors wait longer because they are the ones that get emergency-patched.
-    cooldown:
-      default-days: 7
-      semver-major-days: 14
-    groups:
-      # Minors and patches arrive as one pull request: reviewing ten trivial bumps separately
-      # costs ten CI runs and ten reviews for the same decision. Majors stay ungrouped, since
-      # each is a judgement of its own.
-      go-minor-and-patch:
-        patterns: ["*"]
-        update-types: [minor, patch]
-    commit-message:
-      # Conventional Commits, because the type selects the next version number once
-      # release-please is wired up. `chore` is right: a dependency bump is not a feature.
-      prefix: chore
-      include: scope
-
   - package-ecosystem: github-actions
     directory: /
     schedule:

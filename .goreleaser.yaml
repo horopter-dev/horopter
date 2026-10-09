@@ -60,7 +60,7 @@ builds:
 kos:
   - id: ingress
     build: ingress
-    base_image: gcr.io/distroless/static-debian12:nonroot
+    base_image: gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
     user: "65532:65532"
     repositories: [ghcr.io/horopter-dev/horopter-ingress]
     platforms: [linux/amd64, linux/arm64]
@@ -73,7 +73,7 @@ kos:
       org.opencontainers.image.revision: "{{ .FullCommit }}"
   - id: egress
     build: egress
-    base_image: gcr.io/distroless/static-debian12:nonroot
+    base_image: gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
     user: "65532:65532"
     repositories: [ghcr.io/horopter-dev/horopter-egress]
     platforms: [linux/amd64, linux/arm64]
@@ -86,7 +86,7 @@ kos:
       org.opencontainers.image.revision: "{{ .FullCommit }}"
   - id: horopter-migrate
     build: horopter-migrate
-    base_image: gcr.io/distroless/static-debian12:nonroot
+    base_image: gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
     user: "65532:65532"
     repositories: [ghcr.io/horopter-dev/horopter-migrate]
     platforms: [linux/amd64, linux/arm64]
@@ -101,7 +101,7 @@ kos:
   # darwin/arm64 build above never reaches here — kos only ever produces Linux images.
   - id: horoctl
     build: horoctl
-    base_image: gcr.io/distroless/static-debian12:nonroot
+    base_image: gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
     user: "65532:65532"
     repositories: [ghcr.io/horopter-dev/horoctl]
     platforms: [linux/amd64, linux/arm64]
