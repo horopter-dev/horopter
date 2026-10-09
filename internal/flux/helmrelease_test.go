@@ -111,9 +111,29 @@ func TestALiveUpgradeIsOneReleaseChangeFromItsStartToHistory(t *testing.T) {
 		Attributes: map[string]any{
 			"action": "upgrade", "chart": "horopter", "chart_version": "0.3.2",
 			"app_version": "v0.7.2", "config_digest": after.Status.History[0].ConfigDigest,
-			"helm_revision": 11,
+			"helm_revision": 11, "generation": int64(11),
 		},
 	}}, ended)
+	assert.Equal(t, flux.ReleaseMemory{}, mem)
+}
+
+func TestTheProgressPatchAfterAnActionStartsNothing(t *testing.T) {
+	before := deployed(t)
+	during := running(t, before, "upgrade", "0.3.2", "2026-10-09T18:00:00Z")
+	// helm-controller patches once the action returns, history included, before it clears
+	// Reconciling: the Running message is stale.
+	progress := finished(during, snapshot(t, "upgrade", 11, "deployed", "0.3.2", "v0.7.2",
+		"2026-10-09T18:00:20Z"), "20s")
+	progress.Status.Conditions = during.Status.Conditions
+	done := finished(during, snapshot(t, "upgrade", 11, "deployed", "0.3.2", "v0.7.2",
+		"2026-10-09T18:00:20Z"), "20s")
+
+	_, mem := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, &before, during)
+	ended, mem := flux.MapHelmRelease(cluster, mem, &during, progress)
+	settled, mem := flux.MapHelmRelease(cluster, mem, &progress, done)
+
+	assert.Equal(t, []string{cluster + "/" + hrRef(11) + "/completed"}, keys(ended))
+	assert.Empty(t, settled)
 	assert.Equal(t, flux.ReleaseMemory{}, mem)
 }
 
@@ -302,7 +322,7 @@ func TestALiveRollbackEndsTheFailedUpgradeRolledBack(t *testing.T) {
 		Attributes: map[string]any{
 			"action": "upgrade", "chart": "horopter", "chart_version": "0.3.2",
 			"app_version": "v0.7.2", "config_digest": failed.Status.History[0].ConfigDigest,
-			"helm_revision": 11,
+			"helm_revision": 11, "generation": int64(11),
 		},
 	}, remediated[0])
 }

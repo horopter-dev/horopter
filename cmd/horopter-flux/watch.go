@@ -131,10 +131,11 @@ func (w *watcher) handler(r resource) cache.ResourceEventHandlerFuncs {
 			}
 		},
 		DeleteFunc: func(obj any) {
-			if r == helmReleases {
-				if u, ok := obj.(*unstructured.Unstructured); ok {
-					delete(w.releases, string(u.GetUID()))
-				}
+			if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+				obj = tombstone.Obj
+			}
+			if u, ok := obj.(*unstructured.Unstructured); ok && r == helmReleases {
+				delete(w.releases, string(u.GetUID()))
 			}
 		},
 	}
@@ -145,9 +146,11 @@ func (w *watcher) observe(r resource, old, cur any) {
 	switch {
 	case r == gitRepositories:
 		key, err := cache.MetaNamespaceKeyFunc(cur)
-		if err == nil {
-			w.gitQueue.Add(key)
+		if err != nil {
+			slog.Error("could not key a GitRepository; skipping it", "error", err)
+			return
 		}
+		w.gitQueue.Add(key)
 	case r == kustomizations:
 		observeAs(old, cur, func(prev *flux.Kustomization, ks flux.Kustomization) {
 			w.poster.enqueue(flux.MapKustomization(w.cluster, prev, ks))
@@ -180,7 +183,13 @@ func observeAs[T any](old, cur any, f func(prev *T, obj T)) {
 	}
 	var prev *T
 	if old != nil {
-		if p, err := decode[T](old); err == nil {
+		p, err := decode[T](old)
+		if err != nil {
+			// A nil prev reads as a first sight: everything derivable is posted again, which
+			// the server's dedup absorbs.
+			slog.Warn("could not read a watched object's previous state; re-deriving it",
+				"error", err)
+		} else {
 			prev = &p
 		}
 	}
@@ -223,12 +232,8 @@ func (w *watcher) runGitQueue(ctx context.Context) {
 // titleWait; after that, or for an artifact already old at a cold start, the title is the
 // short revision.
 func (w *watcher) startCommit(key string) {
-	obj, exists, err := w.repos.GetByKey(key)
-	if err != nil || !exists {
-		return
-	}
-	repo, err := decode[flux.GitRepository](obj)
-	if err != nil || repo.Status.Artifact == nil {
+	repo, ok := w.cachedRepo(key)
+	if !ok || repo.Status.Artifact == nil {
 		return
 	}
 	var prev *flux.GitRepository
@@ -246,6 +251,24 @@ func (w *watcher) startCommit(key string) {
 	evs := flux.MapGitRepository(w.cluster, prev, repo, title)
 	w.gitStarted[key] = repo
 	w.poster.enqueue(evs)
+}
+
+// cachedRepo is the GitRepository key names, and false if it is gone or unreadable.
+func (w *watcher) cachedRepo(key string) (flux.GitRepository, bool) {
+	obj, exists, err := w.repos.GetByKey(key)
+	if err != nil {
+		slog.Error("could not read a GitRepository from the cache", "key", key, "error", err)
+		return flux.GitRepository{}, false
+	}
+	if !exists {
+		return flux.GitRepository{}, false
+	}
+	repo, err := decode[flux.GitRepository](obj)
+	if err != nil {
+		slog.Error("could not read a GitRepository; its commits are not recorded", "error", err)
+		return flux.GitRepository{}, false
+	}
+	return repo, true
 }
 
 func (w *watcher) newArtifactEvents() []flux.Event {

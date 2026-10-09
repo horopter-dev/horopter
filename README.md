@@ -903,8 +903,8 @@ below. The locus defaults to the source, so each cluster is its own correlation 
       --source flux-<cluster>
 
 It needs `get`, `list` and `watch` on `gitrepositories`, `kustomizations`, `helmreleases` and
-`events`, and `get` on the `kube-system` Namespace. An event Horopter refuses with a 4xx is
-logged at ERROR and dropped; one it cannot take (no answer, or 503) is retried with backoff.
+`events`, and `get` on the `kube-system` Namespace. An event Horopter cannot take for now (no
+answer, or 503) is retried with backoff; any other refusal is logged at ERROR and dropped.
 
 ### The ingest route
 

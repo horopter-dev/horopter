@@ -14,13 +14,14 @@ import (
 )
 
 // postBudget bounds one post with internal/client's own retries of network errors and 503s.
-// Past it the event is requeued with backoff from retryBase to retryMax. Variables so a test
-// can shorten them.
-var (
+// Past it the event is requeued with backoff from retryBase to retryMax.
+const (
 	postBudget = 30 * time.Second
-	retryBase  = time.Second
 	retryMax   = 5 * time.Minute
 )
+
+// retryBase is a variable so a test can shorten it.
+var retryBase = time.Second
 
 // poster posts events in the order they were queued, one at a time, retrying an event Horopter
 // could not take with backoff. Events are queued by idempotency key, so one derived twice

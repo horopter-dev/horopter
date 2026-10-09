@@ -131,8 +131,10 @@ func (r release) start(mem ReleaseMemory, prev *HelmRelease, out []client.NewEve
 }
 
 // running reports the install or upgrade helm-controller is about to run, and when. The
-// Reconciling condition keeps its transition time across a retry, so the start is the latest
-// of it, Ready's (which every release action turns Unknown), and the previous revision's end.
+// Reconciling condition keeps its transition time across a retry, so the start is the later of
+// it and Ready's, which every release action turns Unknown. A message no newer than
+// history[0]'s end is stale: helm-controller patches the finished action's history before it
+// clears Reconciling.
 func (r release) running() (string, time.Time, bool) {
 	rec, ok := condition(r.hr.Status.Conditions, "Reconciling")
 	if !ok || rec.Status != "True" || rec.Reason != "Progressing" {
@@ -142,21 +144,20 @@ func (r release) running() (string, time.Time, bool) {
 	if m == nil {
 		return "", time.Time{}, false
 	}
-	since := rec.LastTransitionTime
-	if ready, ok := condition(r.hr.Status.Conditions, "Ready"); ok && ready.Reason == "Progressing" {
-		since = later(since, ready.LastTransitionTime)
-	}
-	if h := r.hr.Status.History; len(h) > 0 {
-		since = later(since, h[0].LastDeployed)
+	since := r.startedAt(rec)
+	if h := r.hr.Status.History; len(h) > 0 && !since.After(h[0].LastDeployed) {
+		return "", time.Time{}, false
 	}
 	return m[1], since, true
 }
 
-func later(a, b time.Time) time.Time {
-	if b.After(a) {
-		return b
+// startedAt is the later of rec's transition and Ready's, when Ready is Progressing.
+func (r release) startedAt(rec Condition) time.Time {
+	ready, ok := condition(r.hr.Status.Conditions, "Ready")
+	if ok && ready.Reason == "Progressing" && ready.LastTransitionTime.After(rec.LastTransitionTime) {
+		return ready.LastTransitionTime
 	}
-	return a
+	return rec.LastTransitionTime
 }
 
 // predict is the Helm revision the action will write: the latest plus one, or 1 for an

@@ -121,7 +121,7 @@ func (r release) attemptEvents(a attempt, version int, action string) []client.N
 		return map[string]any{
 			"action": action, "chart": a.snap.ChartName, "chart_version": a.snap.ChartVersion,
 			"app_version": a.snap.AppVersion, "config_digest": a.snap.ConfigDigest,
-			"helm_revision": a.snap.Version,
+			"helm_revision": a.snap.Version, "generation": r.hr.Status.LastAttemptedGeneration,
 		}
 	}
 	end := r.event(version, action+".succeeded", "completed", "completed", a.snap.LastDeployed,
@@ -160,6 +160,7 @@ func (r release) approximateStart(a attempt, version int, action string) client.
 	ev := r.event(version, action+".started", "started", "started", at, map[string]any{
 		"action": action, "chart": a.snap.ChartName, "chart_version": a.snap.ChartVersion,
 		"app_version": a.snap.AppVersion, "config_digest": a.snap.ConfigDigest,
+		"generation": r.hr.Status.LastAttemptedGeneration,
 	})
 	ev.Title = a.title()
 	return ev
