@@ -87,6 +87,16 @@ jobs:
           set -euo pipefail
           go vet ./...
 
+      # Fails on a known vulnerability the code can reach, in a module or in the standard
+      # library of the Go that go.mod names, which Dependabot does not update.
+      - name: Check for known vulnerabilities
+        env:
+          # renovate: datasource=go depName=golang.org/x/vuln
+          GOVULNCHECK_VERSION: v1.8.0
+        run: |
+          set -euo pipefail
+          go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" ./...
+
       - name: Check formatting
         run: |
           set -euo pipefail
