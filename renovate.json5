@@ -3,12 +3,13 @@
 
   // Two bots update this repository, each owning different pins. Dependabot keeps the
   // workflows' action SHAs and the pre-commit hooks (.github/dependabot.yaml). Renovate owns
-  // go.mod whole, the workflows' *_VERSION values and the ko base image. enabledManagers is
-  // what keeps them apart: a manager not listed here does not run, so Renovate never edits a
-  // file Dependabot owns. Renovate runs from horopter-dev/infrastructure's workflow, whose cron
-  // is the only schedule; do not add a `schedule` here.
+  // go.mod whole, the workflows' *_VERSION values, the runner image and the ko base image.
+  // enabledManagers is what keeps them apart: a manager not listed here does not run, so
+  // Renovate never edits a file Dependabot owns; github-actions runs only for runner images.
+  // Renovate runs from horopter-dev/infrastructure's workflow, whose cron is the only
+  // schedule; do not add a `schedule` here.
   extends: ["config:recommended", "customManagers:githubActionsVersions"],
-  enabledManagers: ["gomod", "custom.regex"],
+  enabledManagers: ["gomod", "github-actions", "custom.regex"],
 
   // Policy shared by every horopter-dev repository Renovate updates; keep the copies alike.
   semanticCommits: "enabled",
@@ -58,6 +59,12 @@
       matchDepTypes: ["golang"],
       rangeStrategy: "bump",
       semanticCommitType: "fix",
+    },
+    {
+      // Action SHAs are Dependabot's; only runs-on images are Renovate's.
+      matchManagers: ["github-actions"],
+      matchDatasources: ["!github-runners"],
+      enabled: false,
     },
     {
       matchFileNames: [".github/workflows/**"],
