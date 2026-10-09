@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/horopter-dev/horopter/compare/v0.7.2...v0.8.0) (2026-10-09)
+
+
+### Features
+
+* add horopter-flux, a client that records Flux from object state ([#83](https://github.com/horopter-dev/horopter/issues/83)) ([9df7f91](https://github.com/horopter-dev/horopter/commit/9df7f9169a943af996d954f14ae12c71e55e50cf))
+
 ## [0.7.2](https://github.com/horopter-dev/horopter/compare/v0.7.1...v0.7.2) (2026-10-09)
 
 
