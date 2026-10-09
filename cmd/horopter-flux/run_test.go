@@ -299,3 +299,71 @@ func TestACommitWhoseEventNeverArrivesIsTitledByItsRevision(t *testing.T) {
 		5*time.Second, 10*time.Millisecond)
 	assert.Equal(t, "main@b1f2477", in.body(gitKey)["title"])
 }
+
+func TestTransientServerErrorsAreRetriedUntilRecorded(t *testing.T) {
+	retryBase = time.Millisecond
+	t.Cleanup(func() { retryBase = time.Second })
+	for _, status := range []int{
+		http.StatusInternalServerError, http.StatusBadGateway, http.StatusTooManyRequests,
+	} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			in, url := newIngest(t)
+			in.respond = func(_ string, attempt int) int {
+				if attempt == 1 {
+					return status
+				}
+				return http.StatusCreated
+			}
+			runClient(t, fakeCluster(kubeSystem(), fixture(t, "helmrelease.yaml")), url)
+
+			require.Eventually(t, func() bool { return in.attempts(hr10Completed) == 2 },
+				5*time.Second, 10*time.Millisecond)
+		})
+	}
+}
+
+func driftEvent(count int64) *unstructured.Unstructured {
+	ev := &unstructured.Unstructured{}
+	ev.SetAPIVersion("v1")
+	ev.SetKind("Event")
+	ev.SetNamespace("horopter")
+	ev.SetName("horopter.drift")
+	ev.SetUID("4b1c0b52-0d2e-4f63-9d1e-0f4c2f6f1a11")
+	ev.SetResourceVersion(strconv.FormatInt(count, 10))
+	_ = unstructured.SetNestedMap(ev.Object, map[string]any{
+		"kind": "HelmRelease", "namespace": "horopter", "name": "horopter",
+	}, "involvedObject")
+	ev.Object["reason"] = "DriftCorrected"
+	ev.Object["message"] = "drift corrected"
+	ev.Object["count"] = int64(1)
+	ev.Object["lastTimestamp"] = "2026-10-09T18:00:00Z"
+	return ev
+}
+
+func TestAnEventDerivedAgainWhilePostingIsNotPostedEmpty(t *testing.T) {
+	in, url := newIngest(t)
+	release := make(chan struct{})
+	driftKey := kubeSystemUID + "/Event/4b1c0b52-0d2e-4f63-9d1e-0f4c2f6f1a11/1"
+	in.respond = func(key string, _ int) int {
+		if key == driftKey {
+			in.mu.Unlock()
+			<-release
+			in.mu.Lock()
+		}
+		return http.StatusCreated
+	}
+	c := fakeCluster(kubeSystem(), driftEvent(1))
+	runClient(t, c, url)
+	require.Eventually(t, func() bool { return in.attempts(driftKey) == 1 },
+		5*time.Second, 10*time.Millisecond)
+
+	// Re-delivered at the same count while its first post is in flight.
+	_, err := c.Resource(events).Namespace("horopter").Update(context.Background(),
+		driftEvent(2), metav1.UpdateOptions{})
+	require.NoError(t, err)
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	time.Sleep(200 * time.Millisecond)
+
+	assert.Zero(t, in.attempts(""), "posted an event with no idempotency key")
+}

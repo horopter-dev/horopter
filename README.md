@@ -904,7 +904,7 @@ below. The locus defaults to the source, so each cluster is its own correlation 
 
 It needs `get`, `list` and `watch` on `gitrepositories`, `kustomizations`, `helmreleases` and
 `events`, and `get` on the `kube-system` Namespace. An event Horopter cannot take for now (no
-answer, or 503) is retried with backoff; any other refusal is logged at ERROR and dropped.
+answer, a 5xx or a 429) is retried with backoff; any other 4xx is logged at ERROR and dropped.
 
 ### The ingest route
 

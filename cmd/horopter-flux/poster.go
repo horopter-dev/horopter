@@ -14,7 +14,8 @@ import (
 )
 
 // postBudget bounds one post with internal/client's own retries of network errors and 503s.
-// Past it the event is requeued with backoff from retryBase to retryMax.
+// Past it, or on another 5xx or a 429, the event is requeued with backoff from retryBase to
+// retryMax.
 const (
 	postBudget = 30 * time.Second
 	retryMax   = 5 * time.Minute
@@ -67,17 +68,28 @@ func (p *poster) run(ctx context.Context) {
 	}
 }
 
+// refusedForGood reports an answer a later attempt cannot change: a 4xx other than 429. A 5xx
+// or 429 is a server or proxy that cannot take the event now.
+func refusedForGood(status int) bool {
+	return status >= 400 && status < 500 && status != http.StatusTooManyRequests
+}
+
 func (p *poster) post(ctx context.Context, key string) {
 	p.mu.Lock()
-	ev := p.pending[key]
+	ev, ok := p.pending[key]
 	p.mu.Unlock()
+	if !ok {
+		// Queued again while its post was in flight, and that post recorded it.
+		p.queue.Forget(key)
+		return
+	}
 	got, err := p.client.Post(ctx, ev, time.Now().Add(postBudget))
 	var refused *client.HTTPError
 	switch {
 	case err == nil:
 		slog.Info("recorded", "type", ev.Type, "ref", ev.CorrelationRef, "key", key,
 			"created", got.Created)
-	case errors.As(err, &refused) && refused.Status != http.StatusServiceUnavailable:
+	case errors.As(err, &refused) && refusedForGood(refused.Status):
 		slog.Error("Horopter refused an event; it is not retried", "type", ev.Type,
 			"ref", ev.CorrelationRef, "key", key, "status", refused.Status, "error", err)
 	case ctx.Err() != nil:
