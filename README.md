@@ -29,6 +29,11 @@ Horopter is published as four container images — `horopter-ingress`, `horopter
     curl -O https://github.com/horopter-dev/horopter/releases/download/v0.1.0/docker-compose.yaml
     docker compose up -d
 
+`docker compose --profile grafana up -d` adds Prometheus on `127.0.0.1:9090` and Grafana on
+`127.0.0.1:3000`, a local demo: Grafana lets anyone who reaches it in as a Viewer, installs the
+Infinity plugin from grafana.com at start, and opens on a dashboard of both daemons' request
+rates with Horopter's changes as annotations. It needs Compose 2.23.1 or later.
+
 **Packages stay private while the repository is**, so pulling needs a `docker login` first
 (below) from someone who can read the repository. Both become public when the project is
 ready to be read by strangers, which no version number triggers.
@@ -401,7 +406,9 @@ The host and port defaults are the OpenTelemetry specification's, which has two 
   `docker-compose.yaml` (`task up`/`task up:local`): it sets the host and publishes the ports
   on the host's loopback — `curl localhost:9464/metrics` for ingress, `curl
   localhost:9465/metrics` for egress. The released standalone `docker-compose.yaml`
-  (`deploy/docker-compose.yaml`) publishes neither the Postgres port nor these metrics ports.
+  (`deploy/docker-compose.yaml`) sets the host too but publishes neither the Postgres port
+  nor these metrics ports; its `grafana` profile's Prometheus scrapes them over the stack's
+  own network.
 - **Both daemons default to port 9464.** In separate containers or pods that does not matter.
   Running both binaries on one host, or in one pod, needs a different port on one of them.
 

@@ -3,8 +3,14 @@
 # service below issues the two fixed dev credentials this stack runs on — a producer and a
 # reader, never a superuser — the same way docker-compose.yaml does; see the README's
 # "Issuing credentials" section to issue your own. Postgres is not published on the host
-# here, and neither daemon's metrics port (9464) is published either. See
-# https://github.com/horopter-dev/horopter#security
+# here, and neither daemon's metrics port (9464) is published either: both listen on the
+# stack's own network only. See https://github.com/horopter-dev/horopter#security
+#
+# `docker compose --profile grafana up` adds Prometheus and Grafana, a local demo on
+# 127.0.0.1:9090 and 127.0.0.1:3000. Grafana lets anyone who reaches it in as a Viewer, which
+# loopback-only binding is what makes acceptable. It installs the Infinity plugin from
+# grafana.com at start. Compose interpolates the inline `content:` below, so every `$` meant
+# for Prometheus or Grafana is written `$$`; the reader key is the one interpolation wanted.
 services:
   db:
     image: postgres:18
@@ -48,6 +54,7 @@ services:
     environment:
       DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
       HOROPTER_ADDR: 0.0.0.0:8080
+      OTEL_EXPORTER_PROMETHEUS_HOST: 0.0.0.0
     ports:
       - "8080:8080"
     depends_on:
@@ -59,11 +66,148 @@ services:
     environment:
       DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
       HOROPTER_ADDR: 0.0.0.0:8081
+      OTEL_EXPORTER_PROMETHEUS_HOST: 0.0.0.0
     ports:
       - "8081:8081"
     depends_on:
       bootstrap:
         condition: service_completed_successfully
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    profiles: [grafana]
+    ports:
+      - "127.0.0.1:9090:9090"
+    configs:
+      - source: prometheus
+        target: /etc/prometheus/prometheus.yml
+
+  grafana:
+    image: grafana/grafana:13.2.3
+    profiles: [grafana]
+    environment:
+      GF_PLUGINS_PREINSTALL_SYNC: yesoreyeram-infinity-datasource@4.1.1
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/try-horopter.json
+    ports:
+      - "127.0.0.1:3000:3000"
+    configs:
+      - source: grafana-datasources
+        target: /etc/grafana/provisioning/datasources/horopter.yaml
+      - source: grafana-dashboard-provider
+        target: /etc/grafana/provisioning/dashboards/horopter.yaml
+      - source: grafana-dashboard
+        target: /etc/grafana/dashboards/try-horopter.json
+    depends_on:
+      - prometheus
+
+configs:
+  prometheus:
+    content: |
+      global:
+        scrape_interval: 5s
+      scrape_configs:
+        - job_name: ingress
+          static_configs:
+            - targets: ["ingress:9464"]
+        - job_name: egress
+          static_configs:
+            - targets: ["egress:9464"]
+
+  grafana-datasources:
+    content: |
+      apiVersion: 1
+      datasources:
+        - name: Prometheus
+          uid: prometheus
+          type: prometheus
+          access: proxy
+          url: http://prometheus:9090
+          isDefault: true
+        - name: Horopter
+          uid: horopter
+          type: yesoreyeram-infinity-datasource
+          access: proxy
+          url: http://egress:8081
+          jsonData:
+            allowedHosts:
+              - http://egress:8081
+            httpHeaderName1: Authorization
+          secureJsonData:
+            httpHeaderValue1: Bearer ${HOROPTER_DEV_READER_KEY:-horo_dead00000002_11111111111111111111111111111111111111111111111111111111111111}
+
+  grafana-dashboard-provider:
+    content: |
+      apiVersion: 1
+      providers:
+        - name: horopter
+          type: file
+          options:
+            path: /etc/grafana/dashboards
+
+  grafana-dashboard:
+    content: |
+      {
+        "uid": "try-horopter",
+        "title": "Try Horopter",
+        "schemaVersion": 41,
+        "refresh": "5s",
+        "time": { "from": "now-15m", "to": "now" },
+        "annotations": {
+          "list": [
+            {
+              "name": "Horopter changes",
+              "enable": true,
+              "iconColor": "rgba(255, 152, 48, 0.4)",
+              "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "horopter" },
+              "target": {
+                "refId": "Changes",
+                "type": "json",
+                "source": "url",
+                "parser": "jq-backend",
+                "format": "table",
+                "url": "/adapters/grafana/annotations?from=$${__from}&to=$${__to}",
+                "url_options": { "method": "GET" },
+                "root_selector": ".[] | {time, timeEnd, title, text, tags: (.tags | join(\",\"))}",
+                "columns": [
+                  { "selector": "time", "text": "time", "type": "timestamp_epoch" },
+                  { "selector": "timeEnd", "text": "timeEnd", "type": "timestamp_epoch" },
+                  { "selector": "title", "text": "title", "type": "string" },
+                  { "selector": "text", "text": "text", "type": "string" },
+                  { "selector": "tags", "text": "tags", "type": "string" }
+                ]
+              },
+              "mappings": {
+                "time": { "source": "field", "value": "time" },
+                "timeEnd": { "source": "field", "value": "timeEnd" },
+                "title": { "source": "field", "value": "title" },
+                "text": { "source": "field", "value": "text" },
+                "tags": { "source": "field", "value": "tags" }
+              }
+            }
+          ]
+        },
+        "panels": [
+          {
+            "id": 1,
+            "type": "timeseries",
+            "title": "Requests per second",
+            "gridPos": { "h": 12, "w": 24, "x": 0, "y": 0 },
+            "datasource": { "type": "prometheus", "uid": "prometheus" },
+            "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": { "type": "prometheus", "uid": "prometheus" },
+                "expr": "sum by (job) (rate(http_server_request_duration_seconds_count[30s]))",
+                "legendFormat": "{{job}}"
+              }
+            ]
+          }
+        ]
+      }
 
 volumes:
   horopter-db-data:
