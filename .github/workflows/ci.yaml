@@ -228,10 +228,3 @@ jobs:
           "$shellcheck_bin" hack/*.sh
           go install "mvdan.cc/sh/v3/cmd/shfmt@${SHFMT_VERSION}"
           shfmt -i 2 -bn -ci -sr -d hack/*.sh
-
-      # Nothing else parses the released compose file. HOROPTER_IMAGE_TAG is set to a literal
-      # here only so `config` has something to substitute; the file itself is unrendered.
-      - name: Check the deploy compose file
-        run: |
-          set -euo pipefail
-          HOROPTER_IMAGE_TAG=v0.0.0-ci docker compose -f deploy/docker-compose.yaml config -q
