@@ -58,6 +58,7 @@ builds:
       - goos: darwin
         goarch: amd64
     flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{ .Tag }}"]
 
 # ko compiles each platform and pushes an OCI index straight to the registry: no Dockerfile,
 # no buildx builder, no QEMU, no daemon. Three settings are explicit because ko's defaults are
