@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/horopter-dev/horopter/compare/v0.8.0...v0.9.0) (2026-10-10)
+
+
+### Features
+
+* add a grafana profile to the release compose asset ([#86](https://github.com/horopter-dev/horopter/issues/86)) ([4d254ae](https://github.com/horopter-dev/horopter/commit/4d254ae176689059fd632ed892ba21b4d2aed256))
+
 ## [0.8.0](https://github.com/horopter-dev/horopter/compare/v0.7.2...v0.8.0) (2026-10-09)
 
 
