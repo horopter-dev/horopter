@@ -126,13 +126,15 @@ Install the hooks once, so they run on every commit:
 
 They are a **subset of CI, not a mirror of it**: gofmt, golangci-lint, the raced
 test suite, and some whitespace and YAML checks. Passing them locally is
-necessary, not sufficient.
+necessary, not sufficient. The test suite needs the Docker CLI with Compose 2.23.1
+or later: `deploy/compose_test.go` renders the standalone compose file and checks
+what `docker compose config` makes of it, with and without its `grafana` profile.
 
 CI runs two jobs and checks considerably more. The first adds `go mod tidy
 -diff`, a build, `go vet`, `actionlint` and `zizmor` over the workflows, and a
 separate un-raced run of the read-expansion test. The second has no local
 equivalent at all: `goreleaser check`, a snapshot release build, `shellcheck`
-and `shfmt` over `hack/*.sh`, and parsing the standalone compose file. If you
+and `shfmt` over `hack/*.sh`. If you
 are touching the release configuration or the shell scripts, expect CI to be the
 first thing that tells you.
 

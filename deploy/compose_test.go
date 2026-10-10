@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -138,7 +139,7 @@ func clearComposeEnv(t *testing.T) {
 	}
 }
 
-func TestWithoutProfileTheStackIsUnchanged(t *testing.T) {
+func TestWithoutProfileFiveServicesRunWithMetricsOffTheHost(t *testing.T) {
 	clearComposeEnv(t)
 	p := resolve(t, render(t))
 
@@ -181,8 +182,8 @@ func TestGrafanaProfileAddsPrometheusAndGrafanaOnLoopback(t *testing.T) {
 	}
 }
 
-// The asset's third-party pins are literals in the template, not ${VAR:-…} defaults: the
-// tutorial tests the file a reader downloads (decided 2026-10-08).
+// The asset's third-party pins are exact versions written in the template, not ${VAR:-…}
+// defaults: the tutorial tests the file a reader downloads.
 func TestGrafanaProfilePinsAreLiterals(t *testing.T) {
 	template, err := os.ReadFile("docker-compose.yaml")
 	if err != nil {
@@ -213,9 +214,10 @@ func TestGrafanaProfilePinsAreLiterals(t *testing.T) {
 	}
 }
 
+var exactVersion = regexp.MustCompile(`^[^$]+[:@]v?[0-9]+\.[0-9]+\.[0-9]+$`)
+
 func isLiteralPin(pin string) bool {
-	return strings.ContainsAny(pin, ":@") && !strings.Contains(pin, "$") &&
-		!strings.HasSuffix(pin, ":latest")
+	return exactVersion.MatchString(pin)
 }
 
 func TestPrometheusScrapesBothDaemons(t *testing.T) {
@@ -411,6 +413,29 @@ func TestTryHoropterDashboardAnnotatesChanges(t *testing.T) {
 		if a.Mappings[field].Value != field {
 			t.Errorf("annotation mapping %s = %+v, want field %s", field, a.Mappings[field], field)
 		}
+	}
+}
+
+func TestGrafanaProvisionsDashboardsFromTheMountedDirectory(t *testing.T) {
+	clearComposeEnv(t)
+	p := resolve(t, render(t), "grafana")
+
+	var file struct {
+		APIVersion int `json:"apiVersion"`
+		Providers  []struct {
+			Name    string `json:"name"`
+			Type    string `json:"type"`
+			Options struct {
+				Path string `json:"path"`
+			} `json:"options"`
+		} `json:"providers"`
+	}
+	unmarshalYAML(t, mounted(t, p, "grafana",
+		"/etc/grafana/provisioning/dashboards/horopter.yaml"), &file)
+	if len(file.Providers) != 1 || file.Providers[0].Type != "file" ||
+		file.Providers[0].Options.Path != filepath.Dir(dashboardPath) {
+		t.Errorf("dashboard providers = %+v, want one file provider of %s",
+			file.Providers, filepath.Dir(dashboardPath))
 	}
 }
 
