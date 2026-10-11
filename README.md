@@ -206,6 +206,19 @@ takes, and the plain ref, which `--ref` takes. If the end cannot be confirmed, `
 the `horo event` command that closes the change. It carries the time the command ended and the
 end's own idempotency key, so running it is safe even if the end did arrive.
 
+`--report <path>`, or `HORO_RUN_REPORT`, writes what was recorded as JSON, for a wrapper such as
+a CI step summary:
+
+    {"start_posted":true,"end_posted":true,"ref":"ci/dep-1","producer_ref":"dep-1",
+     "outcome":"completed","exit_code":0,"reason":null}
+
+`ref` is the stored ref, `null` when nothing was stored. `outcome` is how the command ended:
+`completed`, `failed` or `cancelled`, and `cancelled` too when an interrupt before the command
+started closed the change, or tried to: `end_posted` says which. It is `null` when the command
+was not run and no change was closed, which is when `--strict` refuses to run it. `exit_code` is `horo run`'s own. `reason` says why
+the change was not recorded in full, and is `null` when it was. The report is written on every
+path past argument parsing; if it cannot be written, `horo run` warns and keeps its exit code.
+
 ## Security
 
 **Every non-probe route on both daemons now requires an issued credential.** `horopter-ingress`

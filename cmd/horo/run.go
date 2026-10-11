@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"os/signal"
@@ -23,11 +24,13 @@ var abortWindow = 3 * time.Second
 
 // runner is one horo run invocation.
 type runner struct {
-	cl     *client.Client
-	r      recording
-	id     string // the invocation's ULID; idempotency keys are built from it, never the ref
-	strict bool
-	stderr io.Writer
+	cl         *client.Client
+	r          recording
+	id         string // the invocation's ULID; idempotency keys are built from it, never the ref
+	strict     bool
+	stderr     io.Writer
+	reportPath string // where --report writes report; "" for nowhere
+	report     runReport
 }
 
 func runRun(
@@ -37,9 +40,17 @@ func runRun(
 	if !ok {
 		return exitUsage
 	}
+	x.report.ProducerRef = x.r.ref
+	x.report.ExitCode = x.recordRun(ctx, argv, stdout)
+	x.report.write(x.reportPath, stderr)
+	return x.report.ExitCode
+}
+
+// recordRun runs argv, recording its start and outcome, and returns horo's exit code.
+func (x *runner) recordRun(ctx context.Context, argv []string, stdout io.Writer) int {
 	cl, err := x.r.connect()
 	if err != nil {
-		return unrecorded(argv, err, x.strict, stdout, stderr)
+		return x.unrecorded(argv, err, stdout)
 	}
 	x.cl = cl
 	started := x.postStart(ctx)
@@ -47,10 +58,10 @@ func runRun(
 		return x.abort(ctx)
 	}
 	if !started && x.strict {
-		say(stderr, "horo run: --strict, so the command was not run")
+		say(x.stderr, "horo run: --strict, so the command was not run")
 		return exitError
 	}
-	out := runChild(argv, stdout, stderr, forwarded(sharesTerminal()))
+	out := runChild(argv, stdout, x.stderr, forwarded(sharesTerminal()))
 	return x.finish(ctx, started, out)
 }
 
@@ -65,6 +76,8 @@ func parseRun(
 	x.r.register(fs, env)
 	fs.Lookup("type").Usage = "the change's type, e.g. deployment; run adds .started and the outcome"
 	fs.BoolVar(&x.strict, "strict", false, "fail rather than run unrecorded, or succeed unrecorded")
+	fs.StringVar(&x.reportPath, "report", env("HORO_RUN_REPORT"),
+		"write a JSON report of what was recorded to this file")
 	if err := fs.Parse(args); err != nil {
 		return nil, nil, false
 	}
@@ -101,13 +114,16 @@ func (r *recording) connect() (*client.Client, error) {
 }
 
 // unrecorded runs the command without recording it, or under --strict refuses to.
-func unrecorded(argv []string, why error, strict bool, stdout, stderr io.Writer) int {
-	if strict {
-		sayf(stderr, "horo run: %v; --strict, so the command was not run\n", why)
+func (x *runner) unrecorded(argv []string, why error, stdout io.Writer) int {
+	x.report.because(why)
+	if x.strict {
+		sayf(x.stderr, "horo run: %v; --strict, so the command was not run\n", why)
 		return exitUsage
 	}
-	sayf(stderr, "horo run: %v; running the command unrecorded\n", why)
-	return runChild(argv, stdout, stderr, forwarded(sharesTerminal())).exitCode
+	sayf(x.stderr, "horo run: %v; running the command unrecorded\n", why)
+	out := runChild(argv, stdout, x.stderr, forwarded(sharesTerminal()))
+	x.report.ended(out.word)
+	return out.exitCode
 }
 
 // event is an event about this invocation's change.
@@ -123,11 +139,13 @@ func (x *runner) postStart(ctx context.Context) bool {
 	got, err := x.cl.Post(ctx, x.event("started", "start", time.Now(), x.r.attributes()),
 		time.Now().Add(startWindow))
 	if err != nil {
-		sayf(x.stderr, "horo: could not record the start (%v); ref %s (--ref)\n",
-			explain(err, producerHint), x.r.ref)
+		err = explain(err, producerHint)
+		sayf(x.stderr, "horo: could not record the start (%v); ref %s (--ref)\n", err, x.r.ref)
+		x.report.because(fmt.Errorf("could not record the start: %w", err))
 		return false
 	}
 	sayf(x.stderr, "horo: recording %s (horo show) — ref %s (--ref)\n", got.Ref, x.r.ref)
+	x.report.started(got.Ref)
 	return true
 }
 
@@ -135,22 +153,26 @@ func (x *runner) postStart(ctx context.Context) bool {
 // already have reached ingress, so the change is closed as cancelled rather than left open.
 func (x *runner) abort(ctx context.Context) int {
 	at := time.Now()
-	attrs := map[string]any{"reason": "interrupted before the command started"}
-	err := x.postUnlessInterrupted(ctx, x.event("cancelled", "end", at, attrs), abortWindow)
+	why := "interrupted before the command started"
+	x.report.ended("cancelled")
+	err := x.postEnd(ctx, x.event("cancelled", "end", at, map[string]any{"reason": why}),
+		abortWindow)
 	if err != nil {
-		sayf(x.stderr, "horo run: interrupted before the command started; it was not run, and the "+
-			"cancellation could not be confirmed (%v). If the change is still open, close it "+
-			"with:\n  %s\n",
-			explain(err, producerHint), x.closeCommand("cancelled", at))
+		err = explain(err, producerHint)
+		sayf(x.stderr, "horo run: %s; it was not run, and the cancellation could not be "+
+			"confirmed (%v). If the change is still open, close it with:\n  %s\n",
+			why, err, x.closeCommand("cancelled", at))
+		x.report.because(fmt.Errorf("%s; the cancellation could not be confirmed: %w", why, err))
 	} else {
-		say(x.stderr, "horo run: interrupted before the command started; it was not run, "+
-			"and is recorded as cancelled")
+		say(x.stderr, "horo run: "+why+"; it was not run, and is recorded as cancelled")
+		x.report.because(errors.New(why))
 	}
 	return signalExit(ctx)
 }
 
 // finish records how the command ended and picks horo's exit code.
 func (x *runner) finish(ctx context.Context, started bool, out outcome) int {
+	x.report.ended(out.word)
 	if !started {
 		// An end without its start would record a change that never began, and would hold the
 		// step for endWindow against a Horopter already known to be unreachable.
@@ -163,16 +185,27 @@ func (x *runner) finish(ctx context.Context, started bool, out outcome) int {
 		attrs[k] = v
 	}
 	at := time.Now()
-	err := x.postUnlessInterrupted(ctx, x.event(out.word, "end", at, attrs), endWindow)
+	err := x.postEnd(ctx, x.event(out.word, "end", at, attrs), endWindow)
 	if err == nil {
 		return out.exitCode
 	}
+	err = explain(err, producerHint)
 	sayf(x.stderr, "horo: could not confirm the end was recorded (%v). If the change is still "+
-		"open, close it with:\n  %s\n", explain(err, producerHint), x.closeCommand(out.word, at))
+		"open, close it with:\n  %s\n", err, x.closeCommand(out.word, at))
+	x.report.because(fmt.Errorf("could not confirm the end was recorded: %w", err))
 	if x.strict {
 		return exitError
 	}
 	return out.exitCode
+}
+
+// postEnd posts the end event ev, and records in the report that it was confirmed.
+func (x *runner) postEnd(ctx context.Context, ev client.NewEvent, window time.Duration) error {
+	got, err := x.postUnlessInterrupted(ctx, ev, window)
+	if err == nil {
+		x.report.endPosted(got.Ref)
+	}
+	return err
 }
 
 // postUnlessInterrupted posts ev, giving up if a signal arrives first. It is used once the
@@ -181,20 +214,24 @@ func (x *runner) finish(ctx context.Context, started bool, out outcome) int {
 // the post runs without it.
 func (x *runner) postUnlessInterrupted(
 	ctx context.Context, ev client.NewEvent, window time.Duration,
-) error {
+) (client.Appended, error) {
 	again := make(chan os.Signal, 1)
 	notify(again, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(again)
-	posted := make(chan error, 1)
+	type answer struct {
+		got client.Appended
+		err error
+	}
+	posted := make(chan answer, 1)
 	go func() {
-		_, err := x.cl.Post(context.WithoutCancel(ctx), ev, time.Now().Add(window))
-		posted <- err
+		got, err := x.cl.Post(context.WithoutCancel(ctx), ev, time.Now().Add(window))
+		posted <- answer{got, err}
 	}()
 	select {
-	case err := <-posted:
-		return err
+	case a := <-posted:
+		return a.got, a.err
 	case <-again:
-		return errors.New("interrupted while waiting for Horopter")
+		return client.Appended{}, errors.New("interrupted while waiting for Horopter")
 	}
 }
 
