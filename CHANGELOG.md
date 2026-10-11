@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.10.0](https://github.com/horopter-dev/horopter/compare/v0.9.0...v0.10.0) (2026-10-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* **horo:** --output is gone, not aliased; replace it with --format in scripts.
+
+### Features
+
+* every binary reports --version and --build-info ([#90](https://github.com/horopter-dev/horopter/issues/90)) ([7ddba64](https://github.com/horopter-dev/horopter/commit/7ddba6452e09b22da4af5bb529606d1d4ba2a723))
+* **horo:** --format replaces --output ([#91](https://github.com/horopter-dev/horopter/issues/91)) ([5ce42ac](https://github.com/horopter-dev/horopter/commit/5ce42acae4a0a4dc3027976b8d171d48dd9d3a4a))
+* **horo:** add --version ([#88](https://github.com/horopter-dev/horopter/issues/88)) ([d3c2674](https://github.com/horopter-dev/horopter/commit/d3c267462ed82a96452c5b820fc8a8d3c91c2391))
+
 ## [0.9.0](https://github.com/horopter-dev/horopter/compare/v0.8.0...v0.9.0) (2026-10-10)
 
 
