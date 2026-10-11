@@ -8,14 +8,16 @@ import (
 	"os/exec"
 	"os/signal"
 	"syscall"
+
+	"horopter.dev/horopter/internal/core"
 )
 
-// outcome is how a wrapped command ended: the lifecycle word, horo's exit code, and the
+// outcome is how a wrapped command ended: its lifecycle, horo's exit code, and the
 // attributes the end event carries.
 type outcome struct {
-	word     string
-	exitCode int
-	attrs    map[string]any
+	lifecycle core.Lifecycle
+	exitCode  int
+	attrs     map[string]any
 }
 
 var signalNames = map[syscall.Signal]string{
@@ -75,7 +77,8 @@ func runChild(argv []string, stdout, stderr io.Writer, forward []os.Signal) outc
 	notify(signals, forward...)
 	defer signal.Stop(signals)
 	if err := cmd.Start(); err != nil {
-		return outcome{word: "failed", exitCode: 127, attrs: map[string]any{"error": err.Error()}}
+		return outcome{lifecycle: core.LifecycleFailed, exitCode: 127,
+			attrs: map[string]any{"error": err.Error()}}
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -91,11 +94,12 @@ func runChild(argv []string, stdout, stderr io.Writer, forward []os.Signal) outc
 
 func classify(err error) outcome {
 	if err == nil {
-		return outcome{word: "completed"}
+		return outcome{lifecycle: core.LifecycleCompleted}
 	}
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {
-		return outcome{word: "failed", exitCode: 1, attrs: map[string]any{"error": err.Error()}}
+		return outcome{lifecycle: core.LifecycleFailed, exitCode: 1,
+			attrs: map[string]any{"error": err.Error()}}
 	}
 	ws, ok := exitErr.Sys().(syscall.WaitStatus)
 	if ok && ws.Signaled() {
@@ -103,9 +107,10 @@ func classify(err error) outcome {
 		if !known {
 			name = fmt.Sprintf("signal %d", int(ws.Signal()))
 		}
-		return outcome{word: "cancelled", exitCode: 128 + int(ws.Signal()),
+		return outcome{lifecycle: core.LifecycleCancelled, exitCode: 128 + int(ws.Signal()),
 			attrs: map[string]any{"signal": name}}
 	}
 	code := exitErr.ExitCode()
-	return outcome{word: "failed", exitCode: code, attrs: map[string]any{"exit_code": code}}
+	return outcome{lifecycle: core.LifecycleFailed, exitCode: code,
+		attrs: map[string]any{"exit_code": code}}
 }

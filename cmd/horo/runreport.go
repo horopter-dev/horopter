@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+
+	"horopter.dev/horopter/internal/core"
 )
 
 // runReport is what --report writes: what horo run posted and how the change ended, for a
@@ -11,13 +13,13 @@ import (
 // command was not run and no change was closed; reason is null only when the change was recorded
 // in full.
 type runReport struct {
-	StartPosted bool    `json:"start_posted"`
-	EndPosted   bool    `json:"end_posted"`
-	Ref         *string `json:"ref"`
-	ProducerRef string  `json:"producer_ref"`
-	Outcome     *string `json:"outcome"`
-	ExitCode    int     `json:"exit_code"`
-	Reason      *string `json:"reason"`
+	StartPosted bool            `json:"start_posted"`
+	EndPosted   bool            `json:"end_posted"`
+	Ref         *string         `json:"ref"`
+	ProducerRef string          `json:"producer_ref"`
+	Outcome     *core.Lifecycle `json:"outcome"`
+	ExitCode    int             `json:"exit_code"`
+	Reason      *string         `json:"reason"`
 }
 
 func (r *runReport) started(ref string) {
@@ -32,7 +34,7 @@ func (r *runReport) endPosted(ref string) {
 	r.Ref = &ref
 }
 
-func (r *runReport) ended(word string) { r.Outcome = &word }
+func (r *runReport) ended(lc core.Lifecycle) { r.Outcome = &lc }
 
 func (r *runReport) because(why error) {
 	s := why.Error()

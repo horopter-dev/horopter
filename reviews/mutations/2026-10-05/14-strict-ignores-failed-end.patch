@@ -4,12 +4,12 @@
 # expect: none predicted; the only failed-end test is not --strict
 
 diff --git a/cmd/horo/run.go b/cmd/horo/run.go
-index 474c5fa..b89631e 100644
+index 918baa5..f9f7a26 100644
 --- a/cmd/horo/run.go
 +++ b/cmd/horo/run.go
-@@ -193,9 +193,6 @@ func (x *runner) finish(ctx context.Context, started bool, out outcome) int {
+@@ -200,9 +200,6 @@ func (x *runner) finish(ctx context.Context, started bool, out outcome) int {
  	sayf(x.stderr, "horo: could not confirm the end was recorded (%v). If the change is still "+
- 		"open, close it with:\n  %s\n", err, x.closeCommand(out.word, at))
+ 		"open, close it with:\n  %s\n", err, x.closeCommand(out.lifecycle, at))
  	x.report.because(fmt.Errorf("could not confirm the end was recorded: %w", err))
 -	if x.strict {
 -		return exitError

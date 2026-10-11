@@ -4,15 +4,15 @@
 # expect: none predicted; the interrupt tests check the posted type, not its idempotency key
 
 diff --git a/cmd/horo/run.go b/cmd/horo/run.go
-index 474c5fa..f0b74bf 100644
+index 918baa5..6f02d37 100644
 --- a/cmd/horo/run.go
 +++ b/cmd/horo/run.go
-@@ -155,7 +155,7 @@ func (x *runner) abort(ctx context.Context) int {
+@@ -162,7 +162,7 @@ func (x *runner) abort(ctx context.Context) int {
  	at := time.Now()
  	why := "interrupted before the command started"
- 	x.report.ended("cancelled")
--	err := x.postEnd(ctx, x.event("cancelled", "end", at, map[string]any{"reason": why}),
-+	err := x.postEnd(ctx, x.event("cancelled", "cancel", at, map[string]any{"reason": why}),
+ 	x.report.ended(core.LifecycleCancelled)
+-	err := x.postEnd(ctx, x.event(core.LifecycleCancelled, "end", at, map[string]any{"reason": why}),
++	err := x.postEnd(ctx, x.event(core.LifecycleCancelled, "cancel", at, map[string]any{"reason": why}),
  		abortWindow)
  	if err != nil {
  		err = explain(err, producerHint)
