@@ -4,15 +4,14 @@
 # expect: none predicted; no fake egress inspects from or to
 
 diff --git a/cmd/horo/main.go b/cmd/horo/main.go
-index c0bcc7c..458c019 100644
 --- a/cmd/horo/main.go
 +++ b/cmd/horo/main.go
-@@ -205,7 +205,7 @@ func window(fs *flag.FlagSet, q *client.ChangeQuery, since time.Duration, from,
- 	fs.Visit(func(f *flag.Flag) { sinceSet = sinceSet || f.Name == "since" })
+@@ -218,7 +218,7 @@
+ func window(fs *flag.FlagSet, q *client.ChangeQuery, since time.Duration, from, to string) error {
  	if from == "" && to == "" {
  		q.To = time.Now()
 -		q.From = q.To.Add(-since)
 +		q.From = q.To.Add(since)
  		return nil
  	}
- 	if sinceSet {
+ 	if isSet(fs, "since") {

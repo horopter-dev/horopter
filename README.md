@@ -154,13 +154,13 @@ Exploring reads egress with a reader key:
     export HOROPTER_EGRESS_KEY=<reader key>
     horo changes                         # the last 24 hours
     horo changes --since 168h --subject acme/prod --status failed
-    horo changes --from 2026-09-14T00:00:00Z --to 2026-09-15T00:00:00Z --output json
+    horo changes --from 2026-09-14T00:00:00Z --to 2026-09-15T00:00:00Z --json
     horo show ci/dep-1                   # one change and all its events
 
 `horo changes` follows egress's `next` links, so it returns every matching change however many
 there are; `--limit` caps it. Output is a table on a terminal and one JSON object per line
-otherwise; `--output table|json|jsonl` chooses. Exit codes: `0` success, `1` an error from
-egress, `2` a usage error, `3` `horo show` found no such ref.
+otherwise; `--format table|json|jsonl` chooses, and `--json` is `--format json`. Exit codes:
+`0` success, `1` an error from egress, `2` a usage error, `3` `horo show` found no such ref.
 `horo refold` repairs one change; see [Re-folding one change](#re-folding-one-change).
 
 Every binary, `horo`, `horoctl` and the daemons alike, answers `--version` with the release it
@@ -644,6 +644,12 @@ bytes of JSON. A producer sending larger attribute maps has those events refused
 that does not act on a `400` loses them. Shrink the attributes — link to large text rather than
 embedding it — or raise `HOROPTER_INGRESS_MAX_EVENT_ATTRIBUTE_BYTES`, up to `1048576`. Events
 already stored are not re-checked.
+
+### `horo --output` is now `--format`
+
+`horo changes` and `horo show` take `--format table|json|jsonl`, or `--json`, in place of
+`--output`, which is gone rather than kept as an alias: replace `--output` with `--format` in
+scripts.
 
 ### `GET /v1/changes` and `GET /v1/events` answer with an envelope
 
