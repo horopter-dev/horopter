@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"horopter.dev/horopter/internal/auth"
+	"horopter.dev/horopter/internal/buildinfo"
 	"horopter.dev/horopter/internal/ingress"
 	"horopter.dev/horopter/internal/logging"
 	"horopter.dev/horopter/internal/store/postgres"
@@ -22,6 +23,10 @@ import (
 )
 
 func main() {
+	code, handled := buildinfo.Handle("horopter-ingress", os.Args[1:], os.Stdout, os.Stderr)
+	if handled {
+		os.Exit(code)
+	}
 	if err := run(); err != nil {
 		slog.Error("horopter-ingress failed", "error", err)
 		os.Exit(1)

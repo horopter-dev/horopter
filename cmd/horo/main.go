@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"horopter.dev/horopter/internal/buildinfo"
 	"horopter.dev/horopter/internal/client"
 )
 
@@ -36,8 +37,8 @@ func run(args []string, env func(string) string, stdout, stderr io.Writer, tty b
 		usage(stderr)
 		return exitUsage
 	}
-	if args[0] == "--version" {
-		return printVersion(args[1:], stdout, stderr)
+	if code, handled := buildinfo.Handle("horo", args, stdout, stderr); handled {
+		return code
 	}
 	ctx, stop := interruptible()
 	defer stop()
@@ -101,7 +102,8 @@ func usage(w io.Writer) {
 		"       horo event [flags]              record one event\n"+
 		"       horo run [flags] -- <command>   record a command's start and outcome\n"+
 		"       horo refold [flags] <ref>       re-fold one change from its log\n"+
-		"       horo --version                  the release this binary was built from")
+		"       horo --version [flags]          the release this binary was built from\n"+
+		"       horo --build-info [flags]       the release and how it was built")
 }
 
 // common are the flags every command takes.

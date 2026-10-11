@@ -16,11 +16,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
-)
 
-// version is passed to a delegated plugin as HOROCTL_VERSION, so it can check
-// compatibility with the horoctl that invoked it.
-var version = "dev"
+	"horopter.dev/horopter/internal/buildinfo"
+)
 
 // compiledIn holds the verbs that must never be resolved from PATH.
 var compiledIn = map[string]func([]string) error{
@@ -29,6 +27,9 @@ var compiledIn = map[string]func([]string) error{
 }
 
 func main() {
+	if code, handled := buildinfo.Handle("horoctl", os.Args[1:], os.Stdout, os.Stderr); handled {
+		os.Exit(code)
+	}
 	if len(os.Args) < 2 {
 		usage(os.Stderr)
 		os.Exit(2)
@@ -66,7 +67,8 @@ func exitDelegated(err error) {
 // looked up first, so no plugin can answer for one at a different version. path comes from
 // exec.LookPath against PATH, not from unvalidated caller input — the kubectl-style plugin
 // model this launcher follows is exactly "execute a binary named horoctl-<verb> found on
-// PATH".
+// PATH". The plugin gets HOROCTL_VERSION, the release horoctl --version prints, so it can
+// check it is compatible with the horoctl that ran it.
 //
 //nolint:gosec // G204
 func delegate(verb string, args []string) error {
@@ -76,7 +78,7 @@ func delegate(verb string, args []string) error {
 	}
 	cmd := exec.Command(path, args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	cmd.Env = append(os.Environ(), "HOROCTL_VERSION="+version)
+	cmd.Env = append(os.Environ(), "HOROCTL_VERSION="+buildinfo.Version())
 	return cmd.Run()
 }
 
@@ -84,4 +86,5 @@ func usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "usage: horoctl <command> [args]")
 	_, _ = fmt.Fprintln(w, "compiled in: migrate, admin")
 	_, _ = fmt.Fprintln(w, "anything else runs horoctl-<command> from PATH")
+	_, _ = fmt.Fprintln(w, "horoctl --version | --build-info [flags]: how this binary was built")
 }
