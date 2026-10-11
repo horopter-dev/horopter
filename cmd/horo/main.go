@@ -108,8 +108,8 @@ func usage(w io.Writer) {
 
 // common are the flags every command takes.
 type common struct {
-	url, key, output string
-	utc              bool
+	url, key, format string
+	asJSON, utc      bool
 }
 
 func (c *common) register(fs *flag.FlagSet, env func(string) string, tty bool) {
@@ -120,14 +120,26 @@ func (c *common) register(fs *flag.FlagSet, env func(string) string, tty bool) {
 	if tty {
 		def = "table"
 	}
-	fs.StringVar(&c.output, "output", def, "table, json or jsonl")
+	fs.StringVar(&c.format, "format", def, "table, json or jsonl")
+	fs.BoolVar(&c.asJSON, "json", false, "shorthand for --format json")
 	fs.BoolVar(&c.utc, "utc", false, "show times in UTC")
 }
 
-func (c *common) client() (*client.Client, error) {
-	if c.output != "table" && c.output != "json" && c.output != "jsonl" {
-		return nil, fmt.Errorf("--output %q: use table, json or jsonl", c.output)
+// checkFormat settles --json and --format, once fs has parsed them, into c.format.
+func (c *common) checkFormat(fs *flag.FlagSet) error {
+	if c.asJSON {
+		if isSet(fs, "format") {
+			return errors.New("give --json or --format, not both")
+		}
+		c.format = "json"
 	}
+	if c.format != "table" && c.format != "json" && c.format != "jsonl" {
+		return fmt.Errorf("--format %q: use table, json or jsonl", c.format)
+	}
+	return nil
+}
+
+func (c *common) client() (*client.Client, error) {
 	if c.url == "" {
 		return nil, errors.New("no egress URL: set --egress-url or HOROPTER_EGRESS_URL")
 	}
@@ -196,26 +208,28 @@ func runChanges(
 		say(stderr, "horo changes:", err)
 		return exitUsage
 	}
+	if err := c.checkFormat(fs); err != nil {
+		say(stderr, "horo changes:", err)
+		return exitUsage
+	}
 	cl, err := c.client()
 	if err != nil {
 		say(stderr, "horo changes:", err)
 		return exitUsage
 	}
 	return report(stderr, "horo changes", explain(
-		writeChanges(stdout, c.output, location(c.utc), cl.Changes(ctx, q)), readerHint))
+		writeChanges(stdout, c.format, location(c.utc), cl.Changes(ctx, q)), readerHint))
 }
 
 // window sets q's window from --since, or from --from and --to; giving both is an error rather
 // than a silent choice of one.
 func window(fs *flag.FlagSet, q *client.ChangeQuery, since time.Duration, from, to string) error {
-	sinceSet := false
-	fs.Visit(func(f *flag.Flag) { sinceSet = sinceSet || f.Name == "since" })
 	if from == "" && to == "" {
 		q.To = time.Now()
 		q.From = q.To.Add(-since)
 		return nil
 	}
-	if sinceSet {
+	if isSet(fs, "since") {
 		return errors.New("give --since or --from/--to, not both")
 	}
 	var err error
@@ -256,6 +270,10 @@ func runShow(
 		return exitUsage
 	}
 	ref := fs.Arg(0)
+	if err := c.checkFormat(fs); err != nil {
+		say(stderr, "horo show:", err)
+		return exitUsage
+	}
 	cl, err := c.client()
 	if err != nil {
 		say(stderr, "horo show:", err)
@@ -270,7 +288,14 @@ func runShow(
 		return exitNotFound
 	}
 	return report(stderr, "horo show", explain(
-		writeShow(stdout, c.output, location(c.utc), ch, cl.Events(ctx, ref)), readerHint))
+		writeShow(stdout, c.format, location(c.utc), ch, cl.Events(ctx, ref)), readerHint))
+}
+
+// isSet reports whether name was given on the command line, rather than left at its default.
+func isSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) { set = set || f.Name == name })
+	return set
 }
 
 func location(utc bool) *time.Location {

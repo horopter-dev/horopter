@@ -63,7 +63,7 @@ func TestChangesWritesJSONLInAPipe(t *testing.T) {
 }
 
 func TestChangesJSONIsOneArray(t *testing.T) {
-	code, out, _ := horo(t, egress(t, changeA, ""), false, "changes", "--output", "json")
+	code, out, _ := horo(t, egress(t, changeA, ""), false, "changes", "--format", "json")
 	require.Equal(t, 0, code)
 	var rows []map[string]any
 	require.NoError(t, json.Unmarshal([]byte(out), &rows))
@@ -76,10 +76,10 @@ func TestAnEmptyResultIsNotAnError(t *testing.T) {
 	assert.Equal(t, 0, code)
 	assert.Contains(t, out, "START")
 	assert.Equal(t, 1, strings.Count(strings.TrimSpace(out), "\n")+1, "header only")
-	code, out, _ = horo(t, url, false, "changes", "--output", "json")
+	code, out, _ = horo(t, url, false, "changes", "--format", "json")
 	assert.Equal(t, 0, code)
 	assert.JSONEq(t, `[]`, out)
-	code, out, _ = horo(t, url, false, "changes", "--output", "jsonl")
+	code, out, _ = horo(t, url, false, "changes", "--format", "jsonl")
 	assert.Equal(t, 0, code)
 	assert.Empty(t, out)
 }
@@ -205,7 +205,7 @@ func TestFromAndToAreSentAsGiven(t *testing.T) {
 
 func TestJSONOutputIsValidForSeveralRows(t *testing.T) {
 	code, out, _ := horo(t, egress(t, changeA+","+changeB, ""), false,
-		"changes", "--output", "json")
+		"changes", "--format", "json")
 	require.Equal(t, 0, code)
 	var rows []map[string]any
 	require.NoError(t, json.Unmarshal([]byte(out), &rows), out)
@@ -247,7 +247,7 @@ func TestShowWritesTheChangeThenItsEvents(t *testing.T) {
 	assert.JSONEq(t, changeA, lines[0], "the first line is the change")
 	assert.JSONEq(t, ev, lines[1])
 
-	code, out, _ = horo(t, egress(t, changeA, ev), false, "show", "--output", "json", "ci/dep-1")
+	code, out, _ = horo(t, egress(t, changeA, ev), false, "show", "--format", "json", "ci/dep-1")
 	require.Equal(t, 0, code)
 	assert.JSONEq(t, `{"change":`+changeA+`,"events":[`+ev+`]}`, out)
 }
