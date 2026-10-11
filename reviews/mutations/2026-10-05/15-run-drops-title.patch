@@ -4,15 +4,15 @@
 # expect: none predicted; no run or event test asserts the posted title
 
 diff --git a/cmd/horo/run.go b/cmd/horo/run.go
-index 39163f3..e05e871 100644
+index 918baa5..b99b952 100644
 --- a/cmd/horo/run.go
 +++ b/cmd/horo/run.go
-@@ -113,7 +113,7 @@ func unrecorded(argv []string, why error, strict bool, stdout, stderr io.Writer)
- // event is an event about this invocation's change.
- func (x *runner) event(word, phase string, at time.Time, attrs map[string]any) client.NewEvent {
+@@ -136,7 +136,7 @@ func (x *runner) event(
+ 	lc core.Lifecycle, phase string, at time.Time, attrs map[string]any,
+ ) client.NewEvent {
  	return client.NewEvent{
--		Type: x.r.typ + "." + word, Subject: x.r.subject, Title: x.r.title, Actor: x.r.actor,
-+		Type: x.r.typ + "." + word, Subject: x.r.subject, Actor: x.r.actor,
- 		CorrelationRef: x.r.ref, IdempotencyKey: "horo/" + x.id + "/" + phase, Lifecycle: word,
+-		Type: x.eventType(lc), Subject: x.r.subject, Title: x.r.title, Actor: x.r.actor,
++		Type: x.eventType(lc), Subject: x.r.subject, Actor: x.r.actor,
+ 		CorrelationRef: x.r.ref, IdempotencyKey: "horo/" + x.id + "/" + phase, Lifecycle: string(lc),
  		OccurredAt: at, Attributes: attrs,
  	}
