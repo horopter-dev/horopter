@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"horopter.dev/horopter/internal/client"
+	"horopter.dev/horopter/internal/core"
 )
 
 // startWindow bounds the start post: the command waits on it. A variable so a test can shorten it.
@@ -122,21 +123,27 @@ func (x *runner) unrecorded(argv []string, why error, stdout io.Writer) int {
 	}
 	sayf(x.stderr, "horo run: %v; running the command unrecorded\n", why)
 	out := runChild(argv, stdout, x.stderr, forwarded(sharesTerminal()))
-	x.report.ended(out.word)
+	x.report.ended(out.lifecycle)
 	return out.exitCode
 }
 
+// eventType is the type of this invocation's event at lc. The close command must carry the type
+// the end post would have, so both build it here.
+func (x *runner) eventType(lc core.Lifecycle) string { return x.r.typ + "." + string(lc) }
+
 // event is an event about this invocation's change.
-func (x *runner) event(word, phase string, at time.Time, attrs map[string]any) client.NewEvent {
+func (x *runner) event(
+	lc core.Lifecycle, phase string, at time.Time, attrs map[string]any,
+) client.NewEvent {
 	return client.NewEvent{
-		Type: x.r.typ + "." + word, Subject: x.r.subject, Title: x.r.title, Actor: x.r.actor,
-		CorrelationRef: x.r.ref, IdempotencyKey: "horo/" + x.id + "/" + phase, Lifecycle: word,
+		Type: x.eventType(lc), Subject: x.r.subject, Title: x.r.title, Actor: x.r.actor,
+		CorrelationRef: x.r.ref, IdempotencyKey: "horo/" + x.id + "/" + phase, Lifecycle: string(lc),
 		OccurredAt: at, Attributes: attrs,
 	}
 }
 
 func (x *runner) postStart(ctx context.Context) bool {
-	got, err := x.cl.Post(ctx, x.event("started", "start", time.Now(), x.r.attributes()),
+	got, err := x.cl.Post(ctx, x.event(core.LifecycleStarted, "start", time.Now(), x.r.attributes()),
 		time.Now().Add(startWindow))
 	if err != nil {
 		err = explain(err, producerHint)
@@ -154,14 +161,14 @@ func (x *runner) postStart(ctx context.Context) bool {
 func (x *runner) abort(ctx context.Context) int {
 	at := time.Now()
 	why := "interrupted before the command started"
-	x.report.ended("cancelled")
-	err := x.postEnd(ctx, x.event("cancelled", "end", at, map[string]any{"reason": why}),
+	x.report.ended(core.LifecycleCancelled)
+	err := x.postEnd(ctx, x.event(core.LifecycleCancelled, "end", at, map[string]any{"reason": why}),
 		abortWindow)
 	if err != nil {
 		err = explain(err, producerHint)
 		sayf(x.stderr, "horo run: %s; it was not run, and the cancellation could not be "+
 			"confirmed (%v). If the change is still open, close it with:\n  %s\n",
-			why, err, x.closeCommand("cancelled", at))
+			why, err, x.closeCommand(core.LifecycleCancelled, at))
 		x.report.because(fmt.Errorf("%s; the cancellation could not be confirmed: %w", why, err))
 	} else {
 		say(x.stderr, "horo run: "+why+"; it was not run, and is recorded as cancelled")
@@ -172,7 +179,7 @@ func (x *runner) abort(ctx context.Context) int {
 
 // finish records how the command ended and picks horo's exit code.
 func (x *runner) finish(ctx context.Context, started bool, out outcome) int {
-	x.report.ended(out.word)
+	x.report.ended(out.lifecycle)
 	if !started {
 		// An end without its start would record a change that never began, and would hold the
 		// step for endWindow against a Horopter already known to be unreachable.
@@ -185,13 +192,13 @@ func (x *runner) finish(ctx context.Context, started bool, out outcome) int {
 		attrs[k] = v
 	}
 	at := time.Now()
-	err := x.postEnd(ctx, x.event(out.word, "end", at, attrs), endWindow)
+	err := x.postEnd(ctx, x.event(out.lifecycle, "end", at, attrs), endWindow)
 	if err == nil {
 		return out.exitCode
 	}
 	err = explain(err, producerHint)
 	sayf(x.stderr, "horo: could not confirm the end was recorded (%v). If the change is still "+
-		"open, close it with:\n  %s\n", err, x.closeCommand(out.word, at))
+		"open, close it with:\n  %s\n", err, x.closeCommand(out.lifecycle, at))
 	x.report.because(fmt.Errorf("could not confirm the end was recorded: %w", err))
 	if x.strict {
 		return exitError
@@ -241,9 +248,9 @@ func (x *runner) postUnlessInterrupted(
 // command ended, so a change closed hours later does not count the outage in its duration, and
 // the end post's own idempotency key: a post that timed out may still have been stored, and
 // then pasting this is a harmless replay rather than a second end.
-func (x *runner) closeCommand(word string, at time.Time) string {
+func (x *runner) closeCommand(lc core.Lifecycle, at time.Time) string {
 	args := []string{"horo", "event", "--ref", x.r.ref, "--subject", x.r.subject,
-		"--type", x.r.typ + "." + word, "--lifecycle", word,
+		"--type", x.eventType(lc), "--lifecycle", string(lc),
 		"--occurred-at", at.UTC().Format(time.RFC3339Nano),
 		"--idempotency-key", "horo/" + x.id + "/end"}
 	quoted := make([]string, len(args))
