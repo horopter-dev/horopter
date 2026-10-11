@@ -163,6 +163,14 @@ otherwise; `--output table|json|jsonl` chooses. Exit codes: `0` success, `1` an 
 egress, `2` a usage error, `3` `horo show` found no such ref.
 `horo refold` repairs one change; see [Re-folding one change](#re-folding-one-change).
 
+Every binary, `horo`, `horoctl` and the daemons alike, answers `--version` with the release it
+was built from (`horo v0.9.0`) and `--build-info` with that release, the commit, the commit's
+time, whether the tree was modified, the Go version, OS and architecture. Either must be the
+first argument, and both take `--json` or `--format text|json`. Only text output prefixes the
+version with `v`: `--json` reports `"version": "0.9.0"`, the form `horoctl` passes its plugins
+as `HOROCTL_VERSION`, and `--version --format bare` prints `0.9.0` alone, for a script to
+compare. A binary built by `go install …@v0.9.0` reports the module version.
+
 Install from a release archive, or, while the repository is private:
 
     GOPRIVATE=horopter.dev go install horopter.dev/horopter/cmd/horo@latest

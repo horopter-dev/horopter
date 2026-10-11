@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -779,4 +780,26 @@ func TestResolveLocusDefaultsToSourceOnlyWhenLocusIsEmpty(t *testing.T) {
 			"source here instead")
 	assert.Empty(t, resolveLocus(issueFlags{}),
 		"neither given resolves to empty, which ValidateLocus then refuses")
+}
+
+func TestVersionAndBuildInfoAnswerBeforeAnyVerb(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	assert.True(t, strings.HasPrefix(runHoroctl(t, "--version"), "horoctl "),
+		"compiled in, never looked up as a horoctl---version plugin")
+	assert.Contains(t, runHoroctl(t, "--build-info", "--json"), `"name":"horoctl"`)
+}
+
+// TestAPluginIsToldTheVersionHoroctlReports: HOROCTL_VERSION is how a plugin checks it is
+// compatible with the horoctl that ran it, so it is the version --build-info reports, without
+// the v that only text output adds.
+func TestAPluginIsToldTheVersionHoroctlReports(t *testing.T) {
+	dir := t.TempDir()
+	writeExecutable(t, filepath.Join(dir, "horoctl-whichversion"),
+		"#!/bin/sh\necho \"$HOROCTL_VERSION\"\n")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var info struct{ Version string }
+	require.NoError(t, json.Unmarshal([]byte(runHoroctl(t, "--build-info", "--json")), &info))
+	require.NotEmpty(t, info.Version)
+	assert.Equal(t, info.Version, strings.TrimSpace(runHoroctl(t, "whichversion")))
 }

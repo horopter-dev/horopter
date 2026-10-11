@@ -19,6 +19,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"horopter.dev/horopter/internal/buildinfo"
 	"horopter.dev/horopter/internal/client"
 	"horopter.dev/horopter/internal/logging"
 )
@@ -29,6 +30,10 @@ const (
 )
 
 func main() {
+	code, handled := buildinfo.Handle("horopter-flux", os.Args[1:], os.Stdout, os.Stderr)
+	if handled {
+		os.Exit(code)
+	}
 	if err := logging.Setup(); err != nil {
 		fmt.Fprintln(os.Stderr, "horopter-flux:", err)
 		os.Exit(exitError)

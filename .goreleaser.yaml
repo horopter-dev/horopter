@@ -14,6 +14,9 @@ builds:
     goos: [linux]
     goarch: [amd64, arm64]
     flags: [-trimpath]
+    # Every build stamps the release, without the tag's v, where buildinfo.Version reads it;
+    # the kos inherit it. Setting ldflags replaces GoReleaser's defaults, so -s -w is restated.
+    ldflags: &ldflags ["-s -w -X horopter.dev/horopter/internal/buildinfo.version={{ .Version }}"]
   - id: egress
     main: ./cmd/horopter-egress
     binary: horopter-egress
@@ -21,6 +24,7 @@ builds:
     goos: [linux]
     goarch: [amd64, arm64]
     flags: [-trimpath]
+    ldflags: *ldflags
   - id: horopter-migrate
     main: ./cmd/horopter-migrate
     binary: horopter-migrate
@@ -28,6 +32,7 @@ builds:
     goos: [linux]
     goarch: [amd64, arm64]
     flags: [-trimpath]
+    ldflags: *ldflags
   - id: horopter-flux
     main: ./cmd/horopter-flux
     binary: horopter-flux
@@ -35,6 +40,7 @@ builds:
     goos: [linux]
     goarch: [amd64, arm64]
     flags: [-trimpath]
+    ldflags: *ldflags
   # horoctl is the first binary here needing a non-Linux target: ingress, egress and
   # horopter-migrate exist to become container images, but operators run horoctl from a
   # laptop. darwin/amd64 is excluded rather than built and left unpublished.
@@ -48,6 +54,7 @@ builds:
       - goos: darwin
         goarch: amd64
     flags: [-trimpath]
+    ldflags: *ldflags
   - id: horo
     main: ./cmd/horo
     binary: horo
@@ -58,7 +65,7 @@ builds:
       - goos: darwin
         goarch: amd64
     flags: [-trimpath]
-    ldflags: ["-s -w -X main.version={{ .Tag }}"]
+    ldflags: *ldflags
 
 # ko compiles each platform and pushes an OCI index straight to the registry: no Dockerfile,
 # no buildx builder, no QEMU, no daemon. Three settings are explicit because ko's defaults are
