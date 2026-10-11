@@ -305,7 +305,8 @@ func TestASecondInterruptSkipsTheCancellationPost(t *testing.T) {
 }
 
 // TestAnInterruptDuringTheEndPostPrintsTheCloseCommand: the command has finished and Horopter
-// does not answer; an interrupt stops the wait rather than being swallowed for endWindow.
+// does not answer; an interrupt stops the wait rather than being swallowed for endWindow. The
+// outcome stands in the report, with the end unconfirmed.
 func TestAnInterruptDuringTheEndPostPrintsTheCloseCommand(t *testing.T) {
 	e := endWindow
 	endWindow = 30 * time.Second
@@ -324,10 +325,11 @@ func TestAnInterruptDuringTheEndPostPrintsTheCloseCommand(t *testing.T) {
 		<-release
 	}))
 	t.Cleanup(func() { close(release); srv.Close() })
+	path := reportFile(t)
 	done := make(chan int, 1)
 	var errOut string
 	go func() {
-		code, _, e := runCmd(t, srv.URL, "--", "sh", "-c", "exit 4")
+		code, _, e := runCmd(t, srv.URL, "--report", path, "--", "sh", "-c", "exit 4")
 		errOut = e
 		done <- code
 	}()
@@ -340,6 +342,12 @@ func TestAnInterruptDuringTheEndPostPrintsTheCloseCommand(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("an interrupt during the end post must end the wait")
 	}
+	got := readReport(t, path)
+	assert.Equal(t, true, got["start_posted"])
+	assert.Equal(t, false, got["end_posted"])
+	assert.Equal(t, "ci/r", got["ref"])
+	assert.Equal(t, "failed", got["outcome"])
+	assert.Contains(t, got["reason"], "interrupted while waiting for Horopter")
 }
 
 // TestASilentHoropterDelaysTheCommandByTheStartWindowOnly: a server that accepts and never
