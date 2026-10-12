@@ -210,10 +210,13 @@ func TestTheReportCarriesEachOutcome(t *testing.T) {
 	}
 }
 
+// TestTheReportOfAStrictRefusalHasNoOutcome: ingress refused the start, so no change was opened
+// and none was closed.
 func TestTheReportOfAStrictRefusalHasNoOutcome(t *testing.T) {
 	shortWindows(t)
 	path := reportFile(t)
-	code, _, _ := runCmd(t, "http://127.0.0.1:1", "--strict", "--report", path, "--", "true")
+	url := (&fakeIngress{status: http.StatusUnauthorized}).server(t)
+	code, _, _ := runCmd(t, url, "--strict", "--report", path, "--", "true")
 	require.Equal(t, 1, code)
 	got := readReport(t, path)
 	assert.Nil(t, got["outcome"], "the command was not run")

@@ -199,7 +199,10 @@ the command is not run, and the change is recorded as cancelled.
 the start was not recorded it does not record the end either. If Horopter fails while the
 command runs, it retries the end for up to 30 seconds after the command; Ctrl-C stops that wait.
 `--strict` refuses to run the command when the start cannot be recorded, whether Horopter is
-down or no URL or key is set, and fails when the end cannot; either way `horo run` exits 1.
+down or no URL or key is set, and fails when the end cannot; either way `horo run` exits 1. A
+start that could not be recorded may have been stored anyway, on a request that timed out, so a
+refusal closes the change as cancelled unless Horopter refused the start, with a `400`, `401`,
+`403` or `413`, which proves it was not stored.
 
 It prints both forms of the change's ref on stderr: the stored `<locus>/<ref>`, which `horo show`
 takes, and the plain ref, which `--ref` takes. If the end cannot be confirmed, `horo run` prints
@@ -213,11 +216,14 @@ a CI step summary:
      "outcome":"completed","exit_code":0,"reason":null}
 
 `ref` is the stored ref, `null` when nothing was stored. `outcome` is how the command ended:
-`completed`, `failed` or `cancelled`, and `cancelled` too when an interrupt before the command
-started closed the change, or tried to: `end_posted` says which. It is `null` when the command
-was not run and no change was closed, which is when `--strict` refuses to run it. `exit_code` is `horo run`'s own. `reason` says why
-the change was not recorded in full, and is `null` when it was. The report is written on every
-path past argument parsing; if it cannot be written, `horo run` warns and keeps its exit code.
+`completed`, `failed` or `cancelled`, and `cancelled` too when the command was not run but the
+change was closed, or `horo run` tried to: after an interrupt before the command started, or a
+`--strict` refusal after a start that may have been stored. `end_posted` says which. It is
+`null` when the command was not run and no change was closed: a `--strict` refusal with no URL
+or key, or after Horopter refused the start. `exit_code` is `horo run`'s own.
+`reason` says why the change was not recorded in full, and is `null` when it was. The report is
+written on every path past argument parsing; if it cannot be written, `horo run` warns and keeps
+its exit code.
 
 ## Security
 
