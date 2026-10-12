@@ -1,18 +1,18 @@
 # mutation: 17-start-window-minutes
 # guards: a silent Horopter delays the command by at most 10 seconds
 # package: ./cmd/horo/
-# expect: none predicted; every test that depends on it shortens startWindow first
+# expect: TestTheRecordingWindowsAreTheDocumentedOnes
 
 diff --git a/cmd/horo/run.go b/cmd/horo/run.go
-index 39163f3..0a421e7 100644
+index 9bbfe3a..36329cf 100644
 --- a/cmd/horo/run.go
 +++ b/cmd/horo/run.go
-@@ -15,7 +15,7 @@ import (
+@@ -17,7 +17,7 @@ import (
  )
  
  // startWindow bounds the start post: the command waits on it. A variable so a test can shorten it.
 -var startWindow = 10 * time.Second
 +var startWindow = 10 * time.Minute
  
- // abortWindow bounds the cancellation post after an interrupt: the user has asked to stop, so
- // this is short. A variable so a test can shorten it.
+ // abortWindow bounds the cancellation post when the command is not run: after an interrupt the
+ // user has asked to stop, and under --strict the start has already used its window, so this is

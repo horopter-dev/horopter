@@ -172,3 +172,20 @@ func TestPostRetriesAfterAHungAttempt(t *testing.T) {
 	require.NoError(t, err, "the second attempt must answer")
 	assert.EqualValues(t, 2, calls.Load())
 }
+
+// TestRefusedIsAnAnswerThatProvesNothingWasStored: a stored post is replayed rather than
+// refused, so ingress refusing it proves it was not stored. Any other 4xx comes from a hop in
+// front of ingress, and says nothing about an earlier attempt.
+func TestRefusedIsAnAnswerThatProvesNothingWasStored(t *testing.T) {
+	for status, refused := range map[int]bool{
+		http.StatusBadRequest: true, http.StatusUnauthorized: true, http.StatusForbidden: true,
+		http.StatusRequestEntityTooLarge: true,
+		http.StatusRequestTimeout:        false, http.StatusTooManyRequests: false, 499: false,
+		http.StatusUnprocessableEntity: false, http.StatusInternalServerError: false,
+		http.StatusServiceUnavailable: false,
+	} {
+		assert.Equal(t, refused, client.Refused(&client.HTTPError{Status: status}), status)
+	}
+	assert.False(t, client.Refused(context.DeadlineExceeded), "no answer at all")
+	assert.False(t, client.Refused(nil))
+}

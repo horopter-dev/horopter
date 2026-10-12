@@ -19,8 +19,9 @@ import (
 // startWindow bounds the start post: the command waits on it. A variable so a test can shorten it.
 var startWindow = 10 * time.Second
 
-// abortWindow bounds the cancellation post after an interrupt: the user has asked to stop, so
-// this is short. A variable so a test can shorten it.
+// abortWindow bounds the cancellation post when the command is not run: after an interrupt the
+// user has asked to stop, and under --strict the start has already used its window, so this is
+// short. A variable so a test can shorten it.
 var abortWindow = 3 * time.Second
 
 // runner is one horo run invocation.
@@ -54,16 +55,15 @@ func (x *runner) recordRun(ctx context.Context, argv []string, stdout io.Writer)
 		return x.unrecorded(argv, err, stdout)
 	}
 	x.cl = cl
-	started := x.postStart(ctx)
+	startErr := x.postStart(ctx)
 	if ctx.Err() != nil {
 		return x.abort(ctx)
 	}
-	if !started && x.strict {
-		say(x.stderr, "horo run: --strict, so the command was not run")
-		return exitError
+	if startErr != nil && x.strict {
+		return x.refuse(ctx, startErr)
 	}
 	out := runChild(argv, stdout, x.stderr, forwarded(sharesTerminal()))
-	return x.finish(ctx, started, out)
+	return x.finish(ctx, startErr == nil, out)
 }
 
 // parseRun reads run's flags and the command after --. ok is false after a usage error, which
@@ -142,39 +142,58 @@ func (x *runner) event(
 	}
 }
 
-func (x *runner) postStart(ctx context.Context) bool {
+// postStart posts the start, and returns why it could not be recorded.
+func (x *runner) postStart(ctx context.Context) error {
 	got, err := x.cl.Post(ctx, x.event(core.LifecycleStarted, "start", time.Now(), x.r.attributes()),
 		time.Now().Add(startWindow))
 	if err != nil {
 		err = explain(err, producerHint)
 		sayf(x.stderr, "horo: could not record the start (%v); ref %s (--ref)\n", err, x.r.ref)
 		x.report.because(fmt.Errorf("could not record the start: %w", err))
-		return false
+		return err
 	}
 	sayf(x.stderr, "horo: recording %s (horo show) — ref %s (--ref)\n", got.Ref, x.r.ref)
 	x.report.started(got.Ref)
-	return true
+	return nil
 }
 
-// abort handles an interrupt during the start post: the command is not run. The start may
-// already have reached ingress, so the change is closed as cancelled rather than left open.
+// abort handles an interrupt during the start post: the command is not run.
 func (x *runner) abort(ctx context.Context) int {
-	at := time.Now()
 	why := "interrupted before the command started"
+	x.cancel(ctx, why, errors.New(why))
+	return signalExit(ctx)
+}
+
+// refuse handles --strict after the start could not be recorded: the command is not run. Unless
+// ingress refused the start, it may have stored it, perhaps on an attempt before the last.
+func (x *runner) refuse(ctx context.Context, startErr error) int {
+	if client.Refused(startErr) {
+		say(x.stderr, "horo run: --strict, so the command was not run")
+		return exitError
+	}
+	x.cancel(ctx, "--strict, and the start could not be recorded",
+		fmt.Errorf("could not record the start: %w", startErr))
+	return exitError
+}
+
+// cancel closes the change as cancelled when the command was not run: the start may already
+// have reached ingress, and the change must not be left open. why is the event's reason and
+// begins the warning; reason is the report's, extended if the cancellation is not confirmed.
+func (x *runner) cancel(ctx context.Context, why string, reason error) {
+	at := time.Now()
 	x.report.ended(core.LifecycleCancelled)
 	err := x.postEnd(ctx, x.event(core.LifecycleCancelled, "end", at, map[string]any{"reason": why}),
 		abortWindow)
 	if err != nil {
 		err = explain(err, producerHint)
-		sayf(x.stderr, "horo run: %s; it was not run, and the cancellation could not be "+
+		sayf(x.stderr, "horo run: %s; the command was not run, and the cancellation could not be "+
 			"confirmed (%v). If the change is still open, close it with:\n  %s\n",
 			why, err, x.closeCommand(core.LifecycleCancelled, at))
-		x.report.because(fmt.Errorf("%s; the cancellation could not be confirmed: %w", why, err))
-	} else {
-		say(x.stderr, "horo run: "+why+"; it was not run, and is recorded as cancelled")
-		x.report.because(errors.New(why))
+		x.report.because(fmt.Errorf("%w; the cancellation could not be confirmed: %w", reason, err))
+		return
 	}
-	return signalExit(ctx)
+	say(x.stderr, "horo run: "+why+"; the command was not run, and is recorded as cancelled")
+	x.report.because(reason)
 }
 
 // finish records how the command ended and picks horo's exit code.

@@ -1,15 +1,15 @@
 # mutation: 16-abort-key-not-end
-# guards: the cancellation post after an interrupted start uses the /end key the printed close command reuses
+# guards: the cancellation post after an interrupted start or a --strict refusal uses the /end key the printed close command reuses
 # package: ./cmd/horo/
-# expect: none predicted; the interrupt tests check the posted type, not its idempotency key
+# expect: TestAnAbortsCancellationUsesTheEndKey, TestStrictClosesAStartThatMayHaveBeenStored
 
 diff --git a/cmd/horo/run.go b/cmd/horo/run.go
-index 918baa5..6f02d37 100644
+index 9bbfe3a..7556b0a 100644
 --- a/cmd/horo/run.go
 +++ b/cmd/horo/run.go
-@@ -162,7 +162,7 @@ func (x *runner) abort(ctx context.Context) int {
+@@ -182,7 +182,7 @@ func (x *runner) refuse(ctx context.Context, startErr error) int {
+ func (x *runner) cancel(ctx context.Context, why string, reason error) {
  	at := time.Now()
- 	why := "interrupted before the command started"
  	x.report.ended(core.LifecycleCancelled)
 -	err := x.postEnd(ctx, x.event(core.LifecycleCancelled, "end", at, map[string]any{"reason": why}),
 +	err := x.postEnd(ctx, x.event(core.LifecycleCancelled, "cancel", at, map[string]any{"reason": why}),
