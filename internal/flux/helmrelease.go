@@ -90,11 +90,10 @@ func (r release) pending(mem ReleaseMemory, prev *HelmRelease, out []client.NewE
 	}), mem
 }
 
+// orphanClosed is untitled: status may already describe the attempt that replaced it.
 func (r release) orphanClosed(open OpenAttempt, at time.Time) client.NewEvent {
-	ev := r.event(open.Version, open.Action+".failed", "failed", "failed/PendingRelease", at,
+	return r.event(open.Version, open.Action+".failed", "failed", "failed/PendingRelease", at,
 		map[string]any{"action": open.Action, "reason": "PendingRelease"})
-	ev.Title = r.hr.Status.LastAttemptedRevision
-	return ev
 }
 
 // running matches helm-controller's Reconciling message immediately before a Helm action.
@@ -102,32 +101,47 @@ var running = regexp.MustCompile(`^Running '(install|upgrade)' action`)
 
 // start opens a release change at helm-controller's pre-action patch for an install or
 // upgrade. A start while another is open closes that one as orphaned: its controller died.
+// helm-controller writes the conditions a call before lastAttempted*, so the start carries none
+// of them; attempted posts them once they land.
 func (r release) start(mem ReleaseMemory, prev *HelmRelease, out []client.NewEvent,
 ) ([]client.NewEvent, ReleaseMemory) {
 	action, since, ok := r.running()
 	if !ok {
 		return out, mem
 	}
-	if mem.Open != nil {
-		if mem.Open.Action == action && mem.Open.Since.Equal(since) {
-			return out, mem
+	seen := mem.Open != nil && mem.Open.Action == action && mem.Open.Since.Equal(since)
+	if !seen {
+		if mem.Open != nil {
+			out = append(out, r.orphanClosed(*mem.Open, since))
+			mem.Orphaned, mem.Open = max(mem.Orphaned, mem.Open.Version), nil
 		}
-		out = append(out, r.orphanClosed(*mem.Open, since))
-		mem.Orphaned, mem.Open = max(mem.Orphaned, mem.Open.Version), nil
+		version := r.predict(action, mem.Orphaned)
+		out = append(out, r.event(version, action+".started", "started", "started", since,
+			map[string]any{"action": action, "chart": r.chart()}))
+		mem.Open = &OpenAttempt{Version: version, Action: action, Since: since}
 	}
-	version := r.predict(action, mem.Orphaned)
+	return r.attempted(*mem.Open, prev, out), mem
+}
+
+// attempted posts the open attempt's chart version, values and generation when they differ
+// from prev's, or on a cold list.
+func (r release) attempted(open OpenAttempt, prev *HelmRelease, out []client.NewEvent,
+) []client.NewEvent {
+	trigger := r.trigger(prev)
+	if prev != nil && trigger == "" {
+		return out
+	}
 	s := r.hr.Status
 	attrs := map[string]any{
-		"action": action, "chart": r.chart(), "chart_version": s.LastAttemptedRevision,
+		"action": open.Action, "chart": r.chart(), "chart_version": s.LastAttemptedRevision,
 		"config_digest": s.LastAttemptedConfigDigest, "generation": s.LastAttemptedGeneration,
 	}
-	if trigger := r.trigger(prev); trigger != "" {
+	if trigger != "" {
 		attrs["trigger"] = trigger
 	}
-	ev := r.event(version, action+".started", "started", "started", since, attrs)
+	ev := r.event(open.Version, open.Action+".attempted", "none", "attempted", open.Since, attrs)
 	ev.Title = s.LastAttemptedRevision
-	mem.Open = &OpenAttempt{Version: version, Action: action, Since: since}
-	return append(out, ev), mem
+	return append(out, ev)
 }
 
 // running reports the install or upgrade helm-controller is about to run, and when. The
@@ -188,7 +202,7 @@ func (r release) chart() string {
 }
 
 // trigger says why helm-controller ran an action: the spec, the chart or the values changed.
-// It needs the previous state, so a start seen first on a cold list has none.
+// It needs the previous state, so an attempt seen first on a cold list has none.
 func (r release) trigger(prev *HelmRelease) string {
 	if prev == nil {
 		return ""

@@ -918,6 +918,7 @@ prefixed with the `kube-system` Namespace's uid, make re-posting harmless.
 | Kustomization Ready=False, except `DependencyNotReady` and `Progressing` | commit change end and a point | `flux.kustomization.failed` | `failed`, `none` |
 | Kustomization `Progressing` Event | one event per changed object | `flux.kustomization.applied` | `none` |
 | HelmRelease "Running 'install'/'upgrade' action" | release change start | `flux.helmrelease.<action>.started` | `started` |
+| that attempt's chart version, values or generation landing in status | the release change's attempt | `flux.helmrelease.<action>.attempted` | `none` |
 | that revision reaching `status.history`, deployed or failed | release change end | `flux.helmrelease.<action>.succeeded` / `.failed` | `completed`, `failed` |
 | a rollback remediating it | release change end | `flux.helmrelease.<action>.rolled_back` / `.rollback.failed` | `rolled_back`, `failed` |
 | HelmRelease Released=False `PendingRelease` | a point, and the open release change ends | `flux.helmrelease.pending_release` | `none` |
@@ -926,8 +927,8 @@ prefixed with the `kube-system` Namespace's uid, make re-posting harmless.
 A commit change's ref is the Git revision and its title the commit subject, from
 source-controller's `NewArtifact` Event; if that Event has expired, the title is the branch and
 short SHA (`main@b1f2477`). A release change's ref is
-`HelmRelease/<namespace>/<name>/<uid>/v<helm revision>` and its title the app version. Only
-Git sources start a commit change.
+`HelmRelease/<namespace>/<name>/<uid>/v<helm revision>` and its title the chart version, then
+the app version once it ends. Only Git sources start a commit change.
 
 It reads `HOROPTER_INGRESS_URL` and `HOROPTER_INGRESS_KEY`, and exits with status 2 if either is
 empty. Issue one key per cluster, without `--subject-pattern`, for the same reason as the route's

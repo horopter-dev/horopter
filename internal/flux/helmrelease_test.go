@@ -42,10 +42,10 @@ func dropCondition(hr *flux.HelmRelease, typ string) {
 		func(c flux.Condition) bool { return c.Type == typ })
 }
 
-// running is hr after helm-controller's pre-action patch for action, with the chart version
-// it is about to roll out.
-func running(t *testing.T, hr flux.HelmRelease, action, chartVersion, when string,
-) flux.HelmRelease {
+// preAction is hr after helm-controller's pre-action patch for action as the watch first sees
+// it: the patch helper sends the conditions before the rest of status, so lastAttempted* still
+// describe the previous attempt.
+func preAction(t *testing.T, hr flux.HelmRelease, action, when string) flux.HelmRelease {
 	t.Helper()
 	hr.Status.Conditions = slices.Clone(hr.Status.Conditions)
 	msg := fmt.Sprintf("Running '%s' action with timeout of 10m0s", action)
@@ -53,6 +53,15 @@ func running(t *testing.T, hr flux.HelmRelease, action, chartVersion, when strin
 		Message: msg, LastTransitionTime: at(t, when)})
 	setCondition(&hr, flux.Condition{Type: "Ready", Status: "Unknown", Reason: "Progressing",
 		Message: msg, LastTransitionTime: at(t, when)})
+	return hr
+}
+
+// running is hr once the rest of the pre-action patch has landed too, with the chart version
+// the action is about to roll out.
+func running(t *testing.T, hr flux.HelmRelease, action, chartVersion, when string,
+) flux.HelmRelease {
+	t.Helper()
+	hr = preAction(t, hr, action, when)
 	hr.Status.LastAttemptedRevision = chartVersion
 	return hr
 }
@@ -97,23 +106,31 @@ func keys(events []client.NewEvent) []string {
 
 func TestALiveUpgradeIsOneReleaseChangeFromItsStartToHistory(t *testing.T) {
 	before := deployed(t)
+	conditions := preAction(t, before, "upgrade", "2026-10-09T18:00:00Z")
 	during := running(t, before, "upgrade", "0.3.2", "2026-10-09T18:00:00Z")
 	after := finished(during, snapshot(t, "upgrade", 11, "deployed", "0.3.2", "v0.7.2",
 		"2026-10-09T18:00:20Z"), "20s")
 
-	started, mem := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, &before, during)
+	started, mem := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, &before, conditions)
+	attempted, mem := flux.MapHelmRelease(cluster, mem, &conditions, during)
 	ended, mem := flux.MapHelmRelease(cluster, mem, &during, after)
 
 	assert.Equal(t, []client.NewEvent{{
-		Type: "flux.helmrelease.upgrade.started", Subject: hrSubject, Title: "0.3.2",
+		Type: "flux.helmrelease.upgrade.started", Subject: hrSubject,
 		CorrelationRef: hrRef(11), IdempotencyKey: cluster + "/" + hrRef(11) + "/started",
 		Lifecycle: "started", OccurredAt: at(t, "2026-10-09T18:00:00Z"),
+		Attributes: map[string]any{"action": "upgrade", "chart": "horopter"},
+	}}, started)
+	assert.Equal(t, []client.NewEvent{{
+		Type: "flux.helmrelease.upgrade.attempted", Subject: hrSubject, Title: "0.3.2",
+		CorrelationRef: hrRef(11), IdempotencyKey: cluster + "/" + hrRef(11) + "/attempted",
+		Lifecycle: "none", OccurredAt: at(t, "2026-10-09T18:00:00Z"),
 		Attributes: map[string]any{
 			"action": "upgrade", "chart": "horopter", "chart_version": "0.3.2",
 			"config_digest": before.Status.LastAttemptedConfigDigest, "generation": int64(11),
 			"trigger": "chart",
 		},
-	}}, started)
+	}}, attempted)
 	assert.Equal(t, []client.NewEvent{{
 		Type: "flux.helmrelease.upgrade.succeeded", Subject: hrSubject, Title: "v0.7.2",
 		CorrelationRef: hrRef(11), IdempotencyKey: cluster + "/" + hrRef(11) + "/completed",
@@ -254,7 +271,7 @@ func TestAnInstallWithReplacePredictsTheNextRevision(t *testing.T) {
 	assert.Equal(t, hrRef(11), started[0].CorrelationRef)
 }
 
-func TestTriggerSaysWhatChangedAndIsAbsentForARetry(t *testing.T) {
+func TestAnAttemptSaysWhatChangedAndARetryHasNone(t *testing.T) {
 	cases := map[string]struct {
 		change func(*flux.HelmRelease)
 		want   any
@@ -274,10 +291,15 @@ func TestTriggerSaysWhatChangedAndIsAbsentForARetry(t *testing.T) {
 				"2026-10-09T18:00:00Z")
 			c.change(&during)
 
-			started, _ := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, &before, during)
+			got, _ := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, &before, during)
 
-			require.Len(t, started, 1)
-			assert.Equal(t, c.want, started[0].Attributes["trigger"])
+			if c.want == nil {
+				assert.Equal(t, []string{cluster + "/" + hrRef(11) + "/started"}, keys(got))
+				return
+			}
+			require.Len(t, got, 2)
+			assert.Equal(t, "flux.helmrelease.upgrade.attempted", got[1].Type)
+			assert.Equal(t, c.want, got[1].Attributes["trigger"])
 		})
 	}
 }
@@ -311,7 +333,7 @@ func TestARestartMidActionRepeatsTheLiveStartAndEnd(t *testing.T) {
 
 	// The cold list also re-derives v10, whose events the live client posted before; the
 	// server holds their keys already.
-	delete(liveStart[0].Attributes, "trigger")
+	delete(liveStart[1].Attributes, "trigger")
 	assert.Equal(t, []string{
 		cluster + "/" + hrRef(10) + "/started", cluster + "/" + hrRef(10) + "/completed",
 	}, keys(coldStart[:2]))
@@ -329,9 +351,8 @@ func TestAColdListAfterTheActionStartsItAtItsEndLessItsDuration(t *testing.T) {
 
 	cold, _ := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, nil, after)
 
-	assert.Equal(t, append(keys(liveStart), keys(liveEnd)...), keys(cold))
+	assert.Equal(t, append(keys(liveStart[:1]), keys(liveEnd)...), keys(cold))
 	assert.Equal(t, at(t, "2026-10-09T18:00:00Z"), cold[0].OccurredAt)
-	assert.NotContains(t, cold[0].Attributes, "trigger")
 }
 
 func TestAColdListStartsAReleasedAttemptAtReleasedLessItsDuration(t *testing.T) {
@@ -516,7 +537,40 @@ func TestALaterStartClosesAnOrphanedOne(t *testing.T) {
 	assert.Equal(t, []string{
 		cluster + "/" + hrRef(11) + "/failed/PendingRelease",
 		cluster + "/" + hrRef(12) + "/started",
+		cluster + "/" + hrRef(12) + "/attempted",
 	}, keys(got))
+}
+
+func TestAnOrphanedAttemptKeepsItsOwnTitle(t *testing.T) {
+	before := deployed(t)
+	during := running(t, before, "upgrade", "0.3.2", "2026-10-09T18:00:00Z")
+	// The next attempt's start and its chart version arrive in one update.
+	again := running(t, during, "upgrade", "0.4.0", "2026-10-09T18:20:00Z")
+
+	_, mem := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, &before, during)
+	got, _ := flux.MapHelmRelease(cluster, mem, &during, again)
+
+	require.Len(t, got, 3)
+	assert.Equal(t, hrRef(11), got[0].CorrelationRef)
+	assert.Empty(t, got[0].Title)
+	assert.Equal(t, "0.4.0", got[2].Title)
+}
+
+func TestAnAttemptSeenWithItsStartIsPostedOnceAfterIt(t *testing.T) {
+	before := deployed(t)
+	during := running(t, before, "upgrade", "0.3.2", "2026-10-09T18:00:00Z")
+	later := during
+	later.Status.LastAttemptedReleaseActionDuration = "1s"
+
+	got, mem := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, &before, during)
+	again, _ := flux.MapHelmRelease(cluster, mem, &during, later)
+
+	assert.Equal(t, []string{
+		cluster + "/" + hrRef(11) + "/started", cluster + "/" + hrRef(11) + "/attempted",
+	}, keys(got))
+	assert.Empty(t, got[0].Title)
+	assert.Equal(t, "0.3.2", got[1].Title)
+	assert.Empty(t, again)
 }
 
 func TestARecreatedHelmReleaseRecordsNewChanges(t *testing.T) {
