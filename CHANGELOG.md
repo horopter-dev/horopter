@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.13.0](https://github.com/horopter-dev/horopter/compare/v0.12.0...v0.13.0) (2026-10-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* **ingress:** POST /v1/events/flux answers 404. Run horopter-flux in the cluster instead, and delete the notification-controller Provider and Alert that pointed at the route.
+
+### Features
+
+* **ingress:** retire POST /v1/events/flux ([#106](https://github.com/horopter-dev/horopter/issues/106)) ([d7b5d10](https://github.com/horopter-dev/horopter/commit/d7b5d10818112d4a88b5d5671f94732deb40bf83))
+
 ## [0.12.0](https://github.com/horopter-dev/horopter/compare/v0.11.2...v0.12.0) (2026-10-12)
 
 
