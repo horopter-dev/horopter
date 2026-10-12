@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.12.0](https://github.com/horopter-dev/horopter/compare/v0.11.2...v0.12.0) (2026-10-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* **horo:** horo run --strict with no ingress URL or key exits 1, not 2.
+
+### Bug Fixes
+
+* **horo:** --strict closes a start that may have been stored ([#105](https://github.com/horopter-dev/horopter/issues/105)) ([f46dc69](https://github.com/horopter-dev/horopter/commit/f46dc696457e999fa2118d0bce342cc13332e509))
+* **horo:** both --strict refusals exit 1 ([#102](https://github.com/horopter-dev/horopter/issues/102)) ([18d3878](https://github.com/horopter-dev/horopter/commit/18d3878bb2ac3ef1b67724ffbe5944b27356db83))
+
 ## [0.11.2](https://github.com/horopter-dev/horopter/compare/v0.11.1...v0.11.2) (2026-10-12)
 
 
