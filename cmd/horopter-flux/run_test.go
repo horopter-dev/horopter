@@ -133,7 +133,8 @@ func TestAnUpgradeIsRecordedFromItsStatusAsItHappens(t *testing.T) {
 
 	require.Eventually(t, func() bool { return in.attempts(hr10Completed) == 1 },
 		5*time.Second, 10*time.Millisecond)
-	during := setStatus(t, c, hr, func(s map[string]any) {
+	// helm-controller's patch helper writes the conditions, then the rest of status.
+	conditions := setStatus(t, c, hr, func(s map[string]any) {
 		msg := "Running 'upgrade' action with timeout of 10m0s"
 		s["conditions"] = []any{
 			map[string]any{"type": "Reconciling", "status": "True", "reason": "Progressing",
@@ -141,9 +142,13 @@ func TestAnUpgradeIsRecordedFromItsStatusAsItHappens(t *testing.T) {
 			map[string]any{"type": "Ready", "status": "Unknown", "reason": "Progressing",
 				"message": msg, "lastTransitionTime": "2026-10-09T18:00:00Z"},
 		}
-		s["lastAttemptedRevision"] = "0.3.2"
 	})
 	require.Eventually(t, func() bool { return in.attempts(hrKey("11", "started")) == 1 },
+		5*time.Second, 10*time.Millisecond)
+	during := setStatus(t, c, conditions, func(s map[string]any) {
+		s["lastAttemptedRevision"] = "0.3.2"
+	})
+	require.Eventually(t, func() bool { return in.attempts(hrKey("11", "attempted")) == 1 },
 		5*time.Second, 10*time.Millisecond)
 	setStatus(t, c, during, func(s map[string]any) {
 		s["conditions"] = []any{map[string]any{"type": "Ready", "status": "True",
@@ -157,9 +162,13 @@ func TestAnUpgradeIsRecordedFromItsStatusAsItHappens(t *testing.T) {
 		5*time.Second, 10*time.Millisecond)
 
 	assert.Equal(t, []string{
-		hrKey("10", "started"), hr10Completed, hrKey("11", "started"), hrKey("11", "completed"),
+		hrKey("10", "started"), hr10Completed, hrKey("11", "started"), hrKey("11", "attempted"),
+		hrKey("11", "completed"),
 	}, in.keys())
-	assert.Equal(t, "chart", in.body(hrKey("11", "started"))["attributes"].(map[string]any)["trigger"])
+	assert.Empty(t, in.body(hrKey("11", "started"))["title"])
+	attempted := in.body(hrKey("11", "attempted"))
+	assert.Equal(t, "0.3.2", attempted["title"])
+	assert.Equal(t, "chart", attempted["attributes"].(map[string]any)["trigger"])
 	assert.Equal(t, "2026-10-09T18:00:20Z", in.body(hrKey("11", "completed"))["occurred_at"])
 }
 
