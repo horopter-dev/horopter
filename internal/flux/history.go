@@ -13,6 +13,7 @@ type attempt struct {
 	snap        Snapshot
 	action      string
 	failed      bool
+	end         time.Time
 	remediation *remediation
 }
 
@@ -43,7 +44,9 @@ func releasedAttempt(hr HelmRelease) (attempt, bool) {
 	if snap.Status != "deployed" && snap.Status != "failed" {
 		return attempt{}, false
 	}
-	a := attempt{snap: snap, action: snap.Action, failed: snap.Status == "failed"}
+	failed := snap.Status == "failed"
+	a := attempt{snap: snap, action: snap.Action, failed: failed,
+		end: releasedAt(hr, snap, snap.Action, failed)}
 	if rem, ok := condition(hr.Status.Conditions, "Remediated"); a.failed && ok &&
 		rem.Reason == "RollbackFailed" && rem.LastTransitionTime.After(snap.LastDeployed) {
 		a.remediation = &remediation{at: rem.LastTransitionTime}
@@ -61,7 +64,34 @@ func rolledBackAttempt(hr HelmRelease) attempt {
 		(c.Reason == "RollbackSucceeded" || c.Reason == "RollbackFailed") {
 		rem = &remediation{succeeded: c.Reason == "RollbackSucceeded", at: c.LastTransitionTime}
 	}
-	return attempt{snap: h[1], action: "upgrade", failed: true, remediation: rem}
+	return attempt{snap: h[1], action: "upgrade", failed: true,
+		end: releasedAt(hr, h[1], "upgrade", true), remediation: rem}
+}
+
+// releasedAt is when helm-controller set Released for snap's outcome, once Helm's wait
+// returned. Helm stamps lastDeployed as it writes the release, near the action's start, so it is
+// the end only when Released does not show that outcome. A rollback leaves Released as the
+// failed upgrade set it.
+func releasedAt(hr HelmRelease, snap Snapshot, action string, failed bool) time.Time {
+	rel, ok := condition(hr.Status.Conditions, "Released")
+	if ok && rel.Reason == outcomeReason(action, failed) &&
+		!rel.LastTransitionTime.Before(snap.LastDeployed) {
+		return rel.LastTransitionTime
+	}
+	return snap.LastDeployed
+}
+
+// outcomeReason is the Released reason helm-controller sets for an action's outcome.
+func outcomeReason(action string, failed bool) string {
+	switch {
+	case action == "install" && failed:
+		return "InstallFailed"
+	case action == "install":
+		return "InstallSucceeded"
+	case failed:
+		return "UpgradeFailed"
+	}
+	return "UpgradeSucceeded"
 }
 
 // outcomes posts the newest attempt's end and remediation that prev did not already show. The
@@ -124,10 +154,9 @@ func (r release) attemptEvents(a attempt, version int, action string) []client.N
 			"helm_revision": a.snap.Version, "generation": r.hr.Status.LastAttemptedGeneration,
 		}
 	}
-	end := r.event(version, action+".succeeded", "completed", "completed", a.snap.LastDeployed,
-		attrs())
+	end := r.event(version, action+".succeeded", "completed", "completed", a.end, attrs())
 	if a.failed {
-		end = r.event(version, action+".failed", "failed", "failed", a.snap.LastDeployed, attrs())
+		end = r.event(version, action+".failed", "failed", "failed", a.end, attrs())
 	}
 	out := []client.NewEvent{end}
 	if rem := a.remediation; rem != nil && rem.succeeded {
@@ -153,7 +182,7 @@ func (a attempt) title() string {
 // approximateStart is the start of an attempt whose live start was not seen: its end less
 // the last action's duration, with no trigger.
 func (r release) approximateStart(a attempt, version int, action string) client.NewEvent {
-	at := a.snap.LastDeployed
+	at := a.end
 	if d, err := time.ParseDuration(r.hr.Status.LastAttemptedReleaseActionDuration); err == nil {
 		at = at.Add(-d)
 	}

@@ -66,6 +66,16 @@ func finished(hr flux.HelmRelease, snap flux.Snapshot, duration string) flux.Hel
 	return hr
 }
 
+// released is hr after helm-controller set Released for the action's outcome, once Helm's wait
+// returned: later than the snapshot's lastDeployed, which Helm stamps as it writes the release.
+func released(t *testing.T, hr flux.HelmRelease, status, reason, when string) flux.HelmRelease {
+	t.Helper()
+	hr.Status.Conditions = slices.Clone(hr.Status.Conditions)
+	setCondition(&hr, flux.Condition{Type: "Released", Status: status, Reason: reason,
+		LastTransitionTime: at(t, when)})
+	return hr
+}
+
 func snapshot(t *testing.T, action string, version int, status, chartVersion, appVersion,
 	lastDeployed string,
 ) flux.Snapshot {
@@ -117,6 +127,42 @@ func TestALiveUpgradeIsOneReleaseChangeFromItsStartToHistory(t *testing.T) {
 	assert.Equal(t, flux.ReleaseMemory{}, mem)
 }
 
+func TestALiveUpgradeEndsWhenHelmControllerReleasesIt(t *testing.T) {
+	before := deployed(t)
+	during := running(t, before, "upgrade", "0.3.2", "2026-10-09T18:00:00Z")
+	after := released(t, finished(during, snapshot(t, "upgrade", 11, "deployed", "0.3.2",
+		"v0.7.2", "2026-10-09T18:00:00Z"), "3m7s"), "True", "UpgradeSucceeded",
+		"2026-10-09T18:03:07Z")
+
+	_, mem := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, &before, during)
+	ended, _ := flux.MapHelmRelease(cluster, mem, &during, after)
+
+	require.Len(t, ended, 1)
+	assert.Equal(t, at(t, "2026-10-09T18:03:07Z"), ended[0].OccurredAt)
+}
+
+func TestAReleasedConditionForAnotherOutcomeLeavesTheEndAtLastDeployed(t *testing.T) {
+	before := deployed(t)
+	during := running(t, before, "upgrade", "0.3.2", "2026-10-09T18:00:00Z")
+	after := finished(during, snapshot(t, "upgrade", 11, "deployed", "0.3.2", "v0.7.2",
+		"2026-10-09T18:00:20Z"), "20s")
+
+	for name, cur := range map[string]flux.HelmRelease{
+		"the previous release's": released(t, after, "True", "UpgradeSucceeded",
+			"2026-10-09T17:00:00Z"),
+		"another action's": released(t, after, "True", "InstallSucceeded",
+			"2026-10-09T18:03:00Z"),
+		"another outcome's": released(t, after, "False", "UpgradeFailed",
+			"2026-10-09T18:03:00Z"),
+	} {
+		_, mem := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, &before, during)
+		ended, _ := flux.MapHelmRelease(cluster, mem, &during, cur)
+
+		require.Len(t, ended, 1, name)
+		assert.Equal(t, at(t, "2026-10-09T18:00:20Z"), ended[0].OccurredAt, name)
+	}
+}
+
 func TestTheProgressPatchAfterAnActionStartsNothing(t *testing.T) {
 	before := deployed(t)
 	during := running(t, before, "upgrade", "0.3.2", "2026-10-09T18:00:00Z")
@@ -152,6 +198,21 @@ func TestAFailedUpgradeEndsFailed(t *testing.T) {
 	assert.Equal(t, cluster+"/"+hrRef(11)+"/failed", ended[0].IdempotencyKey)
 }
 
+func TestAFailedUpgradeEndsWhenHelmControllerMarksItFailed(t *testing.T) {
+	before := deployed(t)
+	during := running(t, before, "upgrade", "0.3.2", "2026-10-09T18:00:00Z")
+	after := released(t, finished(during, snapshot(t, "upgrade", 11, "failed", "0.3.2",
+		"v0.7.2", "2026-10-09T18:00:00Z"), "5m0s"), "False", "UpgradeFailed",
+		"2026-10-09T18:05:00Z")
+
+	_, mem := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, &before, during)
+	ended, _ := flux.MapHelmRelease(cluster, mem, &during, after)
+
+	require.Len(t, ended, 1)
+	assert.Equal(t, "flux.helmrelease.upgrade.failed", ended[0].Type)
+	assert.Equal(t, at(t, "2026-10-09T18:05:00Z"), ended[0].OccurredAt)
+}
+
 func TestAnInstallIsRevisionOne(t *testing.T) {
 	fresh := deployed(t)
 	fresh.Status.History = nil
@@ -164,6 +225,23 @@ func TestAnInstallIsRevisionOne(t *testing.T) {
 	assert.Equal(t, "flux.helmrelease.install.started", started[0].Type)
 	assert.Equal(t, hrRef(1), started[0].CorrelationRef)
 	assert.Equal(t, 1, mem.Open.Version)
+}
+
+func TestAnInstallEndsWhenHelmControllerReleasesIt(t *testing.T) {
+	fresh := deployed(t)
+	fresh.Status.History = nil
+	fresh.Status.Conditions = nil
+	during := running(t, fresh, "install", "0.3.1", "2026-10-09T18:00:00Z")
+	after := released(t, finished(during, snapshot(t, "install", 1, "deployed", "0.3.1",
+		"v0.7.0", "2026-10-09T18:00:00Z"), "45s"), "True", "InstallSucceeded",
+		"2026-10-09T18:00:45Z")
+
+	_, mem := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, &fresh, during)
+	ended, _ := flux.MapHelmRelease(cluster, mem, &during, after)
+
+	require.Len(t, ended, 1)
+	assert.Equal(t, "flux.helmrelease.install.succeeded", ended[0].Type)
+	assert.Equal(t, at(t, "2026-10-09T18:00:45Z"), ended[0].OccurredAt)
 }
 
 func TestAnInstallWithReplacePredictsTheNextRevision(t *testing.T) {
@@ -256,6 +334,18 @@ func TestAColdListAfterTheActionStartsItAtItsEndLessItsDuration(t *testing.T) {
 	assert.NotContains(t, cold[0].Attributes, "trigger")
 }
 
+func TestAColdListStartsAReleasedAttemptAtReleasedLessItsDuration(t *testing.T) {
+	after := released(t, finished(deployed(t), snapshot(t, "upgrade", 11, "deployed", "0.3.2",
+		"v0.7.2", "2026-10-09T18:00:00Z"), "3m7s"), "True", "UpgradeSucceeded",
+		"2026-10-09T18:03:07Z")
+
+	cold, _ := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, nil, after)
+
+	require.Len(t, cold, 2)
+	assert.Equal(t, at(t, "2026-10-09T18:00:00Z"), cold[0].OccurredAt)
+	assert.Equal(t, at(t, "2026-10-09T18:03:07Z"), cold[1].OccurredAt)
+}
+
 func TestAColdListRecordsOnlyTheNewestAttempt(t *testing.T) {
 	first := finished(deployed(t), snapshot(t, "upgrade", 11, "deployed", "0.3.2", "v0.7.2",
 		"2026-10-09T18:00:20Z"), "20s")
@@ -325,6 +415,26 @@ func TestALiveRollbackEndsTheFailedUpgradeRolledBack(t *testing.T) {
 			"helm_revision": 11, "generation": int64(11),
 		},
 	}, remediated[0])
+}
+
+func TestARolledBackUpgradeEndsWhereTheLiveWatchSawItFail(t *testing.T) {
+	before := deployed(t)
+	during := running(t, before, "upgrade", "0.3.2", "2026-10-09T18:00:00Z")
+	failed := released(t, finished(during, snapshot(t, "upgrade", 11, "failed", "0.3.2",
+		"v0.7.2", "2026-10-09T18:00:00Z"), "5m0s"), "False", "UpgradeFailed",
+		"2026-10-09T18:05:00Z")
+	after := rolledBack(t, failed)
+
+	_, mem := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, &before, during)
+	live, _ := flux.MapHelmRelease(cluster, mem, &during, failed)
+	cold, _ := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, nil, after)
+
+	require.Len(t, live, 1)
+	require.Len(t, cold, 3)
+	assert.Equal(t, at(t, "2026-10-09T18:05:00Z"), live[0].OccurredAt)
+	assert.Equal(t, live[0].IdempotencyKey, cold[1].IdempotencyKey)
+	assert.Equal(t, at(t, "2026-10-09T18:05:00Z"), cold[1].OccurredAt)
+	assert.Equal(t, at(t, "2026-10-09T18:00:00Z"), cold[0].OccurredAt)
 }
 
 func TestAColdListOverARolledBackUpgradeIsOneChangeEndingRolledBack(t *testing.T) {
@@ -447,8 +557,9 @@ func TestTheCapturedHelmReleaseIsAColdListOfItsNewestUpgrade(t *testing.T) {
 	cold, _ := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, nil, deployed(t))
 
 	require.Len(t, cold, 2)
-	start := at(t, "2026-10-08T17:02:21Z").Add(-10665418204 * time.Nanosecond)
+	start := at(t, "2026-10-08T17:02:32Z").Add(-10665418204 * time.Nanosecond)
 	assert.Equal(t, start, cold[0].OccurredAt)
+	assert.Equal(t, at(t, "2026-10-08T17:02:32Z"), cold[1].OccurredAt)
 	assert.Equal(t, "v0.7.0", cold[1].Title)
 	assert.Equal(t, hrRef(10), cold[1].CorrelationRef)
 }
