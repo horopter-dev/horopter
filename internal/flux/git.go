@@ -88,6 +88,7 @@ const maxTitle = 200
 // firstLine is msg's first line, at most maxTitle characters.
 func firstLine(msg string) string {
 	first, _, _ := strings.Cut(msg, "\n")
+	first = strings.TrimSuffix(first, "\r")
 	if r := []rune(first); len(r) > maxTitle {
 		return string(r[:maxTitle])
 	}

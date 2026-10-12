@@ -90,6 +90,34 @@ func TestEventOnlyHelmReleaseOutcomesArePoints(t *testing.T) {
 	assert.Equal(t, "flux.helmrelease.drift_correction_failed", snake[0].Type)
 }
 
+func TestAnAcronymInAReasonStaysOneWord(t *testing.T) {
+	last := at(t, "2026-10-09T18:00:00Z")
+	for reason, want := range map[string]string{
+		"UninstallOCIArtifactFailed": "flux.helmrelease.uninstall_oci_artifact_failed",
+		"TestHTTPTimeout":            "flux.helmrelease.test_http_timeout",
+		"TestFailedOCI":              "flux.helmrelease.test_failed_oci",
+	} {
+		t.Run(reason, func(t *testing.T) {
+			got := flux.MapEvent(cluster, helmReleaseEvent(reason, 1, last))
+
+			if assert.Len(t, got, 1) {
+				assert.Equal(t, want, got[0].Type)
+			}
+		})
+	}
+}
+
+func TestACarriageReturnLineEndingIsNotPartOfTheTitle(t *testing.T) {
+	ev := helmReleaseEvent("DriftCorrected", 1, at(t, "2026-10-09T18:00:00Z"))
+	ev.Message = "drift corrected\r\nDeployment/horopter/horopter"
+
+	got := flux.MapEvent(cluster, ev)
+
+	if assert.Len(t, got, 1) {
+		assert.Equal(t, "drift corrected", got[0].Title)
+	}
+}
+
 func TestStatusVisibleHelmReleaseEventsAreNotPoints(t *testing.T) {
 	last := at(t, "2026-10-09T18:00:00Z")
 	for _, reason := range []string{"UpgradeSucceeded", "InstallFailed", "RollbackSucceeded"} {

@@ -109,17 +109,25 @@ func helmReleasePoint(cluster string, ev Event) client.NewEvent {
 	}
 }
 
-// snakeCase turns a Flux reason such as DriftCorrected into drift_corrected.
+// snakeCase turns a Flux reason such as DriftCorrected into drift_corrected, keeping an
+// acronym one word: OCIArtifactFailed is oci_artifact_failed.
 func snakeCase(s string) string {
+	runes := []rune(s)
 	var b strings.Builder
-	for i, r := range s {
-		if unicode.IsUpper(r) {
-			if i > 0 {
-				b.WriteByte('_')
-			}
-			r = unicode.ToLower(r)
+	for i, r := range runes {
+		if unicode.IsUpper(r) && i > 0 && startsWord(runes, i) {
+			b.WriteByte('_')
 		}
-		b.WriteRune(r)
+		b.WriteRune(unicode.ToLower(r))
 	}
 	return b.String()
+}
+
+// startsWord reports whether the capital at runes[i] begins a word: it follows a lower-case
+// letter, or ends an acronym by preceding one.
+func startsWord(runes []rune, i int) bool {
+	if !unicode.IsUpper(runes[i-1]) {
+		return true
+	}
+	return i+1 < len(runes) && unicode.IsLower(runes[i+1])
 }
