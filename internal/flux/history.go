@@ -13,6 +13,7 @@ type attempt struct {
 	snap        Snapshot
 	action      string
 	failed      bool
+	end         time.Time
 	remediation *remediation
 }
 
@@ -44,6 +45,7 @@ func releasedAttempt(hr HelmRelease) (attempt, bool) {
 		return attempt{}, false
 	}
 	a := attempt{snap: snap, action: snap.Action, failed: snap.Status == "failed"}
+	a.end = releasedAt(hr, a)
 	if rem, ok := condition(hr.Status.Conditions, "Remediated"); a.failed && ok &&
 		rem.Reason == "RollbackFailed" && rem.LastTransitionTime.After(snap.LastDeployed) {
 		a.remediation = &remediation{at: rem.LastTransitionTime}
@@ -61,8 +63,27 @@ func rolledBackAttempt(hr HelmRelease) attempt {
 		(c.Reason == "RollbackSucceeded" || c.Reason == "RollbackFailed") {
 		rem = &remediation{succeeded: c.Reason == "RollbackSucceeded", at: c.LastTransitionTime}
 	}
-	return attempt{snap: h[1], action: "upgrade", failed: true, remediation: rem}
+	return attempt{snap: h[1], action: "upgrade", failed: true, end: h[1].LastDeployed,
+		remediation: rem}
 }
+
+// releasedAt is when helm-controller set Released for a's outcome, once Helm's wait returned.
+// Helm stamps lastDeployed as it writes the release, near the action's start, so it is the end
+// only when Released does not yet show a's outcome.
+func releasedAt(hr HelmRelease, a attempt) time.Time {
+	outcome := "Succeeded"
+	if a.failed {
+		outcome = "Failed"
+	}
+	rel, ok := condition(hr.Status.Conditions, "Released")
+	if ok && rel.Reason == actionReasons[a.action]+outcome &&
+		!rel.LastTransitionTime.Before(a.snap.LastDeployed) {
+		return rel.LastTransitionTime
+	}
+	return a.snap.LastDeployed
+}
+
+var actionReasons = map[string]string{"install": "Install", "upgrade": "Upgrade"}
 
 // outcomes posts the newest attempt's end and remediation that prev did not already show. The
 // end goes on the open change's ref when there is one, so a mispredicted revision does not
@@ -124,10 +145,9 @@ func (r release) attemptEvents(a attempt, version int, action string) []client.N
 			"helm_revision": a.snap.Version, "generation": r.hr.Status.LastAttemptedGeneration,
 		}
 	}
-	end := r.event(version, action+".succeeded", "completed", "completed", a.snap.LastDeployed,
-		attrs())
+	end := r.event(version, action+".succeeded", "completed", "completed", a.end, attrs())
 	if a.failed {
-		end = r.event(version, action+".failed", "failed", "failed", a.snap.LastDeployed, attrs())
+		end = r.event(version, action+".failed", "failed", "failed", a.end, attrs())
 	}
 	out := []client.NewEvent{end}
 	if rem := a.remediation; rem != nil && rem.succeeded {
@@ -153,7 +173,7 @@ func (a attempt) title() string {
 // approximateStart is the start of an attempt whose live start was not seen: its end less
 // the last action's duration, with no trigger.
 func (r release) approximateStart(a attempt, version int, action string) client.NewEvent {
-	at := a.snap.LastDeployed
+	at := a.end
 	if d, err := time.ParseDuration(r.hr.Status.LastAttemptedReleaseActionDuration); err == nil {
 		at = at.Add(-d)
 	}
