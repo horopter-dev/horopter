@@ -138,7 +138,7 @@ func TestAMissingKeyStillRunsTheCommand(t *testing.T) {
 	strictMarker := filepath.Join(t.TempDir(), "ran")
 	code = run([]string{"run", "--strict", "--type", "deployment", "--subject", "s", "--",
 		"touch", strictMarker}, env, &out, &errOut, false)
-	assert.Equal(t, 2, code)
+	assert.Equal(t, 1, code, "the same code as a refusal after a failed start")
 	assert.NoFileExists(t, strictMarker)
 }
 

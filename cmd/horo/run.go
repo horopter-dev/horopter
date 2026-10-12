@@ -119,7 +119,7 @@ func (x *runner) unrecorded(argv []string, why error, stdout io.Writer) int {
 	x.report.because(why)
 	if x.strict {
 		sayf(x.stderr, "horo run: %v; --strict, so the command was not run\n", why)
-		return exitUsage
+		return exitError
 	}
 	sayf(x.stderr, "horo run: %v; running the command unrecorded\n", why)
 	out := runChild(argv, stdout, x.stderr, forwarded(sharesTerminal()))

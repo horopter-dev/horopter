@@ -66,7 +66,7 @@ func TestTheVariableAsksForTheReportWithoutAKey(t *testing.T) {
 		outcome any
 	}{
 		{strict: false, code: 5, outcome: "failed"},
-		{strict: true, code: 2, outcome: nil},
+		{strict: true, code: 1, outcome: nil},
 	} {
 		t.Run(fmt.Sprintf("strict %v", tc.strict), func(t *testing.T) {
 			path := reportFile(t)

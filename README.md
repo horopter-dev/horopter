@@ -198,8 +198,8 @@ the command is not run, and the change is recorded as cancelled.
 `horo run` warns and runs the command anyway. It waits at most 10 seconds for the start, and if
 the start was not recorded it does not record the end either. If Horopter fails while the
 command runs, it retries the end for up to 30 seconds after the command; Ctrl-C stops that wait.
-`--strict` refuses to run the command when the start cannot be recorded, and fails when the end
-cannot.
+`--strict` refuses to run the command when the start cannot be recorded, whether Horopter is
+down or no URL or key is set, and fails when the end cannot; either way `horo run` exits 1.
 
 It prints both forms of the change's ref on stderr: the stored `<locus>/<ref>`, which `horo show`
 takes, and the plain ref, which `--ref` takes. If the end cannot be confirmed, `horo run` prints
