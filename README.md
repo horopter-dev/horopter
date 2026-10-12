@@ -265,12 +265,11 @@ and memory. It is not protection against a flood of requests, which belongs in f
 port, in a WAF or equivalent.
 
 **`docker-compose.yaml` publishes both API ports (8080, 8081) and Postgres itself (5432) on
-the host, with the username and password both `horopter`.** The API ports being reachable is
-no longer an exposure by itself — every route still needs a credential — but direct Postgres
-access is direct read and write access to the event log and the credential table, past every
-check either daemon or `horoctl` makes, for anyone who can reach the port. The compose file
-is a local development stack and nothing else: do not run it anywhere its ports are reachable
-from outside the machine, and do not reuse its credentials.
+the host's loopback, with the username and password both `horopter`.** Direct Postgres access
+is direct read and write access to the event log and the credential table, past every check
+either daemon or `horoctl` makes, for anyone who can reach the port. The compose file is a
+local development stack and nothing else: do not change it to publish beyond loopback, and do
+not reuse its credentials.
 
 **The `/metrics` listener is unauthenticated on both daemons.** It binds `localhost` by
 default, which is reachable only from inside the same container or pod. Bound to another
