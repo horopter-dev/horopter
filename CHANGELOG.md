@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.11.1](https://github.com/horopter-dev/horopter/compare/v0.11.0...v0.11.1) (2026-10-12)
+
+
+### Bug Fixes
+
+* **flux:** end a release change when helm-controller sets Released ([#96](https://github.com/horopter-dev/horopter/issues/96)) ([65ad986](https://github.com/horopter-dev/horopter/commit/65ad986a9b43505405e06b8d79ed9c74ba2a0d85))
+* **flux:** post a ref's events in the order they were derived ([#98](https://github.com/horopter-dev/horopter/issues/98)) ([5242c62](https://github.com/horopter-dev/horopter/commit/5242c6217d0aac8502596c17950083dc17d80f30))
+* **flux:** post a release attempt once helm-controller writes it ([#97](https://github.com/horopter-dev/horopter/issues/97)) ([d26d9a4](https://github.com/horopter-dev/horopter/commit/d26d9a4759051bd6bf92c52affe55108e87cfd57))
+
+
+### Code Refactoring
+
+* **horo:** horo run carries its lifecycle as core.Lifecycle ([#94](https://github.com/horopter-dev/horopter/issues/94)) ([2a037d2](https://github.com/horopter-dev/horopter/commit/2a037d2e5e0ccf6313659fdf54ad95036d9a21bb))
+
 ## [0.11.0](https://github.com/horopter-dev/horopter/compare/v0.10.0...v0.11.0) (2026-10-11)
 
 
