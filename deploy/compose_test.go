@@ -160,6 +160,21 @@ func TestWithoutProfileFiveServicesRunWithMetricsOffTheHost(t *testing.T) {
 	}
 }
 
+// The asset is a trial stack on one machine, and its dev keys are public, so the APIs
+// answer only on the host's loopback.
+func TestDaemonsPublishTheirAPIsOnLoopbackOnly(t *testing.T) {
+	clearComposeEnv(t)
+	p := resolve(t, render(t))
+
+	for name, port := range map[string]int{"ingress": 8080, "egress": 8081} {
+		s := p.Services[name]
+		if len(s.Ports) != 1 || s.Ports[0].HostIP != "127.0.0.1" ||
+			s.Ports[0].Target != port || s.Ports[0].Published != strconv.Itoa(port) {
+			t.Errorf("%s ports = %+v, want only 127.0.0.1:%d:%d", name, s.Ports, port, port)
+		}
+	}
+}
+
 func TestGrafanaProfileAddsPrometheusAndGrafanaOnLoopback(t *testing.T) {
 	clearComposeEnv(t)
 	p := resolve(t, render(t), "grafana")
