@@ -90,8 +90,6 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("POST /v1/events", s.authn.Require(auth.CapAppend)(http.HandlerFunc(s.postEvent)))
 	mux.Handle("POST /v1/events/cloudevents",
 		s.authn.Require(auth.CapAppend)(http.HandlerFunc(s.postCloudEvent)))
-	mux.Handle("POST /v1/events/flux",
-		s.authn.Require(auth.CapAppend)(http.HandlerFunc(s.postFluxEvent)))
 	mux.Handle("POST /v1/admin/refold",
 		s.authn.Require(auth.CapAdmin)(http.HandlerFunc(s.postRefold)))
 	mux.HandleFunc("GET /healthz", s.healthz)
@@ -286,21 +284,14 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 	s.append(w, r, ev)
 }
 
-// appendOne stores ev, leaving the response to the caller: the Flux route appends up to two
-// events for one request. On failure it puts a correlated event's ref on the log line, since
-// only that ref exists apart from the event.
-func (s *Server) appendOne(ctx context.Context, ev core.Event) (core.Event, bool, error) {
-	stored, created, err := s.store.AppendEvent(ctx, ev)
-	if err != nil && !ev.CorrelationRef.IsZero() {
-		logging.Annotate(ctx, slog.String("ref", ev.CorrelationRef.String()))
-	}
-	return stored, created, err
-}
-
 func (s *Server) append(w http.ResponseWriter, r *http.Request, ev core.Event) {
 	annotateEvent(r.Context(), ev)
-	stored, created, err := s.appendOne(r.Context(), ev)
+	stored, created, err := s.store.AppendEvent(r.Context(), ev)
 	if err != nil {
+		// A correlated event's ref is the only handle on it apart from the event itself.
+		if !ev.CorrelationRef.IsZero() {
+			logging.Annotate(r.Context(), slog.String("ref", ev.CorrelationRef.String()))
+		}
 		appendFailed(w, r, ev, err)
 		return
 	}

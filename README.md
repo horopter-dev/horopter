@@ -906,11 +906,6 @@ to.
 
 ## Flux
 
-Two ways in: `horopter-flux`, a client that watches Flux's objects, and the older ingest route
-below, which it replaces.
-
-### horopter-flux
-
 `horopter-flux` runs in the cluster, watches GitRepositories, Kustomizations, HelmReleases and
 their Kubernetes Events read-only, and posts what they show with a producer key. It keeps no
 state: on start it derives every change from the objects' status, and its idempotency keys,
@@ -938,8 +933,10 @@ the app version once it ends. A retry changes neither chart nor values, so it po
 change.
 
 It reads `HOROPTER_INGRESS_URL` and `HOROPTER_INGRESS_KEY`, and exits with status 2 if either is
-empty. Issue one key per cluster, without `--subject-pattern`, for the same reason as the route's
-below. The locus defaults to the source, so each cluster is its own correlation space:
+empty. Issue one key per cluster, without `--subject-pattern`: a Kustomization's changes are
+recorded with each applied object as the subject, `Kind/name` or `Kind/namespace/name`, and no
+single pattern covers both, so a narrowed key is refused with `403`. The locus defaults to the
+source, so each cluster is its own correlation space:
 
     horoctl admin keys issue --dsn "$DATABASE_URL" --tenant <tenant-id> --role producer \
       --source flux-<cluster>
@@ -947,66 +944,6 @@ below. The locus defaults to the source, so each cluster is its own correlation 
 It needs `get`, `list` and `watch` on `gitrepositories`, `kustomizations`, `helmreleases` and
 `events`, and `get` on the `kube-system` Namespace. An event Horopter cannot take for now (no
 answer, a 5xx or a 429) is retried with backoff; any other 4xx is logged at ERROR and dropped.
-
-### The ingest route
-
-`POST /v1/events/flux` takes Flux notification-controller's `generic` provider payload and
-records one change per Git revision, as `decisions/2026-10-04-flux-lifecycle-mapping.md` in
-`horopter-internal` lays out:
-
-| Flux event | recorded as | type | lifecycle |
-|---|---|---|---|
-| `GitRepository` `NewArtifact` | change start | `flux.artifact.new` | `started` |
-| Kustomization `ReconciliationSucceeded` | change end | `flux.kustomization.succeeded` | `completed` |
-| Kustomization, `severity: error` | change end and a point | `flux.kustomization.failed` | `failed`, `none` |
-| Kustomization `Progressing` | one event per changed object, on the revision's change | `flux.kustomization.applied` | `none` |
-| HelmRelease `…Succeeded` / `…Failed` | a point | `flux.helmrelease.<reason>` | `none` |
-
-The change's ref is the Git revision, e.g. `flux/refs/heads/main@sha1:…` under a `flux`
-credential. Its title is the commit's subject, as source-controller's `NewArtifact` quotes it
-(Flux truncates it to about 50 characters), since a change is titled by its start. A
-Kustomization's later runs at the same revision repeat its key, so only its first outcome is
-folded. Anything else, including a non-Git revision, is answered
-`200 {"recorded": 0, "ignored": "<why>"}`, which notification-controller counts as delivered.
-
-A `Progressing` event is kustomize-controller's changeset, one changed object per line
-(`Deployment/lastlight/cloudflared configured`). Each line is recorded with the object as its
-subject and the action as its `action` attribute, so a rollout's change records what it changed.
-A line whose object is not `Kind/name` or `Kind/namespace/name` is skipped.
-Because these subjects are the applied objects rather than the Kustomization, issue the Flux
-credential **without** `--subject-pattern`: a pattern narrowed to `Kustomization/*/*` refuses every
-changeset with `403`, and no single pattern covers both `Kind/name` and `Kind/namespace/name`.
-
-A Flux `Provider` sends the key as a header from its secret:
-
-```yaml
-apiVersion: notification.toolkit.fluxcd.io/v1beta3
-kind: Provider
-metadata: { name: horopter, namespace: flux-system }
-spec:
-  type: generic
-  address: http://horopter-ingress.horopter.svc.cluster.local:8080/v1/events/flux
-  secretRef: { name: horopter-flux-producer }   # key `headers`: "Authorization: Bearer <key>"
-```
-
-An `Alert`'s event sources match a namespace exactly, so list every namespace holding a
-`GitRepository`, `Kustomization` or `HelmRelease` you want recorded.
-
-Event metadata becomes attributes, and so tags in Grafana. That covers every key except the
-ones Flux sets for its own use (`revision`, `originRevision`, `token`, `commit`,
-`commit_status`, `change_request`, `summary`). It includes helm-controller's `app-version`,
-which comes from the chart's `appVersion`. You can add your own keys with annotations on the
-object, which Flux copies into its events:
-
-```yaml
-metadata:
-  annotations:
-    event.toolkit.fluxcd.io/team: platform   # recorded as the attribute team: platform
-```
-
-A key the route sets itself, such as `kind` or `chart_version`, keeps the route's value. If the
-copied keys together exceed 1 KiB of JSON, none of them are kept, and the event is recorded
-without them.
 
 ## Type suffixes and the lifecycle field
 

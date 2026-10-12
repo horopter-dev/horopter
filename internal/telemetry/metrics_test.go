@@ -94,11 +94,11 @@ func TestHTTPMetricsDropTheRequestHost(t *testing.T) {
 // TestHTTPMetricsExportWithoutErrorsForAnyHost pins that a sampled request's exemplar
 // survives the scrape whatever Host it arrived with. Prometheus refuses an exemplar whose
 // labels exceed 128 runes and the exporter reports each refusal through otel.Handle, so a
-// long Host — Flux calls ingress by its full service name — logged a warning per scrape.
+// long Host — horopter-flux calls ingress by its full service name — logged a warning per scrape.
 func TestHTTPMetricsExportWithoutErrorsForAnyHost(t *testing.T) {
 	for name, host := range map[string]string{
-		"a pod IP, as kubelet's probes send": "10.244.2.243:8080",
-		"a full service name, as Flux sends": "horopter-ingress.horopter.svc.cluster.local:8080",
+		"a pod IP, as kubelet's probes send":          "10.244.2.243:8080",
+		"a full service name, as horopter-flux sends": "horopter-ingress.horopter.svc.cluster.local:8080",
 	} {
 		t.Run(name, func(t *testing.T) {
 			setTelemetryEnv(t)
@@ -113,7 +113,7 @@ func TestHTTPMetricsExportWithoutErrorsForAnyHost(t *testing.T) {
 			handler := otelhttp.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			}), "")
-			req := httptest.NewRequest(http.MethodPost, "/v1/events/flux", nil)
+			req := httptest.NewRequest(http.MethodPost, "/v1/events", nil)
 			req.Host = host
 			handler.ServeHTTP(httptest.NewRecorder(), req)
 
