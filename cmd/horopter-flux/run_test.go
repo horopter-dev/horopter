@@ -26,10 +26,11 @@ import (
 // ingest is a stub ingress that records every post by idempotency key and answers with
 // respond, 201 by default.
 type ingest struct {
-	mu      sync.Mutex
-	posts   map[string][]map[string]any
-	order   []string
-	respond func(key string, attempt int) int
+	mu       sync.Mutex
+	posts    map[string][]map[string]any
+	order    []string
+	recorded []string
+	respond  func(key string, attempt int) int
 }
 
 func newIngest(t *testing.T) (*ingest, string) {
@@ -47,6 +48,9 @@ func newIngest(t *testing.T) (*ingest, string) {
 		if in.respond != nil {
 			status = in.respond(key, len(in.posts[key]))
 		}
+		if status < 300 {
+			in.recorded = append(in.recorded, key)
+		}
 		in.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -61,6 +65,13 @@ func (in *ingest) keys() []string {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	return append([]string(nil), in.order...)
+}
+
+// recordedKeys returns the keys of the posts it accepted, in the order it accepted them.
+func (in *ingest) recordedKeys() []string {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	return append([]string(nil), in.recorded...)
 }
 
 func (in *ingest) attempts(key string) int {

@@ -24,14 +24,24 @@ const (
 // retryBase is a variable so a test can shorten it.
 var retryBase = time.Second
 
-// poster posts events in the order they were queued, one at a time, retrying an event Horopter
-// could not take with backoff. Events are queued by idempotency key, so one derived twice
-// before it is posted is posted once.
+// poster posts events, retrying an event Horopter could not take with backoff. A ref's events
+// are posted one at a time in the order they were queued: only a ref's head is in the queue,
+// and the next waits until the head is recorded or refused for good, so a retried event never
+// lands after one the mapping derived later. An event with no correlation ref is its own ref.
+// Events are queued by idempotency key, so one derived again while it waits keeps its place,
+// and its ref, and is posted once, as last derived.
 type poster struct {
 	client  *client.Client
 	queue   workqueue.TypedRateLimitingInterface[string]
 	mu      sync.Mutex
-	pending map[string]client.NewEvent
+	pending map[string]queued
+	byRef   map[string][]string
+}
+
+// queued is an event waiting to be posted and the ref it waits in line on.
+type queued struct {
+	ev  client.NewEvent
+	ref string
 }
 
 func newPoster(c *client.Client) *poster {
@@ -39,17 +49,50 @@ func newPoster(c *client.Client) *poster {
 		client: c,
 		queue: workqueue.NewTypedRateLimitingQueue(
 			workqueue.NewTypedItemExponentialFailureRateLimiter[string](retryBase, retryMax)),
-		pending: map[string]client.NewEvent{},
+		pending: map[string]queued{},
+		byRef:   map[string][]string{},
 	}
+}
+
+func orderingRef(ev client.NewEvent) string {
+	if ev.CorrelationRef == "" {
+		return ev.IdempotencyKey
+	}
+	return ev.CorrelationRef
 }
 
 func (p *poster) enqueue(events []client.NewEvent) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, ev := range events {
-		p.pending[ev.IdempotencyKey] = ev
-		p.queue.Add(ev.IdempotencyKey)
+		key := ev.IdempotencyKey
+		if q, ok := p.pending[key]; ok {
+			p.pending[key] = queued{ev: ev, ref: q.ref}
+			continue
+		}
+		ref := orderingRef(ev)
+		p.pending[key] = queued{ev: ev, ref: ref}
+		p.byRef[ref] = append(p.byRef[ref], key)
+		if len(p.byRef[ref]) == 1 {
+			p.queue.Add(key)
+		}
 	}
+}
+
+// finish drops key, the head of its ref, and queues the ref's next event.
+func (p *poster) finish(key string) {
+	p.queue.Forget(key)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ref := p.pending[key].ref
+	delete(p.pending, key)
+	rest := p.byRef[ref][1:]
+	if len(rest) == 0 {
+		delete(p.byRef, ref)
+		return
+	}
+	p.byRef[ref] = rest
+	p.queue.Add(rest[0])
 }
 
 // run posts until ctx ends.
@@ -76,13 +119,8 @@ func refusedForGood(status int) bool {
 
 func (p *poster) post(ctx context.Context, key string) {
 	p.mu.Lock()
-	ev, ok := p.pending[key]
+	ev := p.pending[key].ev
 	p.mu.Unlock()
-	if !ok {
-		// Queued again while its post was in flight, and that post recorded it.
-		p.queue.Forget(key)
-		return
-	}
 	got, err := p.client.Post(ctx, ev, time.Now().Add(postBudget))
 	var refused *client.HTTPError
 	switch {
@@ -100,8 +138,5 @@ func (p *poster) post(ctx context.Context, key string) {
 		p.queue.AddRateLimited(key)
 		return
 	}
-	p.queue.Forget(key)
-	p.mu.Lock()
-	delete(p.pending, key)
-	p.mu.Unlock()
+	p.finish(key)
 }
