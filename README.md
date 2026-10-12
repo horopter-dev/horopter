@@ -928,7 +928,9 @@ A commit change's ref is the Git revision and its title the commit subject, from
 source-controller's `NewArtifact` Event; if that Event has expired, the title is the branch and
 short SHA (`main@b1f2477`). A release change's ref is
 `HelmRelease/<namespace>/<name>/<uid>/v<helm revision>` and its title the chart version, then
-the app version once it ends. Only Git sources start a commit change.
+the app version once it ends. A retry changes neither chart nor values, so it posts no
+`attempted` and is titled by its event type until it ends. Only Git sources start a commit
+change.
 
 It reads `HOROPTER_INGRESS_URL` and `HOROPTER_INGRESS_KEY`, and exits with status 2 if either is
 empty. Issue one key per cluster, without `--subject-pattern`, for the same reason as the route's
