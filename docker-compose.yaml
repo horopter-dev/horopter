@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: horopter
       POSTGRES_DB: horopter
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       # Mounted at /var/lib/postgresql, NOT /var/lib/postgresql/data. postgres:18 moved
       # PGDATA to /var/lib/postgresql/18/docker and the image declares its VOLUME at the
@@ -60,9 +60,7 @@ services:
       HOROPTER_ADDR: 0.0.0.0:8080
       OTEL_EXPORTER_PROMETHEUS_HOST: 0.0.0.0
     ports:
-      - "8080:8080"
-      # Loopback only on the host side. The API ports publish on every interface, which the
-      # security review already reports; the metrics port does not add to it.
+      - "127.0.0.1:8080:8080"
       - "127.0.0.1:9464:9464"
     depends_on:
       bootstrap:
@@ -75,9 +73,9 @@ services:
       HOROPTER_ADDR: 0.0.0.0:8081
       OTEL_EXPORTER_PROMETHEUS_HOST: 0.0.0.0
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
       # The container keeps the default 9464; the host side is 9465 so it does not clash
-      # with ingress's. Loopback only, as for ingress.
+      # with ingress's.
       - "127.0.0.1:9465:9464"
     depends_on:
       bootstrap:

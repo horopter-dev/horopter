@@ -463,3 +463,18 @@ func TestDaemonImagesCarryTheRenderedTag(t *testing.T) {
 		}
 	}
 }
+
+// The repository's development stack publishes Postgres with a known password and runs on
+// public dev keys, so nothing it publishes answers beyond the host's loopback.
+func TestDevStackPublishesOnLoopbackOnly(t *testing.T) {
+	clearComposeEnv(t)
+	p := resolve(t, filepath.Join("..", "docker-compose.yaml"), "*")
+
+	for name, s := range p.Services {
+		for _, port := range s.Ports {
+			if port.HostIP != "127.0.0.1" {
+				t.Errorf("%s publishes %+v beyond loopback", name, port)
+			}
+		}
+	}
+}
