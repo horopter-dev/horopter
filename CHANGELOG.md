@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.2](https://github.com/horopter-dev/horopter/compare/v0.11.1...v0.11.2) (2026-10-12)
+
+
+### Bug Fixes
+
+* **deploy:** publish the trial stack's APIs on loopback only ([#99](https://github.com/horopter-dev/horopter/issues/99)) ([adbfded](https://github.com/horopter-dev/horopter/commit/adbfdedb253cc01b7d381423f1b6d46f90990c99))
+
 ## [0.11.1](https://github.com/horopter-dev/horopter/compare/v0.11.0...v0.11.1) (2026-10-12)
 
 
