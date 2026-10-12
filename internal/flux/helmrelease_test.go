@@ -227,6 +227,23 @@ func TestAnInstallIsRevisionOne(t *testing.T) {
 	assert.Equal(t, 1, mem.Open.Version)
 }
 
+func TestAnInstallEndsWhenHelmControllerReleasesIt(t *testing.T) {
+	fresh := deployed(t)
+	fresh.Status.History = nil
+	fresh.Status.Conditions = nil
+	during := running(t, fresh, "install", "0.3.1", "2026-10-09T18:00:00Z")
+	after := released(t, finished(during, snapshot(t, "install", 1, "deployed", "0.3.1",
+		"v0.7.0", "2026-10-09T18:00:00Z"), "45s"), "True", "InstallSucceeded",
+		"2026-10-09T18:00:45Z")
+
+	_, mem := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, &fresh, during)
+	ended, _ := flux.MapHelmRelease(cluster, mem, &during, after)
+
+	require.Len(t, ended, 1)
+	assert.Equal(t, "flux.helmrelease.install.succeeded", ended[0].Type)
+	assert.Equal(t, at(t, "2026-10-09T18:00:45Z"), ended[0].OccurredAt)
+}
+
 func TestAnInstallWithReplacePredictsTheNextRevision(t *testing.T) {
 	before := deployed(t)
 	before.Spec.Install.Replace = true
@@ -398,6 +415,26 @@ func TestALiveRollbackEndsTheFailedUpgradeRolledBack(t *testing.T) {
 			"helm_revision": 11, "generation": int64(11),
 		},
 	}, remediated[0])
+}
+
+func TestARolledBackUpgradeEndsWhereTheLiveWatchSawItFail(t *testing.T) {
+	before := deployed(t)
+	during := running(t, before, "upgrade", "0.3.2", "2026-10-09T18:00:00Z")
+	failed := released(t, finished(during, snapshot(t, "upgrade", 11, "failed", "0.3.2",
+		"v0.7.2", "2026-10-09T18:00:00Z"), "5m0s"), "False", "UpgradeFailed",
+		"2026-10-09T18:05:00Z")
+	after := rolledBack(t, failed)
+
+	_, mem := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, &before, during)
+	live, _ := flux.MapHelmRelease(cluster, mem, &during, failed)
+	cold, _ := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, nil, after)
+
+	require.Len(t, live, 1)
+	require.Len(t, cold, 3)
+	assert.Equal(t, at(t, "2026-10-09T18:05:00Z"), live[0].OccurredAt)
+	assert.Equal(t, live[0].IdempotencyKey, cold[1].IdempotencyKey)
+	assert.Equal(t, at(t, "2026-10-09T18:05:00Z"), cold[1].OccurredAt)
+	assert.Equal(t, at(t, "2026-10-09T18:00:00Z"), cold[0].OccurredAt)
 }
 
 func TestAColdListOverARolledBackUpgradeIsOneChangeEndingRolledBack(t *testing.T) {

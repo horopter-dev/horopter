@@ -44,8 +44,9 @@ func releasedAttempt(hr HelmRelease) (attempt, bool) {
 	if snap.Status != "deployed" && snap.Status != "failed" {
 		return attempt{}, false
 	}
-	a := attempt{snap: snap, action: snap.Action, failed: snap.Status == "failed"}
-	a.end = releasedAt(hr, a)
+	failed := snap.Status == "failed"
+	a := attempt{snap: snap, action: snap.Action, failed: failed,
+		end: releasedAt(hr, snap, snap.Action, failed)}
 	if rem, ok := condition(hr.Status.Conditions, "Remediated"); a.failed && ok &&
 		rem.Reason == "RollbackFailed" && rem.LastTransitionTime.After(snap.LastDeployed) {
 		a.remediation = &remediation{at: rem.LastTransitionTime}
@@ -63,27 +64,35 @@ func rolledBackAttempt(hr HelmRelease) attempt {
 		(c.Reason == "RollbackSucceeded" || c.Reason == "RollbackFailed") {
 		rem = &remediation{succeeded: c.Reason == "RollbackSucceeded", at: c.LastTransitionTime}
 	}
-	return attempt{snap: h[1], action: "upgrade", failed: true, end: h[1].LastDeployed,
-		remediation: rem}
+	return attempt{snap: h[1], action: "upgrade", failed: true,
+		end: releasedAt(hr, h[1], "upgrade", true), remediation: rem}
 }
 
-// releasedAt is when helm-controller set Released for a's outcome, once Helm's wait returned.
-// Helm stamps lastDeployed as it writes the release, near the action's start, so it is the end
-// only when Released does not yet show a's outcome.
-func releasedAt(hr HelmRelease, a attempt) time.Time {
-	outcome := "Succeeded"
-	if a.failed {
-		outcome = "Failed"
-	}
+// releasedAt is when helm-controller set Released for snap's outcome, once Helm's wait
+// returned. Helm stamps lastDeployed as it writes the release, near the action's start, so it is
+// the end only when Released does not show that outcome. A rollback leaves Released as the
+// failed upgrade set it.
+func releasedAt(hr HelmRelease, snap Snapshot, action string, failed bool) time.Time {
 	rel, ok := condition(hr.Status.Conditions, "Released")
-	if ok && rel.Reason == actionReasons[a.action]+outcome &&
-		!rel.LastTransitionTime.Before(a.snap.LastDeployed) {
+	if ok && rel.Reason == outcomeReason(action, failed) &&
+		!rel.LastTransitionTime.Before(snap.LastDeployed) {
 		return rel.LastTransitionTime
 	}
-	return a.snap.LastDeployed
+	return snap.LastDeployed
 }
 
-var actionReasons = map[string]string{"install": "Install", "upgrade": "Upgrade"}
+// outcomeReason is the Released reason helm-controller sets for an action's outcome.
+func outcomeReason(action string, failed bool) string {
+	switch {
+	case action == "install" && failed:
+		return "InstallFailed"
+	case action == "install":
+		return "InstallSucceeded"
+	case failed:
+		return "UpgradeFailed"
+	}
+	return "UpgradeSucceeded"
+}
 
 // outcomes posts the newest attempt's end and remediation that prev did not already show. The
 // end goes on the open change's ref when there is one, so a mispredicted revision does not
