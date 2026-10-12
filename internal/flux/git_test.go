@@ -94,6 +94,16 @@ func TestTheCommitTitleIsTheSubjectItsNewArtifactEventQuotes(t *testing.T) {
 	assert.Equal(t, "feat: add the flux client", title)
 }
 
+func TestANewArtifactEventEndingInACarriageReturnStillTitlesItsCommit(t *testing.T) {
+	repo := load[flux.GitRepository](t, "gitrepository.yaml")
+	ev := newArtifactEvent(revision, "stored artifact for commit 'feat: add the flux client'\r\n")
+
+	title, ok := flux.ArtifactTitle(repo, []flux.Event{ev})
+
+	assert.True(t, ok)
+	assert.Equal(t, "feat: add the flux client", title)
+}
+
 func TestWithoutItsNewArtifactEventACommitHasNoTitleYet(t *testing.T) {
 	repo := load[flux.GitRepository](t, "gitrepository.yaml")
 	otherName := newArtifactEvent(revision, "stored artifact for commit 'Elsewhere'")
