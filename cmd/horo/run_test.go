@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -119,6 +120,77 @@ func TestStrictDoesNotRunTheCommandWhenTheStartFails(t *testing.T) {
 	_, err := os.Stat(marker)
 	assert.True(t, os.IsNotExist(err), "the command must not have run")
 	assert.Contains(t, errOut, "the command was not run", "a CI log must say the deploy did not run")
+}
+
+// TestStrictClosesAStartThatMayHaveBeenStored: a start that timed out, or that ingress failed
+// to answer, may have been stored anyway, so --strict, refusing to run the command, closes the
+// change as cancelled rather than leave it open, and prints the close command if that is not
+// confirmed.
+func TestStrictClosesAStartThatMayHaveBeenStored(t *testing.T) {
+	shortWindows(t)
+	runRefused := func(t *testing.T, f *fakeIngress) (int, string, map[string]any) {
+		t.Helper()
+		marker := filepath.Join(t.TempDir(), "ran")
+		path := reportFile(t)
+		code, _, errOut := runCmd(t, startFailingIngress{}.server(t, f.server(t)),
+			"--strict", "--ref", "dep-1", "--report", path, "--", "touch", marker)
+		assert.NoFileExists(t, marker, "the command must not have run")
+		return code, errOut, readReport(t, path)
+	}
+	t.Run("cancellation confirmed", func(t *testing.T) {
+		f := &fakeIngress{}
+		code, errOut, got := runRefused(t, f)
+		assert.Equal(t, 1, code)
+		posts := f.posted()
+		require.Len(t, posts, 1)
+		assert.Equal(t, "deployment.cancelled", posts[0]["type"])
+		assert.Equal(t, "cancelled", posts[0]["lifecycle"])
+		assert.Equal(t, "dep-1", posts[0]["correlation_ref"])
+		key, _ := posts[0]["idempotency_key"].(string)
+		assert.True(t, strings.HasSuffix(key, "/end"), "the end's key: a late close replays it")
+		assert.Contains(t, errOut, "the command was not run, and is recorded as cancelled")
+		assert.Equal(t, true, got["end_posted"])
+		assert.Equal(t, "ci/dep-1", got["ref"])
+		assert.Equal(t, "cancelled", got["outcome"])
+		assert.Equal(t, float64(1), got["exit_code"])
+		assert.Contains(t, got["reason"], "could not record the start")
+	})
+	t.Run("cancellation refused", func(t *testing.T) {
+		code, errOut, got := runRefused(t, &fakeIngress{status: http.StatusInternalServerError})
+		assert.Equal(t, 1, code)
+		args := shellWords(t, recoveryLine(t, errOut))
+		assert.Subset(t, args, []string{"--ref", "dep-1", "--lifecycle", "cancelled"})
+		assert.Equal(t, false, got["end_posted"])
+		assert.Equal(t, "cancelled", got["outcome"])
+		assert.Contains(t, got["reason"], "could not record the start")
+		assert.Contains(t, got["reason"], "the cancellation could not be confirmed")
+	})
+	// A 429 is a hop in front of ingress: it says nothing of an earlier attempt that timed out.
+	for _, status := range []int{http.StatusInternalServerError, http.StatusTooManyRequests} {
+		t.Run(fmt.Sprintf("start answered %d", status), func(t *testing.T) {
+			f := &fakeIngress{}
+			url := startFailingIngress{status: status}.server(t, f.server(t))
+			code, _, _ := runCmd(t, url, "--strict", "--", "true")
+			assert.Equal(t, 1, code)
+			posts := f.posted()
+			require.Len(t, posts, 1)
+			assert.Equal(t, "cancelled", posts[0]["lifecycle"])
+		})
+	}
+}
+
+// TestStrictLeavesNothingToCloseWhenIngressRefusedTheStart: a refusal is an answer, so the
+// start was not stored and there is no change to close.
+func TestStrictLeavesNothingToCloseWhenIngressRefusedTheStart(t *testing.T) {
+	shortWindows(t)
+	f := &fakeIngress{status: http.StatusUnauthorized}
+	code, _, errOut := runCmd(t, f.server(t), "--strict", "--", "true")
+	assert.Equal(t, 1, code)
+	posts := f.posted()
+	require.Len(t, posts, 1, "the start alone, never a cancellation")
+	assert.Equal(t, "started", posts[0]["lifecycle"])
+	assert.Contains(t, errOut, "--strict, so the command was not run")
+	assert.NotContains(t, errOut, "horo event ")
 }
 
 // TestAMissingKeyStillRunsTheCommand: an unset CI secret is Horopter being unreachable, not a
@@ -394,15 +466,43 @@ func (e *endFailingIngress) server(t *testing.T, innerURL string) string {
 			_, _ = w.Write([]byte(`{"error":"end refused"}`))
 			return
 		}
-		//nolint:gosec // G704: forwards to the test's own httptest server.
-		resp, err := http.Post(innerURL+r.URL.Path, "application/json", bytes.NewReader(body))
-		require.NoError(t, err)
-		defer func() { _ = resp.Body.Close() }()
-		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
+		forward(t, w, innerURL+r.URL.Path, body)
 	}))
 	t.Cleanup(srv.Close)
 	return srv.URL
+}
+
+// startFailingIngress answers a start post with status, or never when status is 0, so horo
+// cannot tell whether it was stored, and forwards every other post to an inner server.
+type startFailingIngress struct{ status int }
+
+func (s startFailingIngress) server(t *testing.T, innerURL string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), `/start"`) {
+			if s.status == 0 {
+				<-r.Context().Done()
+				return
+			}
+			w.WriteHeader(s.status)
+			return
+		}
+		forward(t, w, innerURL+r.URL.Path, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// forward posts body to url and copies the answer to w.
+func forward(t *testing.T, w http.ResponseWriter, url string, body []byte) {
+	t.Helper()
+	//nolint:gosec // G704: forwards to the test's own httptest server.
+	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // recoveryLine finds the "horo event ..." command in a failed-end warning.

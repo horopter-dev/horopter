@@ -127,3 +127,20 @@ func retryable(err error) bool {
 	}
 	return true
 }
+
+// Refused reports an answer that proves a post was not stored, whatever an earlier attempt did:
+// ingress refusing it, since a stored post is replayed rather than refused. Only the statuses
+// ingress refuses with count; any other 4xx, a 408 or 429 say, comes from a hop in front of it.
+func Refused(err error) bool {
+	var he *HTTPError
+	if !errors.As(err, &he) {
+		return false
+	}
+	switch he.Status {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden,
+		http.StatusRequestEntityTooLarge:
+		return true
+	default:
+		return false
+	}
+}
