@@ -159,6 +159,41 @@ archives:
     formats: [tar.gz]
     name_template: "horo_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
+# One cask per CLI, each from its own archive: a cask matching two archives on one platform is
+# refused. skip_upload: auto keeps a prerelease out of the tap. The binaries are unsigned, so
+# each cask clears the quarantine bit; postflight_steps replaces the raw hook once a GoReleaser
+# release carries goreleaser#6873.
+homebrew_casks:
+  - name: horo
+    ids: [horo]
+    description: Records changes and reads them back
+    homepage: https://docs.horopter.dev/
+    skip_upload: auto
+    repository: &tap
+      owner: horopter-dev
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr",
+                           args: ["-dr", "com.apple.quarantine", "#{staged_path}/horo"]
+          end
+  - name: horoctl
+    ids: [horoctl]
+    description: Manages Horopter tenants and credentials and applies migrations
+    homepage: https://docs.horopter.dev/
+    skip_upload: auto
+    repository: *tap
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr",
+                           args: ["-dr", "com.apple.quarantine", "#{staged_path}/horoctl"]
+          end
+
 checksum:
   name_template: checksums.txt
 
