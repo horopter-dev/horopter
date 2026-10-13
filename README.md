@@ -1,5 +1,9 @@
 # Horopter
 
+> **Not launched yet.** This repository is public ahead of Horopter's launch, which has not been
+> announced. The releases are real; the documentation and the project around them are still
+> settling.
+
 **horopter** (/həˈrɒptər/, hor-**OP**-ter) — in binocular vision, the locus of
 points that fall on corresponding retinal points in both eyes: where two
 independent views agree and fuse into one.
