@@ -168,8 +168,32 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+          # Two commits, so a pull request's merge commit has its base, HEAD^1, to diff against.
+          fetch-depth: 2
+
+      # Nothing below reads Markdown, so a pull request changing only *.md skips it. The test
+      # job still runs: docs/reference_test.go checks the reference pages against the code.
+      - name: Find whether anything but Markdown changed
+        id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          code=true
+          if [ "$EVENT" = pull_request ]; then
+            code=false
+            while IFS= read -r path; do
+              case "$path" in
+                *.md) ;;
+                *) code=true ;;
+              esac
+            done < <(git diff --name-only HEAD^1 HEAD)
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "Release configuration and shell checks run: $code"
 
       - name: Set up Go
+        if: steps.changes.outputs.code == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go.mod
@@ -178,6 +202,7 @@ jobs:
           cache: false
 
       - name: Install GoReleaser
+        if: steps.changes.outputs.code == 'true'
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94  # v7.2.3
         env:
           # renovate: datasource=github-releases depName=goreleaser/goreleaser
@@ -193,11 +218,13 @@ jobs:
       # A broken release config should fail on the pull request, not on the tag, when the
       # only way to retry is another tag.
       - name: Check the release configuration
+        if: steps.changes.outputs.code == 'true'
         run: |
           set -euo pipefail
           goreleaser check
 
       - name: Build the release artefacts without publishing
+        if: steps.changes.outputs.code == 'true'
         run: |
           set -euo pipefail
           goreleaser release --snapshot --clean
@@ -210,6 +237,7 @@ jobs:
       # here rather than running. It unpacks into RUNNER_TEMP so nothing lands in the
       # checkout.
       - name: Lint the shell scripts
+        if: steps.changes.outputs.code == 'true'
         env:
           # Not annotated for Renovate: a new version needs its checksum too, by hand.
           SHELLCHECK_VERSION: v0.11.0
