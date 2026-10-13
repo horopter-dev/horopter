@@ -11,12 +11,11 @@
 ALTER TABLE change ADD COLUMN locus TEXT NOT NULL
     GENERATED ALWAYS AS (split_part(ref, '/', 1)) STORED;
 
--- A source is a property of an EVENT, and one ref may span credentials with different
--- sources (a change CI starts and a cluster controller completes), so a change has a SET of
--- them. Union rather than
--- last-wins: a union is commutative, so a rebuild in any order reproduces it exactly, and
--- core.Fold's other aggregate fields (first_seen_at's min, the attribute merge) already work
--- this way. capabilities TEXT[] in 0004 is the array precedent.
+-- A source is a property of an EVENT, and one ref is designed to span credentials with
+-- different sources (a change CI starts and a cluster controller completes), so a change has
+-- a SET of them. Union rather than last-wins: a union is commutative, so a rebuild in any
+-- order reproduces it exactly, and core.Fold's other aggregate fields (first_seen_at's min,
+-- the attribute merge) already work this way. capabilities TEXT[] in 0004 is the array precedent.
 ALTER TABLE change ADD COLUMN sources TEXT[] NOT NULL DEFAULT '{}';
 
 -- The ref an event folds onto is core.RefFor's rule: its correlation_ref, or its locus and
