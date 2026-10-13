@@ -15,7 +15,7 @@ ended, and how.
 ## Status
 
 <!-- x-release-please-start-version -->
-The latest release is v0.13.0.
+The latest release is v0.14.0.
 <!-- x-release-please-end -->
 Until 1.0, a release that breaks the HTTP API, the storage schema or a command line bumps the
 minor version; a patch release never does. What Horopter does not do yet is in
