@@ -40,7 +40,7 @@ services:
 
   # Issues the dev stack's two credentials — one producer, one reader, never a superuser —
   # idempotently, so a fresh database gets a tenant and both keys and a database that
-  # already has them is left alone. See the README's "Issuing credentials" section.
+  # already has them is left alone. See docs/reference/horoctl.md.
   bootstrap:
     image: ghcr.io/horopter-dev/horoctl:${HOROPTER_IMAGE_TAG:-v0.13.0} # x-release-please-version
     environment:

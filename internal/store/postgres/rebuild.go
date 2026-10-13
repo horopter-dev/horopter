@@ -117,8 +117,8 @@ func lockRebuildWrite(ctx context.Context, tx pgx.Tx, tenantID string) error {
 // rebuild is still deterministic — replaying the same log again gives the same answer — but
 // "reproduces the projection exactly" is only true up to that ordering.
 //
-// See README.md's "Rebuilding a tenant's projection" section for what an operator meets
-// today.
+// See docs/reference/known-limits.md, and the docs site's "Rebuild a Tenant's Projection"
+// how-to, for what an operator meets today.
 //
 // Operational exposure, which v0.1 does not remove: the exclusive lock blocks every
 // append for this tenant for the rebuild's whole duration. Blocked appends fail after

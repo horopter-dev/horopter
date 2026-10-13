@@ -18,7 +18,16 @@
 # HOROPTER_EGRESS_DB_WAIT_THRESHOLD, and an idle database has none. To exercise the
 # interesting paths, restart the stack with pool_max_conns=1 in DATABASE_URL (reads then
 # queue for connections) or HOROPTER_EGRESS_READ_MEMORY_BYTES=1048576, the minimum, which
-# makes ordinary reads too large. See the README.
+# makes ordinary reads too large.
+#
+# - pool_max_conns=1, measured: `load.sh 20 50` and `load.sh 60 100` shed nothing, since a
+#   seeded query takes a few milliseconds and the queue drains inside
+#   HOROPTER_EGRESS_ADMISSION_WAIT; `load.sh 150 200` shed, all at the concurrency gate, with
+#   "limit":4 in the `read shed` line, the ceiling for a pool of one connection.
+# - The minimum pool cuts ordinary seeded reads: 200 with X-Horopter-Truncated: true, and no
+#   log line, since only the 422 and 503 paths log at WARN. A 422 needs a single row whose
+#   text, times the 46x admission overhead, exceeds the pool by itself: roughly 23 KB of row
+#   text, well past anything hack/seed.sh writes.
 set -euo pipefail
 
 url="${HOROPTER_EGRESS_URL:-http://localhost:8081}"

@@ -46,8 +46,8 @@ func expansionShapes() []expansionShape {
 	}
 }
 
-// realisticAttributes are the README's recommended keys, fully populated, with a 40-line release
-// note as the description: about 3 KiB of JSON.
+// realisticAttributes are the Attributes page's recommended keys, fully populated, with a
+// 40-line release note as the description: about 3 KiB of JSON.
 func realisticAttributes() map[string]any {
 	return map[string]any{
 		"service.name":                  "checkout-api",
