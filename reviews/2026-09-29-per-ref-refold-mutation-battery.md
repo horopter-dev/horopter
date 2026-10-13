@@ -595,9 +595,9 @@ the same mutation, not a correction to it.
 
 Both existing catchers pin exactly one hand-picked ordering each. A fix that special-cased
 those two specific fixtures while leaving the general "live equals an id-ordered rebuild
-for ANY commit order" claim broken would satisfy both without satisfying the design spec,
-which states that generated-orderings property as the entire claim of this change (plan
-`2026-09-29-per-ref-refold`, quoting spec §7). `TestAConvergedRefEqualsARandomlyOrderedRebuild`
+for ANY commit order" claim broken would satisfy both without satisfying the design, which
+states that generated-orderings property as the entire claim of this change.
+`TestAConvergedRefEqualsARandomlyOrderedRebuild`
 (`internal/store/postgres/refold_test.go`) is that generator: `refoldFuzzIterations` (24)
 random permutations of a six-event, two-terminal fixture, each appended to a fresh tenant
 and checked against `RebuildProjection`, with the shuffle seed logged via `t.Logf` and

@@ -402,8 +402,8 @@ func (r *otlpRequestRecorder) seen(want string) bool {
 	return false
 }
 
-// TestFlushPushesMetricsOverOTLP pins spec §4's "the meter provider performs the final OTLP
-// push" on Flush. Nothing else in this suite drives an OTLP metric export end to end:
+// TestFlushPushesMetricsOverOTLP pins that the meter provider performs the final OTLP push
+// on Flush. Nothing else in this suite drives an OTLP metric export end to end:
 // changing installMetrics's `if t.cfg.otlpMetrics {` guard to never run leaves every other
 // test green.
 func TestFlushPushesMetricsOverOTLP(t *testing.T) {

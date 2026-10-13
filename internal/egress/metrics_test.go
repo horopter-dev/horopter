@@ -72,7 +72,7 @@ type instrumentShape struct {
 	scope, unit, kind string
 }
 
-// wantShape is spec §7.1's scope for every read admission instrument, paired with the unit and
+// wantShape is the scope every read admission instrument shares, paired with the unit and
 // kind under test — the one property every instrument shares, spelled once rather than five
 // times.
 func wantShape(unit, kind string) instrumentShape {
@@ -118,7 +118,7 @@ func kindOf(m metricdata.Metrics) string {
 }
 
 // TestReadAdmissionMetrics drives a shed at each gate and checks every instrument, with exactly
-// the attribute sets spec §7.1 allows: none on the gauges, the gate alone on the shed counter.
+// the attribute sets they may carry: none on the gauges, the gate alone on the shed counter.
 func TestReadAdmissionMetrics(t *testing.T) {
 	reader := recordMetrics(t)
 	limits := testLimits()
@@ -171,5 +171,5 @@ func TestReadAdmissionMetrics(t *testing.T) {
 		"horopter.read.memory.capacity":     wantShape("By", "gauge"),
 		"horopter.read.shed":                wantShape("{read}", "monotonic_sum"),
 	}, readMetricShapes(t, reader),
-		"spec §7.1's exact scope, unit and kind for every read admission instrument")
+		"the exact scope, unit and kind for every read admission instrument")
 }

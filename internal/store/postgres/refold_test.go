@@ -288,11 +288,10 @@ func buildRefoldFuzzEvents(t *testing.T, tn string, at time.Time) []core.Event {
 }
 
 // TestAConvergedRefEqualsARandomlyOrderedRebuild generalises
-// TestAConvergedRefEqualsAWholeTenantRebuild into the property the design spec calls the
-// entire claim of this change (2026-09-29-per-ref-refold plan, quoting spec §7): "For a set
-// of events appended in an arbitrary commit order, the live projection must equal
-// foldEventLog's answer over the same log. Generating orderings and asserting that equality
-// is the entire claim of this change; every other test is a detail." The test above is one
+// TestAConvergedRefEqualsAWholeTenantRebuild into the property that is the per-ref re-fold's
+// entire claim: for a set of events appended in an arbitrary commit order, the live
+// projection must equal foldEventLog's answer over the same log. Every other test is a
+// detail. The test above is one
 // sample of that claim — six events in the single hard-coded scramble
 // []int{3, 0, 5, 1, 4, 2}. This generates the scramble instead of enumerating one instance
 // of it.

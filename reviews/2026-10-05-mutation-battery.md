@@ -49,8 +49,8 @@ caught; 1 is removed with its code.** The patch directory holds 6, and the batte
   supplies one (`TestFoldTitleFallsBackToType`), and every event has a type. The Grafana
   adapter's own fallback therefore never ran, and it is deleted. The OTLP adapter carried the
   identical dead fallback for its span name, and it is deleted too, so the two renderers agree
-  and the fold's comment, which says no renderer applies one, is true. Erasure (#26) blanks an
-  event's title, not the change's: a re-fold falls back to the type again.
+  and the fold's comment, which says no renderer applies one, is true. Field-level erasure, once
+  built, blanks an event's title, not the change's: a re-fold falls back to the type again.
 - **The schema does not enforce this** (`title` is `NOT NULL DEFAULT ''`). An empty title could
   come only from a row projected before the fold's fallback existed, in mid-September. Every
   published image has the fallback, nothing is deployed, and a re-fold or rebuild repairs such

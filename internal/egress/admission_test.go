@@ -429,8 +429,8 @@ func TestOverloadIsDecidedByTheLongestConnectionWait(t *testing.T) {
 		"a read that acquired nothing waited for nothing")
 }
 
-// TestAClientThatGaveUpAfterALongWaitStillCountsAsOverloaded pins spec §5.3: "a failed
-// acquisition still reports how long it waited." Whether the acquisition's own FAILURE counts
+// TestAClientThatGaveUpAfterALongWaitStillCountsAsOverloaded pins that a failed acquisition
+// still reports how long it waited. Whether the acquisition's own FAILURE counts
 // against the database depends on the request's context being live — a client that disconnected
 // says nothing about the database — but the wait itself is recorded regardless, and still weighs
 // against threshold either way.
