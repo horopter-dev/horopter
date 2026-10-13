@@ -48,21 +48,15 @@ use them is
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | the OTLP/HTTP collector, e.g. `http://otel-collector:4318`. Setting it turns on tracing and OTLP metrics; unset, both are off |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | unset | the traces endpoint, e.g. `http://otel-collector:4318/v1/traces`. Setting it turns on tracing, and it takes precedence over the general endpoint |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | unset | the metrics endpoint, e.g. `http://otel-collector:4318/v1/metrics`. Setting it turns on OTLP metrics, and it takes precedence over the general endpoint |
-| `OTEL_EXPORTER_PROMETHEUS_HOST` | `localhost` | the host the `/metrics` listener binds, on the daemons. Inside a container, `localhost` is reachable from the same network namespace only |
+| `OTEL_EXPORTER_PROMETHEUS_HOST` | `localhost` | the host the `/metrics` listener binds, on the daemons |
 | `OTEL_EXPORTER_PROMETHEUS_PORT` | `9464` | the `/metrics` listener's port, on both daemons |
 | `HOROPTER_TRACE_DISABLE` | empty | a comma-separated list of tracing areas to silence: `http`, the server span of each request; `store`, the span of each store operation; `sql`, the span of each SQL statement. An unknown name is accepted and silences nothing |
-
-A `/metrics` listener that cannot start, because its port is not an integer from 1 to 65535,
-its host does not resolve or its address is in use, stops the daemon. A tracer or OTLP
-exporter that cannot be built is logged once at `ERROR`, and the binary carries on without it.
 
 The OpenTelemetry SDK reads further variables itself, among them `OTEL_RESOURCE_ATTRIBUTES`,
 `OTEL_METRIC_EXPORT_INTERVAL`, `OTEL_METRIC_EXPORT_TIMEOUT`,
 `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` and the rest of `OTEL_EXPORTER_OTLP_*`.
 Horopter does not validate them; see the
 [OpenTelemetry SDK configuration](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/).
-A malformed `OTEL_EXPORTER_OTLP_*` value is logged at `ERROR` and replaced by the SDK's
-default.
 
 ## `horo`
 

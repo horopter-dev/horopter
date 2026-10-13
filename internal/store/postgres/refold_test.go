@@ -531,7 +531,7 @@ func TestARefoldThatMovesAnOutcomeIsCountedAsAltered(t *testing.T) {
 // out of order: the re-fold moves last_event_id — it always does, since core.Fold assigns
 // it unconditionally and the arriving event is by definition the lower id — and nothing
 // else. Counting that as "altered" would make the label true for every re-fold and the
-// claim docs/reference/metrics.md makes about it false.
+// Observe Horopter how-to's advice to alert on it wrong.
 func TestARefoldThatMovesOnlyBookkeepingIsNotCountedAsAltered(t *testing.T) {
 	reader := recordMetrics(t)
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)

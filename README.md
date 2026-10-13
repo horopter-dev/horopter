@@ -19,7 +19,7 @@ The latest release is v0.13.0.
 <!-- x-release-please-end -->
 Until 1.0, a release that breaks the HTTP API, the storage schema or a command line bumps the
 minor version; a patch release never does. What Horopter does not do yet is in
-[Known limits](docs/reference/known-limits.md).
+[Known Limits](docs/reference/known-limits.md).
 
 ## Try It
 
@@ -42,14 +42,10 @@ or with Go:
 
 - **[Concepts](https://docs.horopter.dev/concepts/)**: what a change is, recording one,
   credentials, attributes and read admission.
-- **How-to**: record changes from
+- **[How-to](https://docs.horopter.dev/how-to/)**: record changes from
   [Flux](https://docs.horopter.dev/how-to/flux/) and from
-  [GitHub Actions](https://github.com/horopter-dev/record-action); show them on
-  [Grafana dashboards](https://docs.horopter.dev/how-to/grafana/);
-  [install in Kubernetes](https://docs.horopter.dev/how-to/install-kubernetes/),
-  [issue credentials](https://docs.horopter.dev/how-to/issue-credentials/) and
-  [observe Horopter](https://docs.horopter.dev/how-to/observe-horopter/). All of them are on
-  [docs.horopter.dev](https://docs.horopter.dev/how-to/).
+  [GitHub Actions](https://github.com/horopter-dev/record-action), and show them on
+  [Grafana dashboards](https://docs.horopter.dev/how-to/grafana/).
 - **Reference**: the [HTTP API](docs/reference/http-api.md),
   [configuration](docs/reference/configuration.md), [`horo`](docs/reference/horo.md),
   [`horoctl`](docs/reference/horoctl.md), [metrics](docs/reference/metrics.md) and

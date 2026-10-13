@@ -387,12 +387,12 @@ func sameAttributes(a, b map[string]any) bool {
 //
 // Narrowed to those two fields so the counter agrees with the warn log two lines above its
 // only caller: slog.WarnContext there is titled "a re-fold moved a recorded outcome" and
-// fires on that identical condition, Status or End moving. docs/reference/metrics.md documents
-// horopter.refold.altered=true as "the rate at which late arrivals change recorded outcomes,
-// the number worth an alert" — Subject, Type, Title, Actor and Attributes are real moves
-// alteredFields still names in horopter.refold.moved on the append span, but none of them is
-// what the log said HAPPENED, and counting one here would teach an operator paging on this label
-// to ignore it.
+// fires on that identical condition, Status or End moving. The docs site's Observe Horopter
+// how-to says to alert on horopter_refold_altered="true", the rate at which late events change
+// recorded outcomes — Subject, Type, Title, Actor and Attributes are real moves alteredFields
+// still names in horopter.refold.moved on the append span, but none of them is what the log
+// said HAPPENED, and counting one here would teach an operator paging on this label to ignore
+// it.
 //
 // last_event_id would need excluding regardless: it moves on EVERY out-of-order re-fold, by
 // construction — core.Fold assigns it unconditionally, so the incremental answer is always

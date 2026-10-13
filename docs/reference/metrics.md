@@ -9,9 +9,7 @@ pushes over OTLP only, as it finishes. [Configuration](configuration.md#telemetr
 variables, and [Observe Horopter](https://docs.horopter.dev/how-to/observe-horopter/) what to
 alert on.
 
-No metric carries a tenant, a ref, an event id or any other value a caller chooses: every
-attribute comes from a fixed set. `OTEL_RESOURCE_ATTRIBUTES` appears on `/metrics` as the
-`target_info` series.
+`OTEL_RESOURCE_ATTRIBUTES` appears on `/metrics` as the `target_info` series.
 
 ## Horopter's Instruments
 
@@ -37,9 +35,7 @@ measure in bytes; attribute names become labels the same way.
   append re-fold that change from its log.
 - **`horopter.refold`** counts those re-folds. `horopter.refold.altered` is whether the
   re-fold moved the change's status or end; a re-fold that moved only its subject, type,
-  title, actor, attributes or latest event is counted as `false`.
-  `horopter.refold.altered=true` is the rate at which late arrivals change recorded outcomes,
-  the number worth an alert. Each re-fold reads the
+  title, actor, attributes or latest event is counted as `false`. Each re-fold reads the
   change's whole history inside the append's transaction, so its rate, times those changes'
   event counts, is the append latency it adds.
 - **`horopter.read.shed`** counts reads refused with `503`; `horopter.read.shed.gate` is

@@ -112,8 +112,8 @@ To run the stack from your working tree rather than published images:
     task up:local   # builds with goreleaser --snapshot
     task seed       # fills it with changes in all three shapes
 
-`task up` pulls the tag `docker-compose.yaml` names instead; while the packages
-are private, log in first:
+`task up` pulls the tag `docker-compose.yaml` names instead, or the one
+`HOROPTER_IMAGE_TAG` sets; while the packages are private, log in first:
 
     gh auth refresh -s read:packages
     gh auth token | docker login ghcr.io -u "$(gh api user --jq .login)" --password-stdin
@@ -227,7 +227,7 @@ a new migration instead.
 ## Reporting security issues
 
 Please do not open a public issue for a security problem. Check
-[Known limits](docs/reference/known-limits.md) and
+[Known Limits](docs/reference/known-limits.md) and
 [Credentials and Capabilities](https://docs.horopter.dev/concepts/credentials-and-capabilities/)
 first — a caveat already documented there is not a new finding; anything beyond
 what is documented, raise privately with the maintainer first.

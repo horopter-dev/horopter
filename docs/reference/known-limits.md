@@ -23,7 +23,8 @@ a flood of requests. Put a WAF, or an equivalent, in front of egress.
 
 Ingress has no rate limit, per-tenant quota or load shedding, so a burst of appends is not shed
 gracefully, and one busy producer or tenant slows every other on that ingress. An append the
-store cannot take is answered with a retryable `503`.
+store cannot take is answered with a retryable `503`. Rate-limit producers in front of ingress,
+and have them retry a `503` with backoff.
 
 ## Rebuilding a Tenant Halts Its Ingest
 
@@ -37,7 +38,8 @@ the tenant's writes are quiet, and prefer re-folding one change when you can nam
 A change's status is the outcome of the last event that ended it, by event id. When two
 reporters end one change, one's success can clear the other's failure. `horopter-flux` also
 records each Kustomization failure as a point of its own, so a failure stays visible after a
-later success.
+later success. To see every outcome a change had, read its events,
+`GET /v1/events?ref=<locus>/<ref>` or `horo show`.
 
 ## No Management API
 
@@ -67,6 +69,14 @@ other way.
   then succeeded at one revision during the outage records only the success.
 - **A reinstall after an uninstall remediation is not recorded**, as Helm reinstalls at v1 under
   the same HelmRelease. Its `Uninstall*` point is.
+- **A retry after an orphaned start, with a client restart in between**, can take the orphan's
+  ref, and is then recorded on the orphan's closed change.
+- **A HelmRelease retry is titled by its event type**, and carries no chart version, values
+  digest or generation, until it ends.
+- **A cold start mid-action can record the previous attempt's chart version** as `attempted`;
+  the end corrects the title and attributes.
+- **A ref whose next event keeps getting a `5xx` or `429` holds its later events** in memory
+  until that event is taken; other refs keep posting.
 - **A Kustomization that health-checks a HelmRelease** records a stuck release as a failure of
   every later commit it applies. Leave the release's health to the release change.
 

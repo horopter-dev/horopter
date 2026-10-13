@@ -280,16 +280,14 @@ window or filter, and ask again until the header is gone.
 Egress serves a read only when it has the capacity to:
 [Read Admission](https://docs.horopter.dev/concepts/read-admission/).
 
-| answer | when | what to do |
-| --- | --- | --- |
-| `503` with `Retry-After` | a gate could not admit the read within `HOROPTER_EGRESS_ADMISSION_WAIT` | retry after `Retry-After` seconds |
-| `200` with `X-Horopter-Truncated: true` | the read was larger than the memory pool, and was cut to the oldest rows that fit | narrow it, as for any truncation |
-| `422` | the first row alone needs more than the pool; the body names the limit | filter out that row, or raise `HOROPTER_EGRESS_READ_MEMORY_BYTES` |
+| answer | when |
+| --- | --- |
+| `503` with `Retry-After` | a gate could not admit the read within `HOROPTER_EGRESS_ADMISSION_WAIT`; `Retry-After` is that wait in whole seconds |
+| `200` with `X-Horopter-Truncated: true` | the read was larger than the memory pool, and was cut to the oldest rows that fit |
+| `422` | the first row alone needs more than the pool; the body names the limit |
 
 ## `GET /healthz` and `GET /readyz`
 
 Both daemons answer them without a credential, and read admission never sheds them.
 `/healthz` answers `200` while the process runs and never touches the database; `/readyz`
-answers `200` when the database answers, and `503` when it does not. Point a liveness probe at
-`/healthz` and a readiness probe at `/readyz`. The images carry no `HEALTHCHECK`: they have no
-shell, so a container health check has nothing to run.
+answers `200` when the database answers, and `503` when it does not.

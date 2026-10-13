@@ -53,18 +53,17 @@ func TestConfigurationListsEveryVariable(t *testing.T) {
 // variablesRead returns the string literals f passes to an envReader, and the values of the
 // constants it names …Var, as internal/logging's LevelVar and egress's readMemoryBytesVar are.
 func variablesRead(f *ast.File) []string {
-	var names []string
+	names := firstLiteralArgs(f, func(callee string) bool {
+		return slices.Contains(envReaders, callee)
+	})
 	ast.Inspect(f, func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.CallExpr:
-			if slices.Contains(envReaders, calleeName(n)) && len(n.Args) > 0 {
-				names = appendLit(names, n.Args[0])
-			}
-		case *ast.ValueSpec:
-			for i, id := range n.Names {
-				if strings.HasSuffix(id.Name, "Var") && i < len(n.Values) {
-					names = appendLit(names, n.Values[i])
-				}
+		spec, ok := n.(*ast.ValueSpec)
+		if !ok {
+			return true
+		}
+		for i, id := range spec.Names {
+			if s, isLit := literalAt(spec.Values, i); isLit && strings.HasSuffix(id.Name, "Var") {
+				names = append(names, s)
 			}
 		}
 		return true
@@ -72,12 +71,32 @@ func variablesRead(f *ast.File) []string {
 	return names
 }
 
-// appendLit appends e's value to names when e is a string literal.
-func appendLit(names []string, e ast.Expr) []string {
-	if s, ok := stringLit(e); ok {
-		return append(names, s)
+// firstLiteralArgs returns, for every call in n made by a name match accepts, its first
+// argument that is a string literal: a variable's name, a route's pattern, or an instrument's
+// name, which egress's gauge helper takes after the meter.
+func firstLiteralArgs(n ast.Node, match func(callee string) bool) []string {
+	var found []string
+	ast.Inspect(n, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || !match(calleeName(call)) {
+			return true
+		}
+		for _, arg := range call.Args {
+			if s, isLit := stringLit(arg); isLit {
+				found = append(found, s)
+				break
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func literalAt(exprs []ast.Expr, i int) (string, bool) {
+	if i >= len(exprs) {
+		return "", false
 	}
-	return names
+	return stringLit(exprs[i])
 }
 
 // routeFiles are the files whose ServeMux registrations make each daemon's routes.
@@ -97,7 +116,8 @@ func TestHTTPAPIListsEveryRoute(t *testing.T) {
 	inCode := map[string]bool{}
 	for file, daemon := range routeFiles {
 		for _, pattern := range registrations(t, filepath.Join(moduleRoot, file)) {
-			inCode[daemon+" "+pattern] = true
+			method, path, _ := strings.Cut(pattern, " ")
+			inCode[route{daemon: daemon, method: method, path: path}.String()] = true
 		}
 	}
 	onPage := map[string]bool{}
@@ -175,21 +195,9 @@ func documentedRoutes(t *testing.T) []route {
 // registrations returns the patterns a file passes to Handle and HandleFunc.
 func registrations(t *testing.T, path string) []string {
 	t.Helper()
-	f := parseFile(t, path)
-	var patterns []string
-	ast.Inspect(f, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok || len(call.Args) == 0 {
-			return true
-		}
-		if name := calleeName(call); name == "Handle" || name == "HandleFunc" {
-			if s, ok := stringLit(call.Args[0]); ok {
-				patterns = append(patterns, s)
-			}
-		}
-		return true
+	return firstLiteralArgs(parseFile(t, path), func(callee string) bool {
+		return callee == "Handle" || callee == "HandleFunc"
 	})
-	return patterns
 }
 
 func TestHoroListsEverySubcommand(t *testing.T) {
@@ -218,7 +226,7 @@ func subcommands(t *testing.T, dir, binary string, roots map[string][]string) ma
 			return
 		}
 		for _, c := range cases {
-			expand(c[1], append(slices.Clone(words), c[0]))
+			expand(c.handler, append(slices.Clone(words), c.word))
 		}
 	}
 	for fn, words := range roots {
@@ -228,9 +236,9 @@ func subcommands(t *testing.T, dir, binary string, roots map[string][]string) ma
 }
 
 // dispatchers maps each function in dir that switches on args[0] to its cases.
-func dispatchers(t *testing.T, dir string) map[string][][2]string {
+func dispatchers(t *testing.T, dir string) map[string][]dispatchCase {
 	t.Helper()
-	dispatch := map[string][][2]string{}
+	dispatch := map[string][]dispatchCase{}
 	for _, f := range parseDir(t, filepath.Join(moduleRoot, dir)) {
 		for _, d := range f.Decls {
 			fn, ok := d.(*ast.FuncDecl)
@@ -245,26 +253,36 @@ func dispatchers(t *testing.T, dir string) map[string][][2]string {
 	return dispatch
 }
 
-// switchOnFirstArg returns each case of a `switch args[0]` in body as its word and the
-// function its case returns a call to.
-func switchOnFirstArg(body *ast.BlockStmt) [][2]string {
-	var cases [][2]string
+// dispatchCase is one case of a `switch args[0]`: the word, and the function it returns a
+// call to.
+type dispatchCase struct{ word, handler string }
+
+func switchOnFirstArg(body *ast.BlockStmt) []dispatchCase {
+	var cases []dispatchCase
 	ast.Inspect(body, func(n ast.Node) bool {
 		sw, ok := n.(*ast.SwitchStmt)
 		if !ok || !isFirstArg(sw.Tag) {
 			return true
 		}
 		for _, stmt := range sw.Body.List {
-			cc := stmt.(*ast.CaseClause)
-			fn := returnedCall(cc.Body)
-			for _, e := range cc.List {
-				if word, ok := stringLit(e); ok && fn != "" {
-					cases = append(cases, [2]string{word, fn})
-				}
-			}
+			cases = append(cases, casesOf(stmt.(*ast.CaseClause))...)
 		}
 		return false
 	})
+	return cases
+}
+
+func casesOf(cc *ast.CaseClause) []dispatchCase {
+	handler := returnedCall(cc.Body)
+	if handler == "" {
+		return nil
+	}
+	var cases []dispatchCase
+	for _, e := range cc.List {
+		if word, ok := stringLit(e); ok {
+			cases = append(cases, dispatchCase{word: word, handler: handler})
+		}
+	}
 	return cases
 }
 
@@ -299,11 +317,7 @@ func compiledIn(t *testing.T) map[string][]string {
 			if !ok || len(spec.Names) != 1 || spec.Names[0].Name != "compiledIn" {
 				return true
 			}
-			for _, elt := range spec.Values[0].(*ast.CompositeLit).Elts {
-				kv := elt.(*ast.KeyValueExpr)
-				verb, _ := stringLit(kv.Key)
-				roots[kv.Value.(*ast.Ident).Name] = []string{verb}
-			}
+			addCompiledIn(t, roots, spec)
 			return false
 		})
 	}
@@ -311,6 +325,43 @@ func compiledIn(t *testing.T) map[string][]string {
 		t.Fatal("cmd/horoctl declares no compiledIn map; teach this test horoctl's dispatch")
 	}
 	return roots
+}
+
+// addCompiledIn adds each entry of compiledIn's map literal to roots, failing on any other
+// shape rather than guessing at it.
+func addCompiledIn(t *testing.T, roots map[string][]string, spec *ast.ValueSpec) {
+	t.Helper()
+	lit, ok := firstValue(spec).(*ast.CompositeLit)
+	if !ok {
+		t.Fatal("cmd/horoctl's compiledIn is not a map literal; teach this test its new shape")
+	}
+	for _, elt := range lit.Elts {
+		verb, fn, ok := verbAndFunction(elt)
+		if !ok {
+			t.Fatal(`cmd/horoctl's compiledIn has an entry that is not "verb": function`)
+		}
+		roots[fn] = []string{verb}
+	}
+}
+
+func verbAndFunction(elt ast.Expr) (verb, fn string, ok bool) {
+	kv, ok := elt.(*ast.KeyValueExpr)
+	if !ok {
+		return "", "", false
+	}
+	id, ok := kv.Value.(*ast.Ident)
+	if !ok {
+		return "", "", false
+	}
+	verb, ok = stringLit(kv.Key)
+	return verb, id.Name, ok
+}
+
+func firstValue(spec *ast.ValueSpec) ast.Expr {
+	if len(spec.Values) == 0 {
+		return nil
+	}
+	return spec.Values[0]
 }
 
 // commandHeadings returns each heading on page that is a command in a code span, such as
@@ -335,18 +386,9 @@ var instrumentCreators = regexp.MustCompile(
 func TestMetricsListsEveryInstrument(t *testing.T) {
 	inCode := map[string]bool{}
 	for _, f := range parseModule(t) {
-		ast.Inspect(f, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok || !instrumentCreators.MatchString(calleeName(call)) {
-				return true
-			}
-			for _, arg := range call.Args {
-				if s, ok := stringLit(arg); ok && strings.HasPrefix(s, "horopter.") {
-					inCode[s] = true
-				}
-			}
-			return true
-		})
+		for _, name := range firstLiteralArgs(f, instrumentCreators.MatchString) {
+			inCode[name] = true
+		}
 	}
 	onPage := tableKeys(t, "metrics.md", regexp.MustCompile(`^horopter\.[a-z_.]+$`))
 	compare(t, "metrics.md", "instrument", inCode, onPage)

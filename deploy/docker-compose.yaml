@@ -2,10 +2,11 @@
 # every route but the two probes, on both daemons, requires a credential. The bootstrap
 # service below issues the two fixed dev credentials this stack runs on — a producer and a
 # reader, never a superuser — the same way docker-compose.yaml does; see
-# https://docs.horopter.dev/how-to/issue-credentials/ to issue your own. Ingress and egress publish their APIs
-# (8080, 8081) on the host's loopback only. Postgres is not published on the host here, and
-# neither daemon's metrics port (9464) is published either: both listen on the stack's own
-# network only. See https://docs.horopter.dev/concepts/credentials-and-capabilities/
+# https://docs.horopter.dev/how-to/issue-credentials/ to issue your own. Ingress and egress
+# publish their APIs (8080, 8081) on the host's loopback only. Postgres is not published on
+# the host here, and neither daemon's metrics port (9464) is published either: both listen on
+# the stack's own network only. See
+# https://docs.horopter.dev/concepts/credentials-and-capabilities/
 #
 # `docker compose --profile grafana up` adds Prometheus and Grafana, a local demo on
 # 127.0.0.1:9090 and 127.0.0.1:3000. Grafana lets anyone who reaches it in as a Viewer, which
