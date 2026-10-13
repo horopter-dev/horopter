@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/horopter-dev/horopter/compare/v0.14.0...v0.14.1) (2026-10-13)
+
+
+### Bug Fixes
+
+* **release:** write casks with postflight_steps (HOR-121) ([#118](https://github.com/horopter-dev/horopter/issues/118)) ([61143be](https://github.com/horopter-dev/horopter/commit/61143be2b7f91ed212ae5061bcaf4f0b1acd54f9))
+
 ## [0.14.0](https://github.com/horopter-dev/horopter/compare/v0.13.0...v0.14.0) (2026-10-13)
 
 
