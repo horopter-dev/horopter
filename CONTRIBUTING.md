@@ -112,6 +112,27 @@ To run the stack from your working tree rather than published images:
     task up:local   # builds with goreleaser --snapshot
     task seed       # fills it with changes in all three shapes
 
+`task up` pulls the tag `docker-compose.yaml` names instead, or the one
+`HOROPTER_IMAGE_TAG` sets; while the packages are private, log in first:
+
+    gh auth refresh -s read:packages
+    gh auth token | docker login ghcr.io -u "$(gh api user --jq .login)" --password-stdin
+
+`task stop` halts the stack and `task down` removes its containers, both
+keeping the database; `task down:wipe` also **destroys the database volume**.
+
+The stack publishes ingress on `localhost:8080`, egress on `localhost:8081`,
+their metrics on `localhost:9464` and `localhost:9465`, and Postgres on
+`localhost:5432` as user `horopter`, password `horopter`. Its `bootstrap`
+service issues two fixed development keys: the producer key is
+`hack/seed.sh`'s default, and the reader key `hack/load.sh`'s:
+
+    export HOROPTER_DEV_PRODUCER_KEY=horo_dead00000001_00000000000000000000000000000000000000000000000000000000000000
+    export HOROPTER_DEV_READER_KEY=horo_dead00000002_11111111111111111111111111111111111111111111111111111111111111
+
+Direct access to that Postgres bypasses every check the daemons make. Keep the
+stack on loopback, and do not reuse its credentials.
+
 [task]: https://taskfile.dev
 [lint]: https://golangci-lint.run
 [cc]: https://www.conventionalcommits.org/en/v1.0.0/
@@ -205,7 +226,8 @@ a new migration instead.
 
 ## Reporting security issues
 
-Please do not open a public issue for a security problem. Check the README's
-Security section first — a caveat already documented there is not a new
-finding; anything beyond what is documented, raise privately with the
-maintainer first.
+Please do not open a public issue for a security problem. Check
+[Known Limits](docs/reference/known-limits.md) and
+[Credentials and Capabilities](https://docs.horopter.dev/concepts/credentials-and-capabilities/)
+first — a caveat already documented there is not a new finding; anything beyond
+what is documented, raise privately with the maintainer first.

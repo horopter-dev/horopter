@@ -640,9 +640,9 @@ func TestAnAbortsCancellationUsesTheEndKey(t *testing.T) {
 	assert.Contains(t, errOut, "--idempotency-key "+want, "the close command carries the same key")
 }
 
-// TestTheRecordingWindowsAreTheDocumentedOnes pins the promises the README and the decision
-// record make: a silent Horopter delays a command by at most 10 seconds, the end is retried
-// for 30, and a cancellation for 3.
+// TestTheRecordingWindowsAreTheDocumentedOnes pins the promises docs/reference/horo.md and the
+// decision record make: a silent Horopter delays a command by at most 10 seconds, the end is
+// retried for 30, and a cancellation for 3.
 func TestTheRecordingWindowsAreTheDocumentedOnes(t *testing.T) {
 	assert.Equal(t, 10*time.Second, startWindow)
 	assert.Equal(t, 30*time.Second, endWindow)

@@ -36,7 +36,7 @@ import (
 // DefaultPrometheusHost and DefaultPrometheusPort are the OpenTelemetry specification's
 // defaults for OTEL_EXPORTER_PROMETHEUS_HOST and OTEL_EXPORTER_PROMETHEUS_PORT. They are
 // kept rather than chosen for containers, so an operator who knows the specification gets
-// what they expect; the README states what that costs inside a container.
+// what they expect; docs/reference/configuration.md states what that costs inside a container.
 const (
 	DefaultPrometheusHost = "localhost"
 	DefaultPrometheusPort = "9464"

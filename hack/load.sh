@@ -18,7 +18,12 @@
 # HOROPTER_EGRESS_DB_WAIT_THRESHOLD, and an idle database has none. To exercise the
 # interesting paths, restart the stack with pool_max_conns=1 in DATABASE_URL (reads then
 # queue for connections) or HOROPTER_EGRESS_READ_MEMORY_BYTES=1048576, the minimum, which
-# makes ordinary reads too large. See the README.
+# makes ordinary reads too large.
+#
+# - pool_max_conns=1 sheds only at high concurrency, e.g. `load.sh 150 200`, at the
+#   concurrency gate.
+# - The minimum pool truncates seeded reads without logging; a 422 needs a row far larger
+#   than anything hack/seed.sh writes.
 set -euo pipefail
 
 url="${HOROPTER_EGRESS_URL:-http://localhost:8081}"
