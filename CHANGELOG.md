@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.14.0](https://github.com/horopter-dev/horopter/compare/v0.13.0...v0.14.0) (2026-10-13)
+
+
+### Features
+
+* publish horo and horoctl as casks to the Homebrew tap (HOR-51) ([#112](https://github.com/horopter-dev/horopter/issues/112)) ([258d0f2](https://github.com/horopter-dev/horopter/commit/258d0f2fdd7872d5332dbbe0f0d2d604ac0f3f6f))
+
+
+### Bug Fixes
+
+* **flux:** drop a title's trailing \r and keep acronyms whole ([#108](https://github.com/horopter-dev/horopter/issues/108)) ([5a06498](https://github.com/horopter-dev/horopter/commit/5a06498ab4cb418fdb909a4bfed0ad5562a2e37c))
+
 ## [0.13.0](https://github.com/horopter-dev/horopter/compare/v0.12.0...v0.13.0) (2026-10-12)
 
 

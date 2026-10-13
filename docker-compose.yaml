@@ -31,7 +31,7 @@ services:
     # x-release-please-version marker on each image line, and do not bump the tags by hand.
     # Set HOROPTER_IMAGE_TAG in the environment to override it for one run; `task up:local`
     # bypasses both and runs images built from the working tree.
-    image: ghcr.io/horopter-dev/horopter-migrate:${HOROPTER_IMAGE_TAG:-v0.13.0} # x-release-please-version
+    image: ghcr.io/horopter-dev/horopter-migrate:${HOROPTER_IMAGE_TAG:-v0.14.0} # x-release-please-version
     environment:
       DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
     depends_on:
@@ -42,7 +42,7 @@ services:
   # idempotently, so a fresh database gets a tenant and both keys and a database that
   # already has them is left alone. See docs/reference/horoctl.md.
   bootstrap:
-    image: ghcr.io/horopter-dev/horoctl:${HOROPTER_IMAGE_TAG:-v0.13.0} # x-release-please-version
+    image: ghcr.io/horopter-dev/horoctl:${HOROPTER_IMAGE_TAG:-v0.14.0} # x-release-please-version
     environment:
       DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
     command: >
@@ -54,7 +54,7 @@ services:
         condition: service_completed_successfully
 
   ingress:
-    image: ghcr.io/horopter-dev/horopter-ingress:${HOROPTER_IMAGE_TAG:-v0.13.0} # x-release-please-version
+    image: ghcr.io/horopter-dev/horopter-ingress:${HOROPTER_IMAGE_TAG:-v0.14.0} # x-release-please-version
     environment:
       DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
       HOROPTER_ADDR: 0.0.0.0:8080
@@ -67,7 +67,7 @@ services:
         condition: service_completed_successfully
 
   egress:
-    image: ghcr.io/horopter-dev/horopter-egress:${HOROPTER_IMAGE_TAG:-v0.13.0} # x-release-please-version
+    image: ghcr.io/horopter-dev/horopter-egress:${HOROPTER_IMAGE_TAG:-v0.14.0} # x-release-please-version
     environment:
       DATABASE_URL: postgres://horopter:horopter@db:5432/horopter?sslmode=disable
       HOROPTER_ADDR: 0.0.0.0:8081
