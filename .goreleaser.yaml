@@ -161,8 +161,7 @@ archives:
 
 # One cask per CLI, each from its own archive: a cask matching two archives on one platform is
 # refused. skip_upload: auto keeps a prerelease out of the tap. The binaries are unsigned, so
-# each cask clears the quarantine bit; postflight_steps replaces the raw hook once a GoReleaser
-# release carries goreleaser#6873.
+# each cask clears the quarantine bit.
 homebrew_casks:
   - name: horo
     ids: [horo]
@@ -175,10 +174,9 @@ homebrew_casks:
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     hooks:
       post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr",
-                           args: ["-dr", "com.apple.quarantine", "#{staged_path}/horo"]
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/horo"]
           end
   - name: horoctl
     ids: [horoctl]
@@ -188,10 +186,9 @@ homebrew_casks:
     repository: *tap
     hooks:
       post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr",
-                           args: ["-dr", "com.apple.quarantine", "#{staged_path}/horoctl"]
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/horoctl"]
           end
 
 checksum:

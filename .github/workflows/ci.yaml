@@ -205,8 +205,10 @@ jobs:
         if: steps.changes.outputs.code == 'true'
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94  # v7.2.3
         env:
+          # A nightly until v2.19.0, for the casks' install_steps (HOR-121). GoReleaser keeps
+          # about a week of nightlies, so bump it by hand before this one is pruned (HOR-122).
           # renovate: datasource=github-releases depName=goreleaser/goreleaser
-          GORELEASER_VERSION: v2.18.2
+          GORELEASER_VERSION: v2.19.0-e6c4afca-nightly
         with:
           distribution: goreleaser
           # Exact, not '~> v2': this is the tool that builds the released artefacts, so a
