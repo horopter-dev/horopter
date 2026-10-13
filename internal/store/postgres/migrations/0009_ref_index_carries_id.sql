@@ -19,10 +19,9 @@
 -- index-only either, since foldRef selects columns (occurred_at, attributes, ...) the
 -- index does not carry.
 --
--- decisions/2026-09-16-out-of-order-handling-belongs-in-the-projection.md records this as
--- "an optimisation, not a prerequisite"; on the evidence above it costs a full index
--- rebuild on the largest table in the schema for no measured gain. It is kept, not
--- reverted, because reverting it would cost a second such rebuild — the old index is a
--- strict prefix of the new one, so nothing that used it loses a plan.
+-- Carrying id was planned as an optimisation, not a prerequisite; on the evidence above it
+-- costs a full index rebuild on the largest table in the schema for no measured gain. It is
+-- kept, not reverted, because reverting it would cost a second such rebuild — the old index
+-- is a strict prefix of the new one, so nothing that used it loses a plan.
 DROP INDEX IF EXISTS ix_event_tenant_corr;
 CREATE INDEX ix_event_tenant_corr ON event (tenant, correlation_ref, id);

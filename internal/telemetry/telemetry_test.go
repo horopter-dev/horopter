@@ -179,8 +179,8 @@ func TestConfigFromEnvDisabledAreas(t *testing.T) {
 	assert.False(t, cfg.disabled["store"])
 }
 
-// The OpenTelemetry specification's own defaults, kept deliberately (spec §2): an operator
-// who knows the specification gets what they expect.
+// The OpenTelemetry specification's own defaults, kept deliberately: an operator who knows
+// the specification gets what they expect.
 func TestConfigFromEnvPrometheusDefaults(t *testing.T) {
 	setTelemetryEnv(t)
 	cfg := configFromEnv("horopter-ingress")

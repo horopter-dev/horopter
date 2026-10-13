@@ -1237,7 +1237,7 @@ func TestQueryChangesRefusesAnUnfilterableAttributeKey(t *testing.T) {
 }
 
 // TestChangesRenderTheirSources pins the field to the response. A filter on a value the
-// caller cannot read back is half a feature: #5 asked for source to be returned AND
+// caller cannot read back is half a feature: source was asked for both returned AND
 // filtered.
 func TestChangesRenderTheirSources(t *testing.T) {
 	h, s, tn := newServer(t)

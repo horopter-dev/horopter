@@ -1,4 +1,4 @@
-# Mutation battery — `horopter-internal` #29, and an independent battery over Areas C and B
+# Mutation battery — the 2026-09-16 survivors, and an independent battery over Areas C and B
 
 Date: 2026-10-05
 Branch: `test/mutation-battery`
@@ -22,7 +22,7 @@ Each mutation is now a patch file, run by `hack/mutation-battery.sh` (or
 - **The whitespace hooks skip `.patch` files.** Trimming a diff's blank context line, a single
   space, corrupts the patch.
 
-## Part 1 — #29, the 2026-09-16 battery's survivors
+## Part 1 — the 2026-09-16 battery's survivors
 
 `reviews/mutations/2026-09-16/`, run at `main` (`7073a62`) before any new test was added.
 
@@ -44,13 +44,13 @@ caught; 1 is removed with its code.** The patch directory holds 6, and the batte
   `horopter` #34 and #41.
 - **Row 06 needs both halves.** The read re-sorts its rows by `selection.order`, so dropping
   `ref ASC` from the inner `ORDER BY` alone changes nothing. The first patch did only that, and
-  a test passed against it for the wrong reason. #29's row named both places.
+  a test passed against it for the wrong reason. The 2026-09-16 battery's row named both places.
 - **Row 07's code was dead.** `core.Fold` sets a change's title from its type whenever no event
   supplies one (`TestFoldTitleFallsBackToType`), and every event has a type. The Grafana
   adapter's own fallback therefore never ran, and it is deleted. The OTLP adapter carried the
   identical dead fallback for its span name, and it is deleted too, so the two renderers agree
-  and the fold's comment, which says no renderer applies one, is true. Erasure (#26) blanks an
-  event's title, not the change's: a re-fold falls back to the type again.
+  and the fold's comment, which says no renderer applies one, is true. Field-level erasure, once
+  built, blanks an event's title, not the change's: a re-fold falls back to the type again.
 - **The schema does not enforce this** (`title` is `NOT NULL DEFAULT ''`). An empty title could
   come only from a row projected before the fold's fallback existed, in mid-September. Every
   published image has the fallback, nothing is deployed, and a re-fold or rebuild repairs such

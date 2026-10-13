@@ -45,9 +45,9 @@ func TestRefoldRefFoldsACorrelatedRefFromItsLog(t *testing.T) {
 }
 
 // TestRefoldRefReproducesAttributeMergeAtAContestedKey pins the one field whose rule is
-// last-wins PER KEY. decisions/2026-09-16 rejected making every field's rule commutative
-// precisely because attributes cannot be done incrementally without per-key provenance,
-// so a re-fold is the only thing that gets this right — and it has to.
+// last-wins PER KEY. Making every field's rule commutative was rejected precisely because
+// attributes cannot be done incrementally without per-key provenance, so a re-fold is the
+// only thing that gets this right — and it has to.
 func TestRefoldRefReproducesAttributeMergeAtAContestedKey(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
@@ -288,11 +288,10 @@ func buildRefoldFuzzEvents(t *testing.T, tn string, at time.Time) []core.Event {
 }
 
 // TestAConvergedRefEqualsARandomlyOrderedRebuild generalises
-// TestAConvergedRefEqualsAWholeTenantRebuild into the property the design spec calls the
-// entire claim of this change (2026-09-29-per-ref-refold plan, quoting spec §7): "For a set
-// of events appended in an arbitrary commit order, the live projection must equal
-// foldEventLog's answer over the same log. Generating orderings and asserting that equality
-// is the entire claim of this change; every other test is a detail." The test above is one
+// TestAConvergedRefEqualsAWholeTenantRebuild into the property that is the per-ref re-fold's
+// entire claim: for a set of events appended in an arbitrary commit order, the live
+// projection must equal foldEventLog's answer over the same log. Every other test is a
+// detail. The test above is one
 // sample of that claim — six events in the single hard-coded scramble
 // []int{3, 0, 5, 1, 4, 2}. This generates the scramble instead of enumerating one instance
 // of it.

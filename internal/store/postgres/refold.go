@@ -202,9 +202,9 @@ var ErrRefNotFound = errors.New("ref has no events")
 // nothing. A change row whose events have all gone is still removed, as a rebuild would —
 // unreachable under the mechanisms decided so far; see refoldRef.
 //
-// It is the operation decisions/2026-09-16 calls the per-ref re-fold, exposed for
-// operators by ingress's POST /v1/admin/refold. The append path calls refoldRef directly,
-// inside the transaction it already holds.
+// It is the per-ref re-fold that out-of-order appends trigger, exposed for operators by
+// ingress's POST /v1/admin/refold. The append path calls refoldRef directly, inside the
+// transaction it already holds.
 func (s *Store) RefoldRef(
 	ctx context.Context, tenantID string, ref core.Ref,
 ) (RefoldResult, error) {

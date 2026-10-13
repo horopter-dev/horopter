@@ -18,13 +18,11 @@ import (
 // privateRepository is assembled so that this file does not cite it.
 const privateRepository = "horopter" + "-internal"
 
-// exempt are the files allowed to name the private repository. The agent files point at its
-// sibling checkout. The mutation battery review's title names one of its issues; the
-// exposure audit, HOR-65, decides whether that stays.
+// exempt are the files allowed to name the private repository: the agent files, which point
+// at its sibling checkout.
 var exempt = []string{
 	"CLAUDE.md",
 	"docs/agents/",
-	"reviews/2026-10-05-mutation-battery.md",
 }
 
 // citations returns every line of a file tracked in the repository at dir that names the
@@ -69,12 +67,11 @@ func TestNoTrackedFileCitesThePrivateRepository(t *testing.T) {
 
 func TestCitationsFindsOnlyTrackedFilesThatAreNotExempt(t *testing.T) {
 	dir := repository(t, map[string]string{
-		"internal/core/ref.go":                   "// " + privateRepository + " has the design.\n",
-		"CLAUDE.md":                              "Specs are in " + privateRepository + ".\n",
-		"docs/agents/domain.md":                  "../" + privateRepository + "/CONTEXT.md\n",
-		"reviews/2026-10-05-mutation-battery.md": "# " + privateRepository + " #29\n",
-		"reviews/2026-10-06-other.md":            "line one\n" + privateRepository + "\n",
-		"README.md":                              "Nothing private here.\n",
+		"internal/core/ref.go":        "// " + privateRepository + " has the design.\n",
+		"CLAUDE.md":                   "Specs are in " + privateRepository + ".\n",
+		"docs/agents/domain.md":       "../" + privateRepository + "/CONTEXT.md\n",
+		"reviews/2026-10-06-other.md": "line one\n" + privateRepository + "\n",
+		"README.md":                   "Nothing private here.\n",
 	})
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "untracked.go"),
 		[]byte(privateRepository), 0o600))
