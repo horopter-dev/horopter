@@ -75,6 +75,18 @@ jobs:
           # job runs once per tag — so it stays off rather than risk that.
           cache: false
 
+      # GITHUB_TOKEN cannot write to another repository, so the casks are pushed to the tap
+      # with a token from the org's release App, scoped to the tap's contents alone.
+      - name: Mint a token for the Homebrew tap
+        id: tap_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          client-id: ${{ secrets.SEMANTIC_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.SEMANTIC_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: homebrew-tap
+          permission-contents: write
+
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
@@ -97,3 +109,4 @@ jobs:
           # renovate: datasource=github-releases depName=goreleaser/goreleaser
           GORELEASER_VERSION: v2.18.2
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ steps.tap_token.outputs.token }}
