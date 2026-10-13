@@ -1,5 +1,10 @@
 -- Each change's subjects, with when each first appeared, for subject-pattern filtering.
--- horopter-internal docs/superpowers/specs/2026-10-06-grafana-annotations-design.md §3.1.
+--
+-- A subject is in a change's scope when it first appeared no later than the change's end, or
+-- at any time while the change is open. That bound is applied when reading, not folded into
+-- a stored set: an out-of-order older outcome moves the end earlier, and a set accumulated
+-- against the old end would keep subjects the new one excludes. Storing each subject's
+-- earliest time lets the query decide against whatever the end is now.
 --
 -- A map from subject to the minimum occurred_at of that subject's events, in Unix
 -- microseconds: the precision occurred_at is stored at, so core.Fold's UnixMicro and this

@@ -14,11 +14,13 @@ import (
 // wrong for one of the inputs RefFromRow must round-trip. Holding the string makes the
 // round-trip exact by construction, and the halves are read rarely.
 //
-// decisions/2026-09-22-credentials-carry-source-and-locus.md, in the horopter-internal
-// repository, records that storing the two parts in separate columns is the cleaner model,
-// deferred on blast radius, to be revisited if locus is ever wanted as a query filter.
-// Keeping the composition here is what makes revisiting it a change to the store rather
-// than to every site that names a ref.
+// Storing the two parts in separate columns is the cleaner model: the producer's ref
+// survives verbatim and the "/" rule disappears. It was deferred on blast radius, since it
+// changes change's primary key, core.Change and Fold, and every query and render adapter,
+// where the composite string touches ingest only. Nothing is lost meanwhile: a locus cannot
+// contain "/", so splitting on the first one recovers the producer's ref exactly. Keeping
+// the composition here is what makes revisiting it a change to the store rather than to
+// every site that names a ref.
 //
 // The zero Ref means "no ref": an event with no correlation ref holds one, and it renders
 // as the empty string rather than as "/".

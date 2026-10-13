@@ -34,6 +34,14 @@ repos:
         # still the whole suite.
         files: (\.go$|^go\.(mod|sum)$)
         stages: [pre-commit]
+      # Any tracked file can cite the private repository, so unlike go-test this runs on
+      # every commit; it needs no database.
+      - id: no-private-citations
+        name: no citations of the private repository
+        entry: go test -count=1 ./internal/separation
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
       - id: go-fmt
         name: gofmt
         entry: task fmt

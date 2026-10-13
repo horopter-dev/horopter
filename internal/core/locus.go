@@ -10,9 +10,12 @@ import (
 // conversion, because a locus containing "/" would make <locus>/<ref> unsplittable and
 // that is the one property every ref in the system rests on.
 //
-// See decisions/2026-09-22-credentials-carry-source-and-locus.md, in the horopter-internal
-// repository, for why refs are namespaced at all, and the design doc there for why the
-// namespace is encoded into the ref string rather than stored as its own column.
+// Refs are namespaced because a change is keyed by tenant and ref, so two producers sending
+// the same ref inside a tenant would otherwise fold into one change silently: 12345 from
+// Jenkins and 12345 from a Terraform run would become one deployment. A credential carries
+// its locus, so credentials with the same locus correlate and those with different loci
+// cannot collide. See Ref for why the locus is encoded into the ref string rather than
+// stored as its own column.
 type Locus struct{ v string }
 
 // NewLocus validates the two rules the ref encoding depends on: a locus must be non-empty,

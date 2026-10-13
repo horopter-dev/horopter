@@ -1,5 +1,6 @@
--- Filtering changes by locus, source and attributes. Three filters, three different costs;
--- horopter-internal docs/superpowers/specs/2026-09-24-change-filters-design.md records why.
+-- Filtering changes by locus, source and attributes. Three filters, three different costs:
+-- locus is derived from data the row already holds, sources is a new column backfilled as a
+-- union, and attributes need an index per allowlisted key. Each section below says why.
 
 -- Locus is already in the data: it is everything before a ref's first "/", and
 -- event_locus_shape forbids a locus containing one, so split_part recovers it exactly.
