@@ -301,9 +301,9 @@ func runBootstrap(t *testing.T) {
 // wrong in this codebase on principle, not only under pollution: display names are not
 // unique by design, a tenant's identity being its id, so nothing stops another tenant, from
 // another run or another suite, sharing the name "default" in the same never-truncated
-// development database. Scoping through
-// devProducerPrefix's credential — whose key_prefix is UNIQUE — names the one tenant this
-// test's own bootstrap call actually resolved, however many other rows share its name.
+// development database. Scoping through devProducerPrefix's credential — whose key_prefix
+// is UNIQUE — names the one tenant this test's own bootstrap call actually resolved, however
+// many other rows share its name.
 func tenantCount(t *testing.T, displayName string) int {
 	t.Helper()
 	pool, err := testdb.Pool()

@@ -14,13 +14,13 @@ import (
 // wrong for one of the inputs RefFromRow must round-trip. Holding the string makes the
 // round-trip exact by construction, and the halves are read rarely.
 //
-// Storing the two parts in separate columns is the cleaner model: the producer's ref
-// survives verbatim and the "/" rule disappears. It was deferred on blast radius, since it
+// Storing the two parts in separate columns is arguably cleaner: the producer's ref
+// survives verbatim and the "/" rule disappears. It was rejected on blast radius, since it
 // changes change's primary key, core.Change and Fold, and every query and render adapter,
-// where the composite string touches ingest only. Nothing is lost meanwhile: a locus cannot
-// contain "/", so splitting on the first one recovers the producer's ref exactly. Keeping
-// the composition here is what makes revisiting it a change to the store rather than to
-// every site that names a ref.
+// where the composite string touches ingest only. Nothing is lost: a locus cannot contain
+// "/", so splitting on the first one recovers the producer's ref exactly, and migration 0007
+// filters by locus through a column generated that way. Keeping the composition here is
+// what makes revisiting it a change to the store rather than to every site that names a ref.
 //
 // The zero Ref means "no ref": an event with no correlation ref holds one, and it renders
 // as the empty string rather than as "/".
