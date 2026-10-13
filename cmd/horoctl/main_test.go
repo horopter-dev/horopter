@@ -298,13 +298,12 @@ func runBootstrap(t *testing.T) {
 
 // tenantCount counts tenants named displayName that are also the tenant this suite's own
 // bootstrap producer credential resolved to. A plain `WHERE display_name = $1` would be
-// wrong in this codebase on principle, not only under pollution: display names are "not
-// unique by design" (decisions/2026-09-22-tenant-identity-and-where-credentials-attach.md,
-// in the horopter-internal repository),
-// so nothing stops another tenant, from another run or another suite, sharing the name
-// "default" in the same never-truncated development database. Scoping through
-// devProducerPrefix's credential — whose key_prefix is UNIQUE — names the one tenant this
-// test's own bootstrap call actually resolved, however many other rows share its name.
+// wrong in this codebase on principle, not only under pollution: display names are not
+// unique by design, a tenant's identity being its id, so nothing stops another tenant, from
+// another run or another suite, sharing the name "default" in the same never-truncated
+// development database. Scoping through devProducerPrefix's credential — whose key_prefix
+// is UNIQUE — names the one tenant this test's own bootstrap call actually resolved, however
+// many other rows share its name.
 func tenantCount(t *testing.T, displayName string) int {
 	t.Helper()
 	pool, err := testdb.Pool()

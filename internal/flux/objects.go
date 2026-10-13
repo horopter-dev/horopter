@@ -3,8 +3,6 @@
 // HelmRelease's status brackets each Helm install or upgrade as a release change. Every
 // function here is pure: the same states give the same events and idempotency keys, so a
 // re-derivation after a restart repeats keys the server already holds.
-//
-// horopter-internal docs/superpowers/specs/2026-10-07-flux-client-design.md is the design.
 package flux
 
 import (

@@ -146,7 +146,8 @@ Install the hooks once, so they run on every commit:
     prek run --all-files
 
 They are a **subset of CI, not a mirror of it**: gofmt, golangci-lint, the raced
-test suite, and some whitespace and YAML checks. Passing them locally is
+test suite, a check that no tracked file cites the private repository holding
+the project's specs and decisions, and some whitespace and YAML checks. Passing them locally is
 necessary, not sufficient. The test suite needs the Docker CLI with Compose 2.23.1
 or later: `deploy/compose_test.go` renders the standalone compose file and checks
 what `docker compose config` makes of it, with and without its `grafana` profile.
