@@ -28,9 +28,7 @@ jobs:
     steps:
       # First, before a checkout, a login or any credential setup: a tag can be pushed to
       # any commit, reviewed or not, and this job holds contents:write and packages:write.
-      # The Stage 1 design called tags-are-cut-from-main "a convention, not a gate"
-      # (docs/superpowers/specs/2026-09-17-container-images-and-compose-stack-design.md,
-      # risk 2). This is the gate.
+      # Cutting tags from main was once only a convention, not a gate. This is the gate.
       #
       # Asked of the API rather than with `git merge-base`: the checkout below sets
       # persist-credentials: false, so a later `git fetch origin main` has no credentials

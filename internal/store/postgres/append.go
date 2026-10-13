@@ -390,9 +390,9 @@ func applyToProjection(ctx context.Context, tx pgx.Tx, ev core.Event, out *appen
 	folded := core.Fold(prev, ev)
 	// ev.ID sorting below the change's current watermark is exactly the condition under
 	// which an incremental fold and an id-ordered fold disagree — the divergence
-	// RebuildProjection documents. decisions/2026-09-16 resolves it here, by recomputing
-	// the ref from the log rather than by trying to patch the incremental rule, which is
-	// not achievable for attributes.
+	// RebuildProjection documents. It is resolved here, by recomputing the ref from the
+	// log rather than by trying to patch the incremental rule, which is not achievable for
+	// attributes.
 	out.outOfOrder = found && ev.ID < cur.LastEventID
 	if !out.outOfOrder {
 		out.foldStatus = folded.Status

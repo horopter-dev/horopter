@@ -520,7 +520,7 @@ targets a place where a signal that looks informative would in fact carry no inf
   presence check on the unfiltered list is true every time, collapsing the label to a
   constant that says nothing about whether a *recorded fact* moved.
 - **Mutation 9** would make `horopter.refold.altered` **silently false** for a re-fold
-  that moves a completion time — the case decisions/2026-09-16 exists to handle, and the
+  that moves a completion time — the case the per-ref re-fold exists to handle, and the
   one the fixture and the corrected assertion above pin directly.
 - **Mutation 11** would give `horopter.refold` up to **256 series** per the eight-field
   power set `refoldMoved` can hold (the same "eight field names would give it 256" the code
@@ -666,6 +666,4 @@ which code path runs at all, which is exactly mutation 4's shape.
 
 The mutation was reverted immediately after this run; `git status --porcelain` was clean on
 `internal/store/postgres/append.go` before the next step, and the full package suite
-(`task test -- ./internal/store/postgres/...`) passed afterward. Full detail, including the
-before/after suite timing and the event-set design, is in
-`.superpowers/sdd/2026-09-29-per-ref-refold/generative-test-report.md`.
+(`task test -- ./internal/store/postgres/...`) passed afterward.

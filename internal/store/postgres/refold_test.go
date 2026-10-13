@@ -45,9 +45,9 @@ func TestRefoldRefFoldsACorrelatedRefFromItsLog(t *testing.T) {
 }
 
 // TestRefoldRefReproducesAttributeMergeAtAContestedKey pins the one field whose rule is
-// last-wins PER KEY. decisions/2026-09-16 rejected making every field's rule commutative
-// precisely because attributes cannot be done incrementally without per-key provenance,
-// so a re-fold is the only thing that gets this right — and it has to.
+// last-wins PER KEY. Making every field's rule commutative was rejected precisely because
+// attributes cannot be done incrementally without per-key provenance, so a re-fold is the
+// only thing that gets this right — and it has to.
 func TestRefoldRefReproducesAttributeMergeAtAContestedKey(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)

@@ -91,10 +91,9 @@ type Change struct {
 	LastEventID string
 	// Sources are every system that reported this change, deduplicated and sorted. A SET
 	// rather than one value because a source is a property of an event and one ref
-	// legitimately spans several: decisions/2026-09-22 keeps locus and source independent
-	// precisely so a change CI starts and a cluster controller completes lands on one
-	// change. The union is commutative, so a rebuild reproduces it whatever order the log
-	// replays in.
+	// legitimately spans several: locus and source are independent precisely so a change
+	// CI starts and a cluster controller completes lands on one change. The union is
+	// commutative, so a rebuild reproduces it whatever order the log replays in.
 	Sources []string
 	// SubjectFirstSeen maps every contributing event's subject to the earliest occurred_at
 	// among that subject's events, in Unix microseconds — the precision Postgres stores, so
