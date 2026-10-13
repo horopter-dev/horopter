@@ -124,8 +124,8 @@ keeping the database; `task down:wipe` also **destroys the database volume**.
 The stack publishes ingress on `localhost:8080`, egress on `localhost:8081`,
 their metrics on `localhost:9464` and `localhost:9465`, and Postgres on
 `localhost:5432` as user `horopter`, password `horopter`. Its `bootstrap`
-service issues two fixed development keys, which are also `hack/seed.sh`'s
-defaults:
+service issues two fixed development keys: the producer key is
+`hack/seed.sh`'s default, and the reader key `hack/load.sh`'s:
 
     export HOROPTER_DEV_PRODUCER_KEY=horo_dead00000001_00000000000000000000000000000000000000000000000000000000000000
     export HOROPTER_DEV_READER_KEY=horo_dead00000002_11111111111111111111111111111111111111111111111111111111111111
