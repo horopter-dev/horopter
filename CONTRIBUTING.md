@@ -32,24 +32,10 @@ The [DCO app][dco-app] checks this on every pull request and fails one whose
 commits are not all signed off. Bots and merge commits are excluded, so
 Dependabot's pull requests are unaffected.
 
-If you forgot, you have two ways out and the check's own output gives you the
-text for the first. Add a **remediation commit** to the same pull request,
-naming the commit it covers:
-
-    git commit -s --allow-empty -m "I, Jane Doe <jane@example.com>, hereby add my Signed-off-by to this commit: <sha>"
-
-The wording is matched exactly, and the remediation commit must be authored by
-the same person as the commit it signs off for. This is the gentler option: it
-adds a commit rather than rewriting ones someone may already have pulled.
-
-Or rewrite the branch, which leaves cleaner history if nobody else has it:
+If you forgot, add the line to every commit on your branch and force-push it:
 
     git rebase --signoff main
-
-The two do not conflict: `--signoff` adds the trailer to every commit it
-rewrites. A remediation commit you had already pushed survives the rebase — Git
-keeps commits that started empty — where it is then redundant rather than
-harmful. `git rebase -i` lets you drop it if you would rather it were gone.
+    git push --force-with-lease
 
 ### Developer Certificate of Origin 1.1
 
