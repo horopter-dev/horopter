@@ -3,7 +3,8 @@
 
   // Two bots update this repository, each owning different pins. Dependabot keeps the
   // workflows' action SHAs and the pre-commit hooks (.github/dependabot.yaml). Renovate owns
-  // go.mod whole, the workflows' *_VERSION values, the runner image and the ko base image.
+  // go.mod whole, the workflows' *_VERSION values, the runner image, CI's Postgres service
+  // image and the ko base image.
   // enabledManagers is what keeps them apart: a manager not listed here does not run, so
   // Renovate never edits a file Dependabot owns; github-actions runs only for runner images.
   // Renovate runs from horopter-dev/infrastructure's workflow, whose cron is the only
@@ -76,6 +77,13 @@
       enabled: false,
     },
     {
+      // CI's Postgres stays on the major the compose files name; the two move together, by
+      // hand. Digest updates within 18 still arrive.
+      matchDepNames: ["postgres"],
+      matchUpdateTypes: ["major"],
+      enabled: false,
+    },
+    {
       matchFileNames: [".github/workflows/**"],
       semanticCommitScope: "ci",
     },
@@ -88,6 +96,16 @@
       managerFilePatterns: ["/^\\.goreleaser\\.yaml$/"],
       matchStrings: [
         "base_image: (?<depName>[^:\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]+)",
+      ],
+      datasourceTemplate: "docker",
+    },
+    {
+      // Service container images in the workflows, pinned by digest the same way. The
+      // github-actions manager would find them too, but it runs only for runner images here.
+      customType: "regex",
+      managerFilePatterns: ["/^\\.github/workflows/[^/]+\\.yaml$/"],
+      matchStrings: [
+        "image: (?<depName>[^:\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]+)",
       ],
       datasourceTemplate: "docker",
     },
