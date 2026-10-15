@@ -109,19 +109,17 @@ jobs:
         with:
           version: ${{ env.GOLANGCI_LINT_VERSION }}
 
-      # actionlint and zizmor check this workflow itself. They were part of the branch's
+      # jactionlint and zizmor check this workflow itself. They were part of the branch's
       # verified state while being run by hand, which made them true only for as long as
       # somebody remembered; running them here is what makes them a gate.
       - name: Lint workflows
         env:
-          # The maintained fork, github.com/kjanat/actionlint: upstream rhysd/actionlint
-          # stopped at 1.7.12, which rejects the ubuntu-26.04 runner label.
-          # renovate: datasource=go depName=actionlint.kjanat.dev
-          ACTIONLINT_VERSION: v1.17.0
+          # renovate: datasource=go depName=github.com/jdx/jactionlint/v2
+          JACTIONLINT_VERSION: v2.2.0
         run: |
           set -euo pipefail
-          go install "actionlint.kjanat.dev/cmd/actionlint@${ACTIONLINT_VERSION}"
-          actionlint
+          go install "github.com/jdx/jactionlint/v2/cmd/jactionlint@${JACTIONLINT_VERSION}"
+          jactionlint
 
       - name: Audit workflows
         uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482  # v0.6.4
