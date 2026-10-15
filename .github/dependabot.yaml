@@ -7,8 +7,9 @@
 #
 # Two ecosystems, deliberately, and Docker is not one of them. The only third-party image
 # either compose file names is `postgres:18`, which is already a floating tag that picks up
-# 18.x at pull time, so there is nothing for Dependabot to bump. Enabling the ecosystem would
-# instead put it in reach of `ghcr.io/horopter-dev/horopter-*`, whose tags in
+# 18.x at pull time, so there is nothing for Dependabot to bump. CI's Postgres service image is
+# pinned by digest instead, and Renovate moves it within 18 (renovate.json5). Enabling the
+# ecosystem would instead put it in reach of `ghcr.io/horopter-dev/horopter-*`, whose tags in
 # `docker-compose.yaml` Release Please bumps in each release PR, so the tagged tree names the
 # images that tag builds. A second bot competing for those pins would fight it.
 
