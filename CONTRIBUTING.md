@@ -139,8 +139,8 @@ or later: `deploy/compose_test.go` renders the standalone compose file and check
 what `docker compose config` makes of it, with and without its `grafana` profile.
 
 CI runs two jobs and checks considerably more. The first adds `go mod tidy
--diff`, a build, `go vet`, `jactionlint` and `zizmor` over the workflows, and a
-separate un-raced run of the read-expansion test. The second has no local
+-diff`, a build, `go vet`, `jactionlint` with its online rules over the workflows,
+and a separate un-raced run of the read-expansion test. The second has no local
 equivalent at all: `goreleaser check`, a snapshot release build, `shellcheck`
 and `shfmt` over `hack/*.sh`. If you
 are touching the release configuration or the shell scripts, expect CI to be the
