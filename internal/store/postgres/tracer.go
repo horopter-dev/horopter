@@ -9,28 +9,21 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ConnectionWaitObserver is told how long one pool connection acquisition waited, and the
-// error if it failed.
+// ConnectionWaitObserver is told each acquisition's wait, and its error if it failed.
 type ConnectionWaitObserver func(wait time.Duration, err error)
 
 type connectionWaitObserverKey struct{}
 
 type acquireStartedKey struct{}
 
-// WithConnectionWaitObserver returns a context under which every connection the store acquires
-// from its pool reports its wait to observe. Egress uses the waits as its overload signal.
+// WithConnectionWaitObserver reports every pool acquisition's wait under ctx to observe.
 func WithConnectionWaitObserver(
 	ctx context.Context, observe ConnectionWaitObserver,
 ) context.Context {
 	return context.WithValue(ctx, connectionWaitObserverKey{}, observe)
 }
 
-// poolTracer is the tracer every pool is built with. Embedding otelpgx's tracer delegates
-// every tracing interface it implements, so statement and acquire spans are unchanged; the two
-// acquire methods are overridden only to time the wait for an observer on the context.
-//
-// The timing does not depend on a span being recorded, so the overload signal works with
-// telemetry disabled.
+// Times acquisitions whether or not spans are recorded, so the signal works without telemetry.
 type poolTracer struct {
 	*otelpgx.Tracer
 }

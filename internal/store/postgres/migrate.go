@@ -16,51 +16,13 @@ import (
 //go:embed migrations/*.sql
 var migrationFS embed.FS
 
-// migrationLockKey is an arbitrary but fixed application id for pg_advisory_xact_lock.
-// Every process that migrates uses this same key, which is what serialises them.
+// Fixed and shared by every migrating process, which serialises them.
 const migrationLockKey int64 = 8145209847321
 
-// AppliedMigrations names the migrations THIS Open applied, in the order it applied them.
-// It is empty when the schema was already current, and always empty from OpenNoMigrate.
-//
-// The applied_migration ledger cannot answer this after the fact: once the transaction
-// commits, a file applied by this run and one applied a year ago are both simply present.
-// horopter-migrate reports the difference to an operator, so the difference has to be
-// carried out of the run that knew it.
+// AppliedMigrations names what this Open applied; the ledger cannot tell that afterwards.
 func (s *Store) AppliedMigrations() []string { return s.appliedMigrations }
 
-// Migrate applies the embedded migrations a database has not seen yet, inside one
-// transaction, guarded by a transaction-scoped advisory lock, and returns the names it
-// applied — empty when the database was already current.
-//
-// The lock is what makes this safe when several daemons start at once, as they do on
-// every rolling deploy: without it, concurrent CREATE INDEX statements race and can
-// leave a partially applied schema with no error surfaced to the operator.
-//
-// pg_advisory_xact_lock, rather than pg_advisory_lock, is deliberate: it is released
-// automatically by Postgres when the transaction commits or rolls back, so there is no
-// manual unlock call that can be skipped by a cancelled context or a swallowed error and
-// leave the lock held by a connection quietly returned to the pool. Postgres DDL is
-// transactional, so wrapping every migration statement in the same transaction is also
-// what makes a mid-file failure roll back cleanly instead of leaving a partially applied
-// schema.
-//
-// applied_migration is the ledger that makes "has not seen yet" meaningful. Without it
-// every file re-executes on every run, which happens to be harmless only while every
-// migration is written with IF NOT EXISTS; the first backfill UPDATE, RENAME COLUMN or
-// data transformation would either error on the second run or, in a system of record,
-// silently corrupt data by re-applying. A database migrated before the ledger existed
-// simply has an empty one, so every file re-executes once and is recorded thereafter.
-//
-// That recovery is safe for 0001 alone, and only because every statement in it is written
-// IF NOT EXISTS. 0001 is also the only file that predates the ledger — 0002 shipped in the
-// same commit as applied_migration, so no database has ever held 0002 without a ledger
-// row for it. Neither 0002 nor 0003 is idempotent: 0002's ADD CONSTRAINT
-// change_status_vocabulary fails outright on a second run, which is what
-// TestMigrationLedgerAppliesEachFileOnce demonstrates. So restoring a backup taken before
-// the ledger, or dropping applied_migration to "start again", produces a database whose
-// migration cannot start: the operator has to insert a row for every file the schema
-// already carries before running this again, not let them replay.
+// Migrate applies unseen migrations in one transaction under an advisory lock.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -91,9 +53,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
 		return nil, err
 	}
 
-	// Reported only past this point. Every file ran inside the transaction above, so a
-	// commit that fails applied nothing — and a caller told otherwise would log DDL that
-	// the database rolled back.
+	// Reported only after commit: a failed commit applied nothing.
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit migration transaction: %w", err)
 	}
@@ -118,7 +78,7 @@ func migrationNames() ([]string, error) {
 	return names, nil
 }
 
-// readLedger returns the set of migration filenames the database has already applied.
+// A pre-ledger backup needs ledger rows inserted by hand: 0002 and 0003 are not idempotent.
 func readLedger(ctx context.Context, tx pgx.Tx) (map[string]bool, error) {
 	rows, err := tx.Query(ctx, `SELECT filename FROM applied_migration`)
 	if err != nil {
@@ -140,8 +100,6 @@ func readLedger(ctx context.Context, tx pgx.Tx) (map[string]bool, error) {
 	return applied, nil
 }
 
-// applyPendingMigrations executes, in order, every named migration the ledger does not
-// already record, adding each to the ledger as it goes, and returns the names it ran.
 func applyPendingMigrations(ctx context.Context, tx pgx.Tx, names []string) ([]string, error) {
 	applied, err := readLedger(ctx, tx)
 	if err != nil {
@@ -169,23 +127,7 @@ func applyPendingMigrations(ctx context.Context, tx pgx.Tx, names []string) ([]s
 	return ran, nil
 }
 
-// recordSchemaVersion writes the version implied by the highest migration filename the
-// LEDGER holds. It must run after applyPendingMigrations, inside the same transaction, so
-// it reads the ledger this run has just finished extending.
-//
-// The ledger is the authority, not the binary's embedded list. An older horopter-migrate
-// run against a newer database embeds fewer migrations, so recording its own highest
-// embedded file rewrote schema_version DOWNWARD while applied_migration still listed every
-// file actually applied — leaving the recorded version contradicting the database's real
-// structure, with nothing raised. Reading the ledger makes that binary record the true,
-// higher version instead, so its own ExpectedSchemaVersion check fails loudly and the
-// operator learns they are running the wrong binary.
-//
-// Deriving the number at all, rather than hardcoding it, is what stops a second kind of
-// drift: the version used to be a literal INSERT inside 0001_init.sql, so adding a
-// migration without editing that literal left the database claiming a version the schema
-// no longer matched. ExpectedSchemaVersion stays a Go constant precisely so a daemon can
-// assert against this value and refuse to run on a schema it does not understand.
+// Reads the ledger, not the embedded list, so an old binary records the true, higher version.
 func recordSchemaVersion(ctx context.Context, tx pgx.Tx) error {
 	var latest *string
 	if err := tx.QueryRow(ctx,
