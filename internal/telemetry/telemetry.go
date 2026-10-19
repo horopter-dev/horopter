@@ -1,14 +1,4 @@
 // Package telemetry builds and installs Horopter's OpenTelemetry providers.
-//
-// A tracer provider exports telemetry spans over OTLP when a collector endpoint is
-// configured. A meter provider is installed whenever the SDK is not disabled: its
-// Prometheus reader backs the /metrics endpoint, which is on by default, and an OTLP reader
-// is added when a collector endpoint is configured.
-//
-// Nothing else in the codebase decides whether telemetry is on. With no provider installed
-// the OTel API returns non-recording spans and no-op instruments, so instrumentation code
-// is written unconditionally. OTEL_SDK_DISABLED=true is the one setting under which this
-// package installs nothing at all.
 package telemetry
 
 import (
@@ -33,17 +23,13 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 )
 
-// DefaultPrometheusHost and DefaultPrometheusPort are the OpenTelemetry specification's
-// defaults for OTEL_EXPORTER_PROMETHEUS_HOST and OTEL_EXPORTER_PROMETHEUS_PORT. They are
-// kept rather than chosen for containers, so an operator who knows the specification gets
-// what they expect; docs/reference/configuration.md states what that costs inside a container.
+// DefaultPrometheusHost and DefaultPrometheusPort are the OpenTelemetry specification's defaults.
 const (
 	DefaultPrometheusHost = "localhost"
 	DefaultPrometheusPort = "9464"
 )
 
-// config is the resolved environment. It is a value rather than package state so a
-// test can build one directly.
+// config is the resolved environment.
 type config struct {
 	sdkDisabled    bool
 	tracing        bool
@@ -54,24 +40,7 @@ type config struct {
 	prometheusPort string
 }
 
-// configFromEnv resolves the standard OTEL_* variables plus this project's own
-// HOROPTER_TRACE_DISABLE.
-//
-// Each OTLP signal is enabled only when an endpoint for it is configured AND the SDK is
-// not disabled. OTEL_EXPORTER_OTLP_ENDPOINT counts for both signals; each signal-specific
-// variable counts for its own signal only. An absent endpoint counts as off deliberately:
-// OTel's own default is localhost:4318, so honouring it would make every run without a
-// collector emit export failures that look like a fault and are not one.
-//
-// The signal-specific variables are the ones the exporters themselves honour in
-// preference to the general one, and setting only one is the normal shape when traces and
-// metrics go to different collectors. Gating on the general variable alone gave that
-// operator a daemon that started happily and emitted nothing.
-//
-// opentelemetry-go does not implement OTEL_SDK_DISABLED itself — the proposal was
-// declined on the grounds that applications can do it — so this reads it directly
-// rather than inventing a private name for a variable that already has a standard one.
-// It turns off every signal, the /metrics endpoint included.
+// configFromEnv resolves the OTEL_* variables; opentelemetry-go ignores OTEL_SDK_DISABLED.
 func configFromEnv(serviceName string) config {
 	cfg := config{
 		sdkDisabled:    strings.EqualFold(os.Getenv("OTEL_SDK_DISABLED"), "true"),
@@ -107,51 +76,28 @@ func disabledAreas(raw string) map[string]bool {
 	return out
 }
 
-// noopShutdown stands in for a tracer provider that was not installed, so Flush never needs
-// to nil-check it.
+// noopShutdown stands in for a tracer provider that was not installed.
 func noopShutdown(context.Context) error { return nil }
 
-// Telemetry is what Setup installed, and how to serve and stop it. A Telemetry whose
-// providers are nil installed nothing, and its methods do nothing.
+// Telemetry is what Setup installed, and how to serve and stop it.
 type Telemetry struct {
 	cfg            config
 	tracerShutdown func(context.Context) error
 	meterProvider  *sdkmetric.MeterProvider
 	registry       *prometheus.Registry
 	metricsServer  *http.Server
-	// metricsListener is held separately from metricsServer because http.Server.Close
-	// closes only the listeners Serve has registered with it, and Serve runs in a
-	// goroutine. Flush must not depend on that goroutine having been scheduled.
+	// Close sees the listener only once the Serve goroutine has registered it.
 	metricsListener net.Listener
 }
 
-// Setup installs the providers the environment asks for and returns what it installed.
-//
-// It returns an error only when the meter provider cannot be built — realistically a
-// schema-URL conflict in newResource, or the Prometheus reader failing to register its
-// collectors. The /metrics endpoint is on by default, so an endpoint that is meant to be
-// there and silently is not would be "configured but doing nothing"; a daemon that refuses
-// to start instead loses no events, because during a rolling deploy the old instances keep
-// serving.
-//
-// installMetrics runs BEFORE installTracing, so that error is returned before anything else
-// is installed. The old order left a tracer provider installed and never shut down whenever
-// installMetrics failed afterwards: nothing had run yet to call its shutdown function.
-//
-// Everything that depends on a collector keeps the older rule: a telemetry
-// misconfiguration must not stop a system of record. A tracer provider that cannot be built
-// is logged at ERROR and the process continues with tracing off, and installMetrics does the
-// same for the OTLP metric exporter. It is logged loudly on purpose: a misconfiguration that
-// degraded quietly would be indistinguishable from a documented variable that does nothing.
-//
-// With OTEL_SDK_DISABLED=true it installs nothing and returns a Telemetry whose methods do
-// nothing. It never returns a nil Telemetry with a nil error.
+// Setup installs the providers the environment asks for; only a meter provider failure errors.
 func Setup(ctx context.Context, serviceName string) (*Telemetry, error) {
 	cfg := configFromEnv(serviceName)
 	t := &Telemetry{cfg: cfg, tracerShutdown: noopShutdown}
 	if cfg.sdkDisabled {
 		return t, nil
 	}
+	// Before installTracing: a tracer provider installed first leaked when this failed.
 	if err := t.installMetrics(ctx); err != nil {
 		return nil, fmt.Errorf("set up metrics for %s: %w", cfg.serviceName, err)
 	}
@@ -164,8 +110,7 @@ func Setup(ctx context.Context, serviceName string) (*Telemetry, error) {
 	return t, nil
 }
 
-// installTracing builds and installs the tracer provider, returning the error Setup turns
-// into a log line. It is separate so the failure has a return value a test can assert on.
+// installTracing builds and installs the tracer provider, returning the error Setup logs.
 func installTracing(ctx context.Context, cfg config) (func(context.Context) error, error) {
 	if !cfg.tracing {
 		return noopShutdown, nil
@@ -193,33 +138,7 @@ func installTracing(ctx context.Context, cfg config) (func(context.Context) erro
 	return provider.Shutdown, nil
 }
 
-// routeDiagnosticsToSlog points OpenTelemetry's TWO diagnostic channels at slog. Every
-// other failure in these binaries goes through slog, and an operator should not have to
-// know that one subsystem reports itself somewhere else in another format.
-//
-// The channels are separate and carry different things, which is why both are needed.
-//
-//  1. otel.Handle — run-time failures the SDK considers irremediable, in practice a batch
-//     the Collector rejected. Its default handler writes to the stdlib logger on stderr.
-//
-//  2. otel.SetLogger — the SDK's own internal logger, and the one that carries an
-//     OPERATOR'S mistake. Every malformed OTEL_EXPORTER_OTLP_* value is reported here and
-//     then ignored: otlptracehttp.New returns a nil error for an unparsable endpoint, an
-//     unreadable certificate file, malformed headers, a non-numeric timeout and an unknown
-//     protocol alike, falling back to its defaults in each case. Without this, a typo'd
-//     endpoint produced one unstructured stderr line and an exporter quietly pointed at
-//     localhost — which is the same "configured but doing nothing" failure the endpoint
-//     rule in configFromEnv exists to close.
-//
-// logr's Error maps to slog ERROR, which is what carries those configuration failures.
-// The SDK's warn, info and debug chatter goes through V(1), V(4) and V(8), which map
-// BELOW slog's Info and stay suppressed at a default level — so this surfaces the
-// failures without adding a stream of noise.
-//
-// Called before any exporter is built, because the exporters are what produce these
-// messages: installing the logger afterwards routes the very errors it exists for to
-// stderr. installTracing and installMetrics both call it, so it runs whenever either
-// installs anything, and never under OTEL_SDK_DISABLED=true.
+// routeDiagnosticsToSlog must run before any exporter is built: exporters log config errors.
 func routeDiagnosticsToSlog() {
 	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
 		slog.Warn("opentelemetry reported an error", "error", err)
@@ -227,34 +146,14 @@ func routeDiagnosticsToSlog() {
 	otel.SetLogger(logr.FromSlogHandler(slog.Default().Handler()))
 }
 
-// FlushTimeout bounds the shutdown flush. What goes wrong during a flush is a collector
-// that has become unreachable, and this is what stops that from holding up an exit.
+// FlushTimeout bounds the shutdown flush, so an unreachable collector cannot hold up an exit.
 const FlushTimeout = 5 * time.Second
 
-// Flush stops the metrics listener and drains buffered telemetry during shutdown. Every
-// binary defers it once Setup has succeeded, so the timeout cannot drift between them.
-//
-// The order matters. The metrics server is CLOSED first, not gracefully shut down: Close
-// abandons any in-flight scrape and any idle connection immediately, rather than waiting
-// for them the way Shutdown would. All three stops below share one FlushTimeout budget, so
-// a single slow or half-open connection to /metrics — nothing a caller need even be
-// scraping deliberately — could otherwise spend the whole of it, leaving nothing for the
-// meter provider's final OTLP push or the tracer provider's batch flush, both of which
-// matter more: a scrape abandoned mid-response is worth nothing to the client that started
-// it, and production telemetry buffered for export is what a slow flush would put at risk.
-// The meter provider then performs its final OTLP push; the tracer provider flushes its
-// batch last.
-//
-// It builds a fresh context rather than reusing one a signal handler has already
-// cancelled: the telemetry still buffered is the telemetry describing whatever caused the
-// shutdown, and flushing it on a cancelled context drops exactly the evidence worth keeping.
-// Failures are logged, not returned — nothing a shutting-down process could do with them.
-//
-// Calling it again does nothing: each component is cleared once stopped, because a second
-// shutdown of an SDK provider reports an error for work already done.
+// Flush stops /metrics and drains buffered telemetry on a fresh context; repeat calls do nothing.
 func (t *Telemetry) Flush() {
 	ctx, cancel := context.WithTimeout(context.Background(), FlushTimeout)
 	defer cancel()
+	// Close, not Shutdown: an idle /metrics connection must not spend the shared budget.
 	t.stopMetricsEndpoint()
 	if t.meterProvider != nil {
 		if err := t.meterProvider.Shutdown(ctx); err != nil {
@@ -270,25 +169,7 @@ func (t *Telemetry) Flush() {
 	}
 }
 
-// stopMetricsEndpoint stops /metrics serving: the server first, then the listener.
-//
-// The listener is closed at all because http.Server.Close closes only the listeners Serve
-// has registered with it, and ServeMetrics hands the listener to Serve in a goroutine before
-// returning. A Flush arriving before that goroutine runs finds the server tracking nothing,
-// so it closes nothing and the socket stays bound — with the kernel still completing
-// connections into its backlog and no Accept behind them.
-//
-// The order is the other half of it, and it is not interchangeable. Closing the server first
-// marks it as shutting down, so the Accept the goroutine is sitting in — where it spends a
-// daemon's entire lifetime — reports http.ErrServerClosed and serveMetrics stays quiet.
-// Closing the listener first wakes that Accept with a plain "use of closed network
-// connection" while the server still considers itself running, and serveMetrics logs every
-// ordinary shutdown as an error. Measured against net/http directly: 1971 of 2000 shutdowns
-// produced that spurious error with the listener closed first, 0 of 2000 with the server
-// first, and neither order leaked a listener.
-//
-// ErrClosed is ignored rather than logged: Serve closes the listener on its way out too, so
-// whichever of the two gets there second finds it already closed.
+// stopMetricsEndpoint closes the server before the listener, or every shutdown logs an error.
 func (t *Telemetry) stopMetricsEndpoint() {
 	if t.metricsServer != nil {
 		if err := t.metricsServer.Close(); err != nil {
@@ -297,6 +178,7 @@ func (t *Telemetry) stopMetricsEndpoint() {
 		t.metricsServer = nil
 	}
 	if t.metricsListener != nil {
+		// Serve also closes the listener on its way out.
 		if err := t.metricsListener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 			slog.Warn("closing the metrics listener failed", "error", err)
 		}
@@ -304,8 +186,7 @@ func (t *Telemetry) stopMetricsEndpoint() {
 	}
 }
 
-// newResource identifies this process. service.name is what a backend groups by, so
-// it is set explicitly rather than left to the SDK's "unknown_service" fallback.
+// newResource identifies this process by service.name.
 func newResource(serviceName string) (*resource.Resource, error) {
 	res, err := resource.Merge(
 		resource.Default(),

@@ -16,11 +16,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
-// Every test here declares EVERY variable Setup reads, through setTelemetryEnv, and then
-// sets what it needs. Reading one from the ambient environment is how a suite passes
-// locally and fails in CI, or the reverse.
-
-// setTelemetryEnv clears every variable this package reads, for the rest of the test.
 func setTelemetryEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
@@ -33,17 +28,7 @@ func setTelemetryEnv(t *testing.T) {
 	}
 }
 
-// restoreGlobalProviders puts back the tracer and meter providers a test replaces.
-//
-// OTel's global providers delegate ONE WAY: instruments and tracers handed out before a
-// provider was installed stay bound to it. This restores what the getters return, not that
-// delegation, which is why every test that installs a provider must also shut it down —
-// Flush does, for a Telemetry.
-//
-// Each setter is called only when the current provider differs from the one being
-// restored: calling it with the provider that is already current makes OTel log "Setting
-// ... provider to its current value" at ERROR, on every single test in the package that
-// never replaced one to begin with.
+// restoreGlobalProviders skips an unchanged provider: OTel logs resetting one at ERROR.
 func restoreGlobalProviders(t *testing.T) {
 	t.Helper()
 	tracers, meters := otel.GetTracerProvider(), otel.GetMeterProvider()
@@ -57,17 +42,7 @@ func restoreGlobalProviders(t *testing.T) {
 	})
 }
 
-// captureSlog routes slog's default logger to a buffer for the rest of the test and
-// restores both slog's default AND the stdlib log package's writer and flags in cleanup.
-//
-// slog.SetDefault with a non-default handler ALSO redirects the stdlib log package
-// (log.SetOutput, log.SetFlags(0)), so it can bridge log.Print calls through slog.
-// Restoring only slog.Default() leaves that redirection in place: every later test's
-// stdlib log and slog output would go into this test's now-dead buffer.
-//
-// The cleanup also reinstalls OTel's logger against the restored default handler, because
-// otel.SetLogger captures the handler rather than reading slog.Default() per call.
-// Restoring only slog.Default() would leave OTel's logger writing into a dead buffer.
+// captureSlog restores the stdlib log package too: slog.SetDefault also redirects it.
 func captureSlog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var logged bytes.Buffer
@@ -84,11 +59,7 @@ func captureSlog(t *testing.T) *bytes.Buffer {
 	return &logged
 }
 
-// TestCaptureSlogRestoresTheStdlibLogPackage pins captureSlog's restoration of the stdlib
-// log package's writer and flags, not only slog.Default(). It runs captureSlog inside a
-// subtest so the outer t.Cleanup registered by the subtest's *testing.T fires before this
-// test asserts against the log package's state, the same way one test's cleanup runs
-// before the package's next test in a full suite.
+// TestCaptureSlogRestoresTheStdlibLogPackage uses a subtest so its cleanup runs first.
 func TestCaptureSlogRestoresTheStdlibLogPackage(t *testing.T) {
 	wantWriter := log.Writer()
 	wantFlags := log.Flags()
@@ -104,19 +75,12 @@ func TestCaptureSlogRestoresTheStdlibLogPackage(t *testing.T) {
 }
 
 func TestConfigFromEnvDisabledWithoutAnEndpoint(t *testing.T) {
-	// The OTel default endpoint is localhost:4318. Honouring it would make every
-	// developer run without a collector emit a stream of export failures, so an
-	// absent endpoint means off rather than "use the default".
 	setTelemetryEnv(t)
 	cfg := configFromEnv("horopter-ingress")
 	assert.False(t, cfg.tracing)
 	assert.False(t, cfg.otlpMetrics)
 }
 
-// TestConfigFromEnvTracesEndpointEnablesOnlyTracing covers the normal shape when traces
-// and metrics go to different collectors. The signal-specific variable is the one the
-// exporter itself prefers, so gating on the general one alone gave that operator a daemon
-// that started happily and emitted nothing — and it must turn on its own signal only.
 func TestConfigFromEnvTracesEndpointEnablesOnlyTracing(t *testing.T) {
 	setTelemetryEnv(t)
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://collector:4318/v1/traces")
@@ -133,8 +97,6 @@ func TestConfigFromEnvMetricsEndpointEnablesOnlyOTLPMetrics(t *testing.T) {
 	assert.False(t, cfg.tracing, "a metrics endpoint must not turn on tracing")
 }
 
-// OTEL_SDK_DISABLED is a hard off for the signal-specific endpoint too, not only for the
-// general one — the endpoint variables must share every other rule.
 func TestConfigFromEnvSDKDisabledOverridesTheSignalSpecificEndpoint(t *testing.T) {
 	setTelemetryEnv(t)
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://collector:4318/v1/traces")
@@ -179,8 +141,6 @@ func TestConfigFromEnvDisabledAreas(t *testing.T) {
 	assert.False(t, cfg.disabled["store"])
 }
 
-// The OpenTelemetry specification's own defaults, kept deliberately: an operator who knows
-// the specification gets what they expect.
 func TestConfigFromEnvPrometheusDefaults(t *testing.T) {
 	setTelemetryEnv(t)
 	cfg := configFromEnv("horopter-ingress")
@@ -198,13 +158,7 @@ func TestConfigFromEnvPrometheusOverrides(t *testing.T) {
 }
 
 func TestSetupSucceedsWhenEnabled(t *testing.T) {
-	// No collector is listening. The OTLP HTTP exporter connects lazily, so this
-	// exercises provider construction — including the resource merge — without one.
-	//
-	// Setup swallows a tracer provider construction failure by design (see its doc
-	// comment), so the assertion that stands in for "no error" is that the global tracer
-	// provider was replaced: a schema-URL conflict in newResource returns before
-	// otel.SetTracerProvider, and the provider then stays exactly what it was.
+	// Setup only logs a tracer provider failure, so a replaced provider stands in for no error.
 	setTelemetryEnv(t)
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4318")
 	restoreGlobalProviders(t)
@@ -217,14 +171,7 @@ func TestSetupSucceedsWhenEnabled(t *testing.T) {
 	assert.NotSame(t, prev, otel.GetTracerProvider(), "an enabled Setup must install a provider")
 }
 
-// TestSetupHonoursTheDisabledAreasEndToEnd joins the two halves nothing else joins:
-// configFromEnv's parsing of HOROPTER_TRACE_DISABLE and filtered()'s suppression. Each
-// is covered in isolation, so Setup could stop passing cfg.disabled to filtered — this
-// branch's one novel, non-standard feature — with every other test still green.
-//
-// It installs a provider, so it runs before TestInstrumentedPathIsInertWithNoProvider
-// and shuts down what it installs: OTel's global provider delegates ONE WAY, and a
-// shut-down SDK provider handing out noop tracers is what keeps that later test honest.
+// TestSetupHonoursTheDisabledAreasEndToEnd is the only test joining configFromEnv to filtered.
 func TestSetupHonoursTheDisabledAreasEndToEnd(t *testing.T) {
 	setTelemetryEnv(t)
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4318")
@@ -235,9 +182,7 @@ func TestSetupHonoursTheDisabledAreasEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	defer tel.Flush()
 
-	// IsRecording is read BEFORE End: the SDK's recording span reports false once it has
-	// ended, so asserting after End would make the suppressed half pass against a live
-	// span and the surviving half impossible to satisfy.
+	// IsRecording is read before End: an ended SDK span reports false.
 	provider := otel.GetTracerProvider()
 	_, sqlSpan := provider.Tracer("github.com/exaring/otelpgx").
 		Start(context.Background(), "SELECT")
@@ -255,22 +200,7 @@ func TestSetupHonoursTheDisabledAreasEndToEnd(t *testing.T) {
 			"pass the assertion above on its own")
 }
 
-// TestSetupRoutesSDKErrorsThroughSlog pins the error handler. Without it, an export the
-// Collector rejects reaches otel.Handle's default handler and is written to stderr by the
-// stdlib logger — the one failure in these binaries not in the same structured stream as
-// every other, and the one an operator is least likely to have a filter for.
-//
-// It drives installTracing() rather than Setup so the assertion does not depend on which
-// environment variables happen to enable tracing, and it shuts down the provider
-// installTracing leaves behind for the reason TestInstrumentedPathIsInertWithNoProvider
-// documents.
-//
-// The variables are still declared. installTracing() takes an explicit config, so the two
-// switches below are not read on this path — but otlptracehttp.New is, and it builds the
-// exporter from the ambient OTEL_EXPORTER_OTLP_* family. Declaring every variable through
-// setTelemetryEnv matches the other Setup tests, so the file has one shape, and means this
-// test cannot start reading the environment if it is ever switched from installTracing to
-// Setup.
+// TestSetupRoutesSDKErrorsThroughSlog sets the env because otlptracehttp.New reads it.
 func TestSetupRoutesSDKErrorsThroughSlog(t *testing.T) {
 	setTelemetryEnv(t)
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
@@ -292,15 +222,7 @@ func TestSetupRoutesSDKErrorsThroughSlog(t *testing.T) {
 	assert.NoError(t, shutdown(ctx))
 }
 
-// TestSetupRoutesSDKConfigErrorsThroughSlog covers the channel the error handler above
-// does NOT cover, and the one an operator is actually likely to hit.
-//
-// An unparsable endpoint is not an error the exporter returns — otlptracehttp.New reports
-// it through the SDK's internal logger, ignores it and falls back to its defaults, so the
-// log line is the ONLY signal that the collector address was not understood. This drives
-// the real mistake rather than a synthesised one, which is also what pins that the logger
-// is installed before the exporter is built: install it afterwards and the parse error
-// this asserts on has already gone to stderr.
+// TestSetupRoutesSDKConfigErrorsThroughSlog also pins the logger being set before the exporter.
 func TestSetupRoutesSDKConfigErrorsThroughSlog(t *testing.T) {
 	setTelemetryEnv(t)
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "://not a url")
@@ -325,18 +247,11 @@ func TestSetupRoutesSDKConfigErrorsThroughSlog(t *testing.T) {
 }
 
 func TestNewResourceMergesWithoutASchemaConflict(t *testing.T) {
-	// resource.Merge REJECTS two resources carrying different schema URLs, and the
-	// version of the semconv import above is the only thing deciding whether Horopter's
-	// explicit service.name agrees with the one resource.Default() carries. An SDK
-	// upgrade that moves the schema URL breaks every binary's startup here and nowhere
-	// else, so it gets its own assertion. Installs no provider and touches no global.
+	// resource.Merge rejects differing schema URLs, so an SDK upgrade can break startup here.
 	_, err := newResource("horopter-test")
 	require.NoError(t, err, "semconv must match the version resource.Default() uses")
 }
 
-// TestSetupWithSDKDisabledInstallsNothing pins OTEL_SDK_DISABLED as the one switch that
-// turns off every signal, including the meter provider behind /metrics, even with a
-// collector endpoint configured.
 func TestSetupWithSDKDisabledInstallsNothing(t *testing.T) {
 	setTelemetryEnv(t)
 	t.Setenv("OTEL_SDK_DISABLED", "true")
@@ -353,8 +268,6 @@ func TestSetupWithSDKDisabledInstallsNothing(t *testing.T) {
 	assert.Same(t, meters, otel.GetMeterProvider(), "a disabled SDK installs no meter provider")
 }
 
-// TestSetupWithoutAnEndpointInstallsMetricsButNotTracing is the default configuration:
-// tracing needs a collector, and metrics do not, because /metrics is on by default.
 func TestSetupWithoutAnEndpointInstallsMetricsButNotTracing(t *testing.T) {
 	setTelemetryEnv(t)
 	restoreGlobalProviders(t)
@@ -368,11 +281,6 @@ func TestSetupWithoutAnEndpointInstallsMetricsButNotTracing(t *testing.T) {
 	assert.NotSame(t, meters, otel.GetMeterProvider(), "a meter provider is installed by default")
 }
 
-// TestSetupDoesNotFailOnAMalformedOTLPEndpoint pins the half of the failure policy the OTel
-// design enforced through Setup's signature, which returned no error. Setup returns one now,
-// for the Prometheus reader, so "an OTLP problem never aborts startup" is pinned here, with
-// the misconfiguration an operator actually makes. The SDK's ERROR line is captured so it
-// does not land in the test output.
 func TestSetupDoesNotFailOnAMalformedOTLPEndpoint(t *testing.T) {
 	setTelemetryEnv(t)
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "://not a url")
@@ -384,9 +292,7 @@ func TestSetupDoesNotFailOnAMalformedOTLPEndpoint(t *testing.T) {
 	tel.Flush()
 }
 
-// TestFlushIsIdempotent pins that a second Flush does nothing. Shutting a meter provider
-// down twice makes its reader report ErrReaderShutdown, which Flush would otherwise log as a
-// failed flush for work that had already succeeded.
+// TestFlushIsIdempotent: a second meter provider shutdown reports ErrReaderShutdown.
 func TestFlushIsIdempotent(t *testing.T) {
 	setTelemetryEnv(t)
 	restoreGlobalProviders(t)
@@ -401,24 +307,8 @@ func TestFlushIsIdempotent(t *testing.T) {
 		"a second Flush must not report the first one's work as a failure")
 }
 
-// TestInstrumentedPathIsInertWithNoProvider checks that an instrumented call site is
-// safe with no provider installed: it must not panic, allocate a real span, or record.
-//
-// Be honest about what this asserts under a full-package run: OTel's global tracer
-// provider delegates one way, so a provider a sibling test installs is never truly
-// removed from the process. This test passes in-suite only because every test in this
-// package that installs a tracer provider shuts it down — through Telemetry.Flush, a
-// returned shutdown function or a t.Cleanup — and a shut-down SDK provider hands out noop
-// tracers. Test files run in name order, so metrics_test.go's tests run before this one.
-//
-// Run it in isolation
-// (go test -run TestInstrumentedPathIsInertWithNoProvider ./internal/telemetry/) to
-// assert what its name actually claims; in a full-package run it is really asserting
-// "the provider the previous test installed has been shut down."
+// TestInstrumentedPathIsInertWithNoProvider relies, in-suite, on every test shutting down.
 func TestInstrumentedPathIsInertWithNoProvider(t *testing.T) {
-	// No provider installed. This is what every instrumented function in the codebase
-	// does on the default path, so if it panicked or allocated a real span the whole
-	// no-conditionals design would be wrong.
 	_, span := otel.Tracer("horopter/test").Start(context.Background(), "op")
 	span.SetAttributes(attribute.String("horopter.tenant", "acme"))
 	span.End()
