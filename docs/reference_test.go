@@ -1,6 +1,4 @@
-// Package docs holds no code: its tests keep the pages in docs/reference/ complete against the
-// code they describe, failing in both directions — in the code but not documented, and
-// documented but gone.
+// Package docs holds no code: its tests check docs/reference/ against the code, both ways.
 package docs
 
 import (
@@ -27,9 +25,7 @@ import (
 
 const moduleRoot = ".."
 
-// envReaders are the functions a variable's name is passed to: the standard library's, the
-// daemons' and egress's own helpers, and the env func horo and horopter-flux are handed so
-// their tests can supply one. A new way of reading a variable is taught here in its own PR.
+// envReaders are the functions a variable's name is passed to; teach a new one in its own PR.
 var envReaders = []string{"Getenv", "LookupEnv", "envOr", "durationFromEnv", "env"}
 
 // testOnlyVar names variables only the tests read.
@@ -50,8 +46,7 @@ func TestConfigurationListsEveryVariable(t *testing.T) {
 	compare(t, "configuration.md", "variable", inCode, onPage)
 }
 
-// variablesRead returns the string literals f passes to an envReader, and the values of the
-// constants it names …Var, as internal/logging's LevelVar and egress's readMemoryBytesVar are.
+// variablesRead returns the literals f passes to an envReader and the …Var constants it names.
 func variablesRead(f *ast.File) []string {
 	names := firstLiteralArgs(f, func(callee string) bool {
 		return slices.Contains(envReaders, callee)
@@ -71,9 +66,7 @@ func variablesRead(f *ast.File) []string {
 	return names
 }
 
-// firstLiteralArgs returns, for every call in n made by a name match accepts, its first
-// argument that is a string literal: a variable's name, a route's pattern, or an instrument's
-// name, which egress's gauge helper takes after the meter.
+// firstLiteralArgs returns the first string-literal argument of every call match accepts.
 func firstLiteralArgs(n ast.Node, match func(callee string) bool) []string {
 	var found []string
 	ast.Inspect(n, func(n ast.Node) bool {
@@ -127,11 +120,7 @@ func TestHTTPAPIListsEveryRoute(t *testing.T) {
 	compare(t, "http-api.md", "route", inCode, onPage)
 }
 
-// TestHTTPAPIRoutesAreServed sends each documented route to its daemon's real handler. ServeMux
-// answers 404 or 405 itself, before any handler runs, so any other answer means the route
-// exists. No database is needed: every route but the probes refuses a request with no
-// credential first, and readyz, which pings the store, panics on the nil one, which a missing
-// route never does.
+// ServeMux answers 404 or 405 before any handler runs, so any other answer means a route.
 func TestHTTPAPIRoutesAreServed(t *testing.T) {
 	clock := func() time.Time { return time.Unix(0, 0) }
 	authn := auth.New(nil, clock, auth.DefaultOptions())
@@ -159,8 +148,7 @@ func TestHTTPAPIRoutesAreServed(t *testing.T) {
 	}
 }
 
-// serve reports whether h routed the request to a handler, recovering the panic the nil store
-// raises in readyz.
+// serve reports whether h routed the request, recovering the panic readyz's nil store raises.
 func serve(h http.Handler, method, path string) (code int, served bool) {
 	rec := httptest.NewRecorder()
 	defer func() {
@@ -172,8 +160,7 @@ func serve(h http.Handler, method, path string) (code int, served bool) {
 	return rec.Code, rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed
 }
 
-// documentedRoutes reads http-api.md's route table: a route in the first column, its daemon in
-// the second. A route both daemons serve, as the probes are, has a row for each.
+// documentedRoutes reads http-api.md's route table: route, then daemon, a row per daemon.
 func documentedRoutes(t *testing.T) []route {
 	t.Helper()
 	var routes []route
@@ -211,9 +198,7 @@ func TestHoroctlListsEverySubcommand(t *testing.T) {
 	compare(t, "horoctl.md", "subcommand", inCode, commandHeadings(t, "horoctl.md", "horoctl"))
 }
 
-// subcommands expands a CLI's dispatch into its leaf commands. A dispatcher is a function that
-// switches on args[0] and returns a call per case; roots maps each root dispatcher, or each
-// verb a root map dispatches to, to the words before it.
+// subcommands expands a CLI's switch-on-args[0] dispatch into its leaf commands.
 func subcommands(t *testing.T, dir, binary string, roots map[string][]string) map[string]bool {
 	t.Helper()
 	dispatch := dispatchers(t, dir)
@@ -253,8 +238,7 @@ func dispatchers(t *testing.T, dir string) map[string][]dispatchCase {
 	return dispatch
 }
 
-// dispatchCase is one case of a `switch args[0]`: the word, and the function it returns a
-// call to.
+// dispatchCase is one case of a switch on args[0]: the word and the function it calls.
 type dispatchCase struct{ word, handler string }
 
 func switchOnFirstArg(body *ast.BlockStmt) []dispatchCase {
@@ -327,8 +311,7 @@ func compiledIn(t *testing.T) map[string][]string {
 	return roots
 }
 
-// addCompiledIn adds each entry of compiledIn's map literal to roots, failing on any other
-// shape rather than guessing at it.
+// addCompiledIn adds each entry of compiledIn's map literal to roots, failing on other shapes.
 func addCompiledIn(t *testing.T, roots map[string][]string, spec *ast.ValueSpec) {
 	t.Helper()
 	lit, ok := firstValue(spec).(*ast.CompositeLit)
@@ -364,8 +347,7 @@ func firstValue(spec *ast.ValueSpec) ast.Expr {
 	return spec.Values[0]
 }
 
-// commandHeadings returns each heading on page that is a command in a code span, such as
-// ## `horoctl admin keys issue`.
+// commandHeadings returns each heading on page naming a command in a code span.
 func commandHeadings(t *testing.T, page, binary string) map[string]bool {
 	t.Helper()
 	heading := regexp.MustCompile("^#{2,4} `(" + binary + "(?: [a-z][a-z-]*)+)`$")
@@ -378,8 +360,7 @@ func commandHeadings(t *testing.T, page, binary string) map[string]bool {
 	return commands
 }
 
-// instrumentCreators are the calls an instrument's name is passed to: the OpenTelemetry
-// meter's constructors, and egress's gauge helper, which passes its name on to one.
+// instrumentCreators are the meter's constructors and egress's gauge helper.
 var instrumentCreators = regexp.MustCompile(
 	`^((Int64|Float64)(Observable)?(Counter|UpDownCounter|Histogram|Gauge)|gauge)$`)
 
@@ -394,8 +375,7 @@ func TestMetricsListsEveryInstrument(t *testing.T) {
 	compare(t, "metrics.md", "instrument", inCode, onPage)
 }
 
-// compare fails for each name in the code and not on the page, and each on the page and not in
-// the code.
+// compare fails for each name in the code but not on the page, and the reverse.
 func compare(t *testing.T, page, kind string, inCode, onPage map[string]bool) {
 	t.Helper()
 	if len(inCode) == 0 {
@@ -423,8 +403,7 @@ func sortedKeys(m map[string]bool) []string {
 	return keys
 }
 
-// tableKeys returns the first cell of every table row on page that is a code span whose text
-// matches key.
+// tableKeys returns each table row's first cell that is a code span matching key.
 func tableKeys(t *testing.T, page string, key *regexp.Regexp) map[string]bool {
 	t.Helper()
 	keys := map[string]bool{}
@@ -472,8 +451,7 @@ func readPage(t *testing.T, page string) string {
 	return string(b)
 }
 
-// parseModule parses every non-test Go file in the module, skipping hidden directories, which
-// hold worktrees and tool state rather than the module's code.
+// parseModule parses every non-test Go file, skipping hidden directories such as worktrees.
 func parseModule(t *testing.T) []*ast.File {
 	t.Helper()
 	var files []*ast.File
