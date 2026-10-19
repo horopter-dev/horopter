@@ -9,10 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestFoldLifecycleTransitions walks every cell of transitions and asserts what folding
-// through it produces. Driving off the real table rather than a copy is the point: a cell
-// added to transitions with no case here fails the exhaustiveness check at the bottom,
-// where a hand-written list would simply not mention it.
+// TestFoldLifecycleTransitions asserts every cell of transitions, walking the table for coverage.
 func TestFoldLifecycleTransitions(t *testing.T) {
 	at := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
 	later := at.Add(time.Hour)
@@ -27,18 +24,14 @@ func TestFoldLifecycleTransitions(t *testing.T) {
 		return Event{ID: id, Tenant: "t", Type: typ, Source: "ci", Subject: "s",
 			OccurredAt: when, Locus: LocusFromRow("ci"), Lifecycle: lc}
 	}
-	// opened and closed reach the two states through the ordinary fold, not by
-	// constructing a Change by hand — a hand-built state can be one no fold produces.
+	// Reached through the ordinary fold: a hand-built state can be one no fold produces.
 	opened := func() Change { return Fold(nil, corr("01A", "deployment.started", "", at)) }
 	closed := func() Change {
 		c := opened()
 		return Fold(&c, corr("01B", "deployment.completed", "", at.Add(time.Minute)))
 	}
 
-	// Expectations are written by HAND, not read from transitions. Reading the cell to
-	// decide what to assert would make the test a tautology: mutating a cell would move
-	// the expectation and the behaviour together and nothing would fail. The table is
-	// walked below for COVERAGE only.
+	// Expectations are written by hand: reading them from the cell would be a tautology.
 	cases := map[string]struct {
 		state      changeState
 		assert     assertion
@@ -66,9 +59,7 @@ func TestFoldLifecycleTransitions(t *testing.T) {
 		"open/none-standalone-explicit": {stateOpen, assertsNothingStandalone, nil,
 			alone("01H", "deployment.started", LifecycleNone, later),
 			StatusOccurred, true, false},
-		// wantStart is TRUE: the prior fold opened the change with a start assertion, and
-		// this cell's minStart is false, so foldLifecycle leaves StartedAt exactly as it
-		// found it — set. Every prior that reaches a state carries its own effects in.
+		// wantStart is true: the prior fold set StartedAt and this cell leaves it alone.
 		"open/none-correlated": {stateOpen, assertsNothingCorrelated, opened,
 			corr("01I", "deployment.annotated", "", later),
 			StatusInProgress, false, true},
@@ -107,8 +98,7 @@ func TestFoldLifecycleTransitions(t *testing.T) {
 		})
 	}
 
-	// Coverage, and ONLY coverage, is read from the table. A cell with a rule and no case
-	// is a rule nobody exercised.
+	// Coverage, and only coverage, is read from the table.
 	for st := changeState(0); st < numStates; st++ {
 		for a := assertion(0); a < numAssertions; a++ {
 			if transitions[st][a].status == unreachable {
@@ -120,14 +110,7 @@ func TestFoldLifecycleTransitions(t *testing.T) {
 	}
 }
 
-// TestFoldStatusForLifecycleIsTotalOverLifecycles folds a standalone event carrying each
-// value in core.Lifecycles and asserts the resulting Change.Status is always one of
-// core.Statuses. statusForLifecycle enumerates four terminal values and returns "" for
-// anything else, calling that unreachable — but nothing pinned it as total over Lifecycles
-// until this test: classify routes every Lifecycle that is not Started, None or Unspecified
-// to assertsTerminal with statusForLifecycle(ev.Lifecycle), so an eighth Lifecycle added to
-// core.Lifecycles without a matching case here would fold to Status == "", and
-// migration 0002's change_status_vocabulary CHECK would reject it on the next append.
+// TestFoldStatusForLifecycleIsTotalOverLifecycles keeps every Lifecycle folding to a Status.
 func TestFoldStatusForLifecycleIsTotalOverLifecycles(t *testing.T) {
 	at := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
 	for _, lc := range Lifecycles {
@@ -139,13 +122,7 @@ func TestFoldStatusForLifecycleIsTotalOverLifecycles(t *testing.T) {
 	}
 }
 
-// TestFoldLifecycleCommutativeCellsAgreeInBothOrders enforces cell.commutative rather than
-// leaving it a comment with extra syntax. A cell claiming commutativity that nothing folds
-// backwards is a claim nobody checked.
-//
-// One pair per claiming cell, and the coverage loop at the bottom reads .commutative from
-// the table — so a cell that starts claiming it without gaining a pair here fails, and the
-// terminal cells are excluded by the field rather than by a list that can drift.
+// TestFoldLifecycleCommutativeCellsAgreeInBothOrders folds each commutative cell both ways.
 func TestFoldLifecycleCommutativeCellsAgreeInBothOrders(t *testing.T) {
 	at := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
 	later := at.Add(time.Hour)
@@ -206,13 +183,7 @@ func TestFoldLifecycleCommutativeCellsAgreeInBothOrders(t *testing.T) {
 		})
 	}
 
-	// open/none-standalone does not fit the forward/backward shape above: folding a
-	// standalone none-assertion sets End (setsEnd is true even in the open cell), so a
-	// second, DISTINCT standalone-none event folded after the first never lands in this
-	// same cell again — it lands in stateClosed, a different cell entirely. The only
-	// event that can ever reach this cell twice is the SAME event id replayed onto its
-	// own change, which makes the claim here idempotence, not commutativity: folding x
-	// again must reproduce the change folding it once already produced.
+	// open/none-standalone recurs only as the same event replayed, so it claims idempotence.
 	seen[[2]int{int(stateOpen), int(assertsNothingStandalone)}] = true
 	t.Run("open/none-standalone", func(t *testing.T) {
 		require.True(t, transitions[stateOpen][assertsNothingStandalone].commutative,
@@ -223,11 +194,7 @@ func TestFoldLifecycleCommutativeCellsAgreeInBothOrders(t *testing.T) {
 		once := Fold(nil, x)
 		twice := Fold(&once, x)
 
-		// Replaying x is what reaches transitions[stateClosed][assertsNothingStandalone]:
-		// once.End is already set, so the second fold sees stateClosed, and that cell is
-		// the zero value — unreachable — which is the ONLY thing that keeps a replayed
-		// event from re-triggering the open cell's effects a second time. If that cell
-		// stopped being unreachable, twice would diverge from once.
+		// The replay lands in the unreachable closed cell, which keeps twice equal to once.
 		assert.Equal(t, once.Status, twice.Status,
 			"folding the same event again must not change the status it already set")
 		assert.Equal(t, once.End, twice.End,
@@ -248,10 +215,7 @@ func TestFoldLifecycleCommutativeCellsAgreeInBothOrders(t *testing.T) {
 	}
 }
 
-// TestClassifyLetsAnAssertionOverrideTheTypesSuffix is explicit-beats-convention in the
-// direction that matters: the producer's own vocabulary says this event CLOSED the change,
-// and the explicit assertion says it opened one. The assertion wins, and the suffix is
-// never consulted — which is what makes the field an override rather than a tiebreak.
+// TestClassifyLetsAnAssertionOverrideTheTypesSuffix: an explicit start beats a closing suffix.
 func TestClassifyLetsAnAssertionOverrideTheTypesSuffix(t *testing.T) {
 	e := Event{ID: "01A", Tenant: "t", Type: "deployment.completed", Source: "ci",
 		Subject: "s", OccurredAt: time.Now(), Locus: LocusFromRow("ci"),
@@ -261,9 +225,7 @@ func TestClassifyLetsAnAssertionOverrideTheTypesSuffix(t *testing.T) {
 	assert.Empty(t, asserted, "a start asserts no terminal status")
 }
 
-// TestClassifyTreatsLifecycleAndIdentityAsOrthogonal is the spec's whole thesis in one
-// assertion: an assertion means the same thing whether or not a correlation ref came with
-// it, and a correlated "none" is in flight rather than a point.
+// TestClassifyTreatsLifecycleAndIdentityAsOrthogonal: a correlated none is in flight.
 func TestClassifyTreatsLifecycleAndIdentityAsOrthogonal(t *testing.T) {
 	base := Event{ID: "01A", Tenant: "t", Type: "config.changed", Source: "ci",
 		Subject: "s", OccurredAt: time.Now(), Locus: LocusFromRow("ci"),

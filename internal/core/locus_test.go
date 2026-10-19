@@ -15,8 +15,7 @@ func TestNewLocusAcceptsAPlainName(t *testing.T) {
 	assert.False(t, l.IsZero())
 }
 
-// A locus containing "/" would make <locus>/<ref> unsplittable, which is the one property
-// every ref in the system rests on. This is the rule the type exists to hold.
+// A slash in a locus would make <locus>/<ref> unsplittable.
 func TestNewLocusRejectsASlash(t *testing.T) {
 	_, err := core.NewLocus("a/b")
 	require.Error(t, err)
@@ -28,8 +27,7 @@ func TestNewLocusRejectsEmpty(t *testing.T) {
 	require.Error(t, err)
 }
 
-// The zero Locus is the uninitialised one, as TenantID's is. It is not a valid locus and
-// must not render as one.
+// The zero Locus is uninitialised, not valid, and must not render as one.
 func TestZeroLocusIsZeroAndRendersEmpty(t *testing.T) {
 	var l core.Locus
 	assert.True(t, l.IsZero())

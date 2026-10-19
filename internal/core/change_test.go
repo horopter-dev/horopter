@@ -20,8 +20,7 @@ func TestChangeShapes(t *testing.T) {
 	point := core.Change{Start: start, End: &start, Status: core.StatusOccurred}
 	open := core.Change{Start: start, End: nil, Status: core.StatusInProgress}
 	closed := core.Change{Start: start, End: &end, Status: core.StatusCompleted}
-	// A same-second start/complete pair: End equals Start exactly as a point's does,
-	// which is why status and not timestamp equality is what identifies a point.
+	// A same-second start/complete has End == Start, so equal timestamps do not identify a point.
 	zeroDuration := core.Change{Start: start, End: &start, Status: core.StatusCompleted}
 
 	assert.False(t, point.IsOpen())

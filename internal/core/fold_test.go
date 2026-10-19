@@ -11,9 +11,7 @@ import (
 	"horopter.dev/horopter/internal/core"
 )
 
-// ev builds the event Fold sees, which is one read back out of the log — so its ref and
-// locus are built the way a scan builds them, through the FromRow constructors, rather
-// than through the composing ones a producer's input goes through.
+// ev builds an event as a scan reads it back, through the FromRow constructors.
 func ev(id, corr, typ string, at time.Time) core.Event {
 	return core.Event{
 		ID: id, Tenant: "default", SchemaVersion: 1,
@@ -55,8 +53,7 @@ func TestFoldEventWithoutCorrelationRefIsAPoint(t *testing.T) {
 }
 
 func TestFoldOutOfOrderFinishBeforeStart(t *testing.T) {
-	// The terminal event arrives first. Start must fall back to the earliest
-	// occurred_at seen, then be corrected when the real start arrives.
+	// The terminal event arrives first, so Start falls back until the real start arrives.
 	c := core.Fold(nil, ev("01B", "dep-7", "deployment.completed", t20))
 	assert.Equal(t, t20, c.Start, "a change must never exist without a start")
 	assert.Equal(t, core.StatusCompleted, c.Status)
@@ -88,23 +85,7 @@ func TestFoldTitleFallsBackToType(t *testing.T) {
 	assert.Equal(t, "API v2.5.0", core.Fold(nil, e).Title)
 }
 
-// TestFoldIsPure must actually be capable of failing. base carries a
-// non-empty attribute map with a key the second event overwrites, so an
-// implementation that shares (rather than clones) cur's attribute map is
-// caught by comparing a pre-fold clone against base.Attributes afterwards.
-// x and y are compared as whole structs, not field-by-field, so a divergence
-// in any of Change's fields fails the test.
-//
-// The second event is a start-type carrying an EARLIER occurred_at, which is
-// the one input that makes foldLifecycle write StartedAt on a change that
-// already has one. out.StartedAt is a pointer copied wholesale from cur, so an
-// implementation that wrote through it (*out.StartedAt = ev.OccurredAt)
-// instead of assigning a fresh &at would reach back into the caller's Change
-// and silently rewrite it. Comparing x against y cannot catch that — both
-// would hold the same mutated pointer — so base.StartedAt is captured by VALUE
-// beforehand and asserted afterwards. With a terminal second event, as this
-// test used to have, that branch is never entered and the pointer is never
-// exercised at all.
+// TestFoldIsPure checks that cur's attribute map and StartedAt pointee survive an earlier start.
 func TestFoldIsPure(t *testing.T) {
 	a := ev("01A", "dep-7", "deployment.started", t20)
 	a.Attributes = map[string]any{"service.version": "2.4.0"}
@@ -139,11 +120,7 @@ func TestFoldIsPure(t *testing.T) {
 			"aliasing check above meaningful")
 }
 
-// A terminal event folded onto a change that already has a non-nil End
-// must assign a fresh *time.Time, not write through the copied pointer. If it
-// wrote through (*out.End = ev.OccurredAt), the earlier change's End would be
-// mutated in place, since `out = *cur` copies the pointer value, not the
-// pointee.
+// A terminal event must not write through the End pointer copied from cur.
 func TestFoldTerminalEventReplacesEndWithFreshPointer(t *testing.T) {
 	c := core.Fold(nil, ev("01A", "dep-7", "deployment.started", t10))
 	c = core.Fold(&c, ev("01B", "dep-7", "deployment.completed", t20))
@@ -159,12 +136,7 @@ func TestFoldTerminalEventReplacesEndWithFreshPointer(t *testing.T) {
 	assert.Equal(t, t20, *c.End, "the prior change value must remain untouched")
 }
 
-// Fold(nil, ev) and Fold(&Change{}, ev) must converge on identical output for the
-// same event sequence. Accumulating into a map[core.Ref]core.Change invites the spelling
-// `c := m[ref]; m[ref] = Fold(&c, ev)`, which passes a zero-value *Change rather than
-// nil for the first event of a ref; foldEventLog in internal/store/postgres passes nil.
-// Both must agree, or a rebuild and the incremental append path would disagree about
-// every ref's first event.
+// A map accumulator passes a zero Change where foldEventLog passes nil; both must agree.
 func TestFoldNilAndZeroValueCurConverge(t *testing.T) {
 	events := []core.Event{
 		ev("01A", "", "config.changed", t10),            // point
@@ -197,9 +169,7 @@ func TestFoldNilAndZeroValueCurConverge(t *testing.T) {
 		"Fold(nil, ev) and Fold(&Change{}, ev) must produce identical projections")
 }
 
-// A .started and a .completed at the same timestamp is a zero-duration
-// closed interval, not a point. Only the no-correlation-ref path produces a
-// point.
+// A same-time start and finish is a zero-duration interval, not a point.
 func TestFoldZeroDurationClosedIntervalIsNotAPoint(t *testing.T) {
 	c := core.Fold(nil, ev("01A", "dep-7", "deployment.started", t10))
 	c = core.Fold(&c, ev("01B", "dep-7", "deployment.completed", t10))
@@ -222,10 +192,7 @@ func TestRefFor(t *testing.T) {
 		"a point's ref is its locus and its own event id, so there is one ref shape")
 }
 
-// Pins the full v0.1 terminal vocabulary, including resolved/closed/done/ended
-// -> completed, aborted -> cancelled and errored/timed_out -> failed, plus
-// non-terminal types and a three-segment type to exercise the last-dot-segment
-// rule.
+// Pins the v0.1 terminal vocabulary and the last-dot-segment rule.
 func TestStatusForTypeTerminalVocabulary(t *testing.T) {
 	tests := []struct {
 		typ      string
@@ -262,11 +229,7 @@ func TestStatusForTypeTerminalVocabulary(t *testing.T) {
 	}
 }
 
-// A correlated event that is neither a start nor a terminal type must still leave a
-// queryable status. Before this, neither branch fired and Status stayed "", which wrote
-// a row QueryChanges could not select (it reads an empty Status as "no filter") and
-// which, with End nil, rendered as an interval growing to the year 9999. A change has
-// three shapes and admits no fourth, so such an event means "in flight".
+// A correlated non-terminal event once left Status empty: unselectable, and open until 9999.
 func TestFoldCorrelatedNonTerminalIsInProgress(t *testing.T) {
 	for _, typ := range []string{
 		"incident.declared",
@@ -284,10 +247,7 @@ func TestFoldCorrelatedNonTerminalIsInProgress(t *testing.T) {
 	}
 }
 
-// The in-progress default must not reopen a change that already reached a terminal
-// status. A late annotation on a finished deployment is ordinary traffic, and rewriting
-// its outcome to in_progress while End stays set would be a worse corruption than the
-// empty status it replaced.
+// A late annotation must not reopen a change that already reached a terminal status.
 func TestFoldNonTerminalAfterTerminalKeepsTheOutcome(t *testing.T) {
 	c := core.Fold(nil, ev("01A", "dep-7", "deployment.started", t10))
 	c = core.Fold(&c, ev("01B", "dep-7", "deployment.completed", t20))
@@ -299,9 +259,7 @@ func TestFoldNonTerminalAfterTerminalKeepsTheOutcome(t *testing.T) {
 	assert.Equal(t, t20, *c.End, "the recorded end must survive the annotation")
 }
 
-// Start falls back to the EARLIEST occurred_at seen for the ref, not the first one. The
-// implementation used to keep the FIRST FOLDED one, which differs precisely when a
-// later non-start, non-terminal event carries an earlier timestamp — the case below.
+// Start falls back to the earliest occurred_at, not the first folded one.
 func TestFoldStartFallsBackToTheEarliestOccurredAt(t *testing.T) {
 	c := core.Fold(nil, ev("01B", "dep-7", "deployment.completed", t20))
 	require.Equal(t, t20, c.Start, "precondition: the only event so far sets the fallback")
@@ -317,11 +275,7 @@ func TestFoldStartFallsBackToTheEarliestOccurredAt(t *testing.T) {
 	assert.Equal(t, t30, c.Start, "the real start must overwrite the fallback, not be min'd with it")
 }
 
-// The case the two-fact start model was introduced to fix: a stray annotation carrying a
-// timestamp EARLIER than the change's declared start used to drag the recorded start
-// backwards behind the event that authoritatively declared it — silently, and only in one
-// of the two arrival orders. The assertion must win, and the earlier evidence must still
-// be recorded rather than destroyed.
+// An earlier stray annotation must not move an asserted start, but is still recorded.
 func TestFoldAnAssertedStartSurvivesALaterEventCarryingAnEarlierTime(t *testing.T) {
 	c := core.Fold(nil, ev("01A", "dep-7", "deployment.started", t20))
 	require.NotNil(t, c.StartedAt)
@@ -338,11 +292,7 @@ func TestFoldAnAssertedStartSurvivesALaterEventCarryingAnEarlierTime(t *testing.
 			"anomaly worth auditing, and a single start field destroyed it")
 }
 
-// A ref carrying more than one start-type event takes the EARLIEST assertion. The
-// two-fact start model reasons from the assertion being idempotent, which holds for one
-// .started and fails for two with different timestamps: last-folded-wins would make a
-// rebuild (id order) and a live append (arrival order) disagree. Minimum is commutative,
-// so taking it is what keeps that property true.
+// Two start events take the earliest, which a rebuild reproduces and last-folded does not.
 func TestFoldEarliestStartAssertionWins(t *testing.T) {
 	later := core.Fold(nil, ev("01A", "dep-7", "deployment.started", t30))
 	later = core.Fold(&later, ev("01B", "dep-7", "deployment.started", t10))
@@ -375,17 +325,7 @@ func permutations(events []core.Event) [][]core.Event {
 	return out
 }
 
-// Folding the same set of events in ANY order must produce the same StartedAt,
-// FirstSeenAt and Start. This is the property that makes RebuildProjection meaningful —
-// a rebuild replays in id order while a live append folds in arrival order, and the two
-// must converge — and it is the property the two-fact start model rests on. Both facts are
-// minima, which is what makes it hold; a rule that let the last-folded start win would
-// fail here on the two .started events alone.
-//
-// Only the three start fields are asserted. Title, Type, Actor, Subject, Status, End,
-// Attributes and LastEventID are genuinely last-folded-wins and are expected to differ
-// between orderings; asserting the whole struct would fail for reasons this test is not
-// about.
+// Every fold order must agree on the start fields; the others are last-folded and may differ.
 func TestFoldStartFactsAreInsensitiveToFoldOrder(t *testing.T) {
 	t40 := time.Date(2026, 9, 14, 10, 40, 0, 0, time.UTC)
 	events := []core.Event{
@@ -422,14 +362,7 @@ func TestFoldStartFactsAreInsensitiveToFoldOrder(t *testing.T) {
 	}
 }
 
-// A later event carrying no actor must not erase the one already recorded. Actor is
-// optional on both ingest paths — omitted from a native request body, or absent from a
-// CloudEvent's data payload — so an actorless follow-up event is ordinary traffic, and an
-// unconditional assignment blanked change.actor as soon as one arrived, in the live and
-// the rebuild path alike. Title carries the same hazard and is guarded against it in Fold.
-//
-// No existing test could catch this: the ev() helper gives every fixture the same
-// non-empty actor, so last-wins and last-non-empty-wins are indistinguishable under it.
+// An actorless event once erased the recorded actor; ev() hid it by always setting one.
 func TestFoldPreservesActorAgainstAnEventCarryingNone(t *testing.T) {
 	named := ev("01A", "dep-7", "deployment.started", t10)
 	named.Actor = "alice"
@@ -442,17 +375,13 @@ func TestFoldPreservesActorAgainstAnEventCarryingNone(t *testing.T) {
 	assert.Equal(t, "alice", c.Actor,
 		"an event carrying no actor must not erase the recorded one")
 
-	// The unconditional assignment also made Actor depend on fold order: named-then-
-	// anonymous yielded "", anonymous-then-named yielded "alice". A rebuild folds in id
-	// order and a live append in arrival order, so the two could disagree about actor.
+	// The unconditional assignment also made Actor depend on fold order.
 	rev := core.Fold(nil, anonymous)
 	rev = core.Fold(&rev, named)
 	assert.Equal(t, c.Actor, rev.Actor, "Actor must not depend on fold order")
 }
 
-// A later event that does name an actor still replaces the earlier one: the rule is
-// last-non-empty-wins, not first-wins. Without this, a fix for the erasure above could
-// freeze the first actor a ref ever saw and silently stop recording handovers.
+// Last non-empty, not first: a later actor still records a handover.
 func TestFoldLaterNonEmptyActorWins(t *testing.T) {
 	first := ev("01A", "dep-7", "deployment.started", t10)
 	first.Actor = "alice"
@@ -464,14 +393,7 @@ func TestFoldLaterNonEmptyActorWins(t *testing.T) {
 	assert.Equal(t, "bob", c.Actor, "a later event naming an actor replaces the earlier one")
 }
 
-// The same failure as the actor case, on Title. An unconditional assignment does not
-// merely blank a recorded title — the empty-title fallback then substitutes the LATER
-// event's raw type, so "Deploy v2.5.0 to prod" becomes "deployment.annotated". That is
-// worse than an empty field: it is a plausible-looking wrong answer, and it reaches the
-// egress JSON, the Grafana annotation title and the OTLP span name.
-//
-// Title is optional on both ingest paths, so a titleless follow-up event is the common
-// case rather than an edge case.
+// A titleless event once replaced a recorded title with its own type.
 func TestFoldPreservesTitleAgainstAnEventCarryingNone(t *testing.T) {
 	titled := ev("01A", "dep-7", "deployment.started", t10)
 	titled.Title = "Deploy v2.5.0 to prod"
@@ -490,8 +412,7 @@ func TestFoldPreservesTitleAgainstAnEventCarryingNone(t *testing.T) {
 	assert.Equal(t, c.Title, rev.Title, "Title must not depend on fold order")
 }
 
-// The type fallback still applies when no event has ever carried a title, so a change
-// always renders with something rather than an empty string.
+// With no title ever, the type fallback applies so a change always renders as something.
 func TestFoldTitleStillFallsBackToTypeWhenNoEventTitlesIt(t *testing.T) {
 	untitled := ev("01A", "dep-7", "deployment.started", t10)
 	untitled.Title = ""
@@ -501,10 +422,7 @@ func TestFoldTitleStillFallsBackToTypeWhenNoEventTitlesIt(t *testing.T) {
 		"with no title recorded, the event's own type is the fallback")
 }
 
-// A later event that DOES carry a title replaces the earlier one.
-// TestFoldLaterNonEmptyTitleWins pins the fallback rule, which applies when no start event has
-// a title: here neither event is a start. A titled start takes precedence over both
-// (TestFoldTitlesAChangeByItsStart).
+// TestFoldLaterNonEmptyTitleWins pins the fallback rule, used when no start carries a title.
 func TestFoldLaterNonEmptyTitleWins(t *testing.T) {
 	first := ev("01A", "dep-7", "deployment.progressed", t10)
 	first.Title = "Deploy v2.5.0"
@@ -516,10 +434,7 @@ func TestFoldLaterNonEmptyTitleWins(t *testing.T) {
 	assert.Equal(t, "Deploy v2.5.1", c.Title)
 }
 
-// TestFoldUnionsSourcesWhateverTheOrder pins the rule that makes a source set safe to
-// project: it is a union, so folding a ref's events in either order gives the same answer.
-// Last-wins did not have this property, which is why source used to appear in rebuild.go's
-// list of fields a rebuild can move.
+// TestFoldUnionsSourcesWhateverTheOrder pins sources as a union, which a rebuild reproduces.
 func TestFoldUnionsSourcesWhateverTheOrder(t *testing.T) {
 	at := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
 	ci := core.Event{
@@ -544,8 +459,7 @@ func TestFoldUnionsSourcesWhateverTheOrder(t *testing.T) {
 		"a union is commutative, so replay order cannot change the answer")
 }
 
-// TestFoldDoesNotRepeatASource keeps the set a set: the common case is many events from one
-// system, and an array that grew per event would be unbounded.
+// TestFoldDoesNotRepeatASource keeps the set a set, since most events come from one system.
 func TestFoldDoesNotRepeatASource(t *testing.T) {
 	at := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
 	ev := func(id string) core.Event {

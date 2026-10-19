@@ -79,8 +79,7 @@ func TestSubjectPatternsRefuseMalformedAndPathological(t *testing.T) {
 	}
 }
 
-// FuzzSubjectPatternAgreesWithPathMatch makes path.Match the oracle for every brace-free
-// pattern: the translation must accept exactly what the credential matcher accepts.
+// FuzzSubjectPatternAgreesWithPathMatch uses path.Match as the oracle for brace-free patterns.
 func FuzzSubjectPatternAgreesWithPathMatch(f *testing.F) {
 	for _, s := range [][2]string{{"*/a/*", "K/a/n"}, {"[^a]", "/"}, {`\*`, "*"}, {"a.b", "axb"},
 		{"[[:digit:]]", "d]"}, {"[=a=]", "="}} {
@@ -89,10 +88,7 @@ func FuzzSubjectPatternAgreesWithPathMatch(f *testing.F) {
 	f.Fuzz(agreesWithPathMatch)
 }
 
-// outsideTheOracle reports inputs path.Match cannot judge: braces are this package's
-// extension, invalid UTF-8 is refused before translation, and path.Match's * backtracks
-// through a subject byte by byte, so against a multi-byte rune it can match ? to a fragment of
-// one ("*??" matches the single rune U+16E16). The regexp matches by rune, which is right.
+// outsideTheOracle reports inputs path.Match cannot judge: braces, bad UTF-8, multi-byte runes.
 func outsideTheOracle(pattern, subject string) bool {
 	return strings.ContainsAny(pattern, "{}") || pattern == "" || subject == "" ||
 		!utf8.ValidString(pattern) || (strings.Contains(pattern, "*") && !isASCII(subject))
@@ -127,8 +123,7 @@ func agreesWithPathMatch(t *testing.T, pattern, subject string) {
 	assert.Equal(t, want, re.MatchString(subject), "%q ~ %q via %s", pattern, subject, p.Regexp())
 }
 
-// TestSubjectPatternsCollapseStarRuns: ** means what * means within a segment, and a run of
-// stars is what made Postgres spend seconds compiling one pattern.
+// TestSubjectPatternsCollapseStarRuns: a run of stars made Postgres spend seconds compiling.
 func TestSubjectPatternsCollapseStarRuns(t *testing.T) {
 	many, err := ParseSubjectPatterns([]string{"a" + strings.Repeat("*", 500) + "b"})
 	require.NoError(t, err)
@@ -137,9 +132,7 @@ func TestSubjectPatternsCollapseStarRuns(t *testing.T) {
 	assert.Equal(t, one.Regexp(), many.Regexp())
 }
 
-// TestSubjectPatternsRefuseARegexpPostgresWouldNotCompile: every alternative is within the
-// per-pattern limits, but together they would exceed Postgres's regex complexity limit, which
-// it reports as an error the caller would see as a 500.
+// TestSubjectPatternsRefuseARegexpPostgresWouldNotCompile: Postgres would answer it with a 500.
 func TestSubjectPatternsRefuseARegexpPostgresWouldNotCompile(t *testing.T) {
 	_, err := ParseSubjectPatterns([]string{strings.Repeat("{a,b}", 6) + strings.Repeat("x", 900)})
 	assert.ErrorIs(t, err, ErrBadSubjectPattern)

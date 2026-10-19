@@ -34,10 +34,7 @@ func TestValidateAcceptsValidEvent(t *testing.T) {
 	require.NoError(t, validEvent().Validate())
 }
 
-// TestValidateAcceptsEveryLifecycle is the other half of the refusal rows: it pins
-// core.Lifecycles to what Validate admits, so a value added to the slice without being
-// admitted — or admitted without being in the slice — fails here rather than at the first
-// insert.
+// TestValidateAcceptsEveryLifecycle pins core.Lifecycles to what Validate admits.
 func TestValidateAcceptsEveryLifecycle(t *testing.T) {
 	for _, lc := range core.Lifecycles {
 		t.Run(string(lc), func(t *testing.T) {
@@ -48,13 +45,7 @@ func TestValidateAcceptsEveryLifecycle(t *testing.T) {
 	}
 }
 
-// TestValidateRejectsMissingFields checks that each required field's failure names that
-// field back to the caller.
-//
-// want is the fragment the field's own branch produces, and for the id it is NOT the
-// word "id". "id" appears in ErrInvalidEvent's own text — inval·id — and in the
-// "not-a-ulid" fixture, so asserting on it passes whatever Validate reports and whichever
-// branch produced it. "26-character ULID" appears only in the id branch.
+// TestValidateRejectsMissingFields checks each failure names its field; "invalid" contains "id".
 func TestValidateRejectsMissingFields(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -88,8 +79,7 @@ func TestValidateRejectsMissingFields(t *testing.T) {
 }
 
 func TestNewULIDIsSortableByTime(t *testing.T) {
-	//nolint:gosec // G404: the fixed seed is what makes this determinism test deterministic;
-	// crypto/rand would defeat the assertion. Test-only, never reached by production code.
+	//nolint:gosec // G404: a fixed seed is what makes this determinism test deterministic.
 	src := rand.New(rand.NewSource(1))
 	early := core.NewULID(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), src)
 	late := core.NewULID(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC), src)
@@ -97,27 +87,7 @@ func TestNewULIDIsSortableByTime(t *testing.T) {
 	assert.Len(t, early, 26)
 }
 
-// TestValidateFailuresAreInvalidEvent pins the taxonomy every caller branches on. A
-// validation failure that forgets to wrap ErrInvalidEvent is not a compile error and
-// changes no message, so nothing else would notice — but ingress would silently start
-// answering it 503 and telling the producer to retry a body that can never be accepted.
-// Each case names a different required field so a single missing wrap is caught rather
-// than masked by the others.
-//
-// wantIn is carried separately from the subtest name because for the id they differ.
-// Asserting the message contains "id" asserts nothing: ErrInvalidEvent's own text is
-// "invalid event" — inval·id — and the fixture is "not-a-ulid", so that assertion holds
-// whichever branch fired and whatever it said. "26-character ULID" is produced by the id
-// branch alone.
-//
-// There is no case for a locus containing "/", and it is not that the type makes one
-// unconstructible: core.LocusFromRow does not validate, so core.LocusFromRow("a/b") mints
-// one from outside core today. The rule moved to core.NewLocus, where
-// TestNewLocusRejectsASlash pins it, and what keeps a slash-bearing locus out of a
-// production event is auth.ValidateLocus at issue time plus credential_locus_shape
-// (migration 0004) at write time — a cross-file invariant that core.Event.validateLocus
-// records. Validate is left with the one thing no constructor can settle: an event that
-// never had a locus set.
+// TestValidateFailuresAreInvalidEvent: an unwrapped failure would be answered 503 and retried.
 func TestValidateFailuresAreInvalidEvent(t *testing.T) {
 	valid := core.Event{
 		ID:     "01J0000000000000000000000A",
@@ -157,8 +127,7 @@ func TestValidateFailuresAreInvalidEvent(t *testing.T) {
 	}
 }
 
-// TestCheckAttributeSize pins the measure the ingest cap uses. Every size below is counted by
-// hand from the JSON text in the comment beside it, not computed by the code under test.
+// TestCheckAttributeSize pins the cap's measure; each size is counted by hand from its JSON.
 func TestCheckAttributeSize(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -176,8 +145,7 @@ func TestCheckAttributeSize(t *testing.T) {
 		// {"a":{"b":[1,2]}} is 1+3+1+1+3+1+5+1+1 = 17 bytes.
 		{"nested values count", map[string]any{"a": map[string]any{"b": []any{1, 2}}}, 16,
 			"attributes encode to 17 bytes of JSON; the limit is 16"},
-		// {"t":"a&b"} is 1+3+1+5+1 = 11 bytes. Escaped for HTML, & would be & and the
-		// total 16, counting five bytes the producer never sent.
+		// {"t":"a&b"} is 1+3+1+5+1 = 11 bytes; HTML escaping would make & six bytes.
 		{"ampersand counts once", map[string]any{"t": "a&b"}, 11, ""},
 		{"unencodable value", map[string]any{"x": math.Inf(1)}, 1024,
 			"attributes cannot be encoded as JSON"},
@@ -196,8 +164,7 @@ func TestCheckAttributeSize(t *testing.T) {
 	}
 }
 
-// TestCheckAttributeSizeTellsTheProducerWhatToDo pins the whole message: a producer reading
-// the 400 has nothing else to go on.
+// TestCheckAttributeSizeTellsTheProducerWhatToDo pins the whole message the producer reads.
 func TestCheckAttributeSizeTellsTheProducerWhatToDo(t *testing.T) {
 	e := validEvent()
 	e.Attributes = map[string]any{"k": "xxxx"}
