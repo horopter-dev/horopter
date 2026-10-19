@@ -78,7 +78,7 @@ func migrationNames() ([]string, error) {
 	return names, nil
 }
 
-// A pre-ledger backup needs ledger rows inserted by hand: 0002 and 0003 are not idempotent.
+// A ledger behind the schema cannot migrate; recovery is in docs/reference/known-limits.md.
 func readLedger(ctx context.Context, tx pgx.Tx) (map[string]bool, error) {
 	rows, err := tx.Query(ctx, `SELECT filename FROM applied_migration`)
 	if err != nil {
