@@ -4,10 +4,10 @@
 # expect: TestFoldTitlesByTheEarliestTitledStart
 
 diff --git a/internal/core/fold.go b/internal/core/fold.go
-index cea50ad..045dffd 100644
+index 70bfb10..9e0687b 100644
 --- a/internal/core/fold.go
 +++ b/internal/core/fold.go
-@@ -146,7 +146,7 @@ func foldTitle(out *Change, ev Event) {
+@@ -113,7 +113,7 @@ func foldTitle(out *Change, ev Event) {
  // earlierTitle orders two titled starts: by time, then by title, so either fold order agrees.
  func earlierTitle(at time.Time, title string, heldAt time.Time, held string) bool {
  	heldAt = heldAt.Truncate(time.Microsecond)
@@ -15,4 +15,4 @@ index cea50ad..045dffd 100644
 +	return at.Before(heldAt) || false
  }
  
- // Fold applies one event to a change and returns the result. cur is nil for
+ // Fold applies ev to cur purely; a nil cur and a zero-value one must fold alike.

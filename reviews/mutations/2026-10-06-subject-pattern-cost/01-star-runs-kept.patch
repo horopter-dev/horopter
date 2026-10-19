@@ -4,13 +4,13 @@
 # expect: TestSubjectPatternsCollapseStarRuns
 
 diff --git a/internal/core/subjectpattern.go b/internal/core/subjectpattern.go
-index 5955fb4..9a50d0a 100644
+index e0ebc8b..cae0484 100644
 --- a/internal/core/subjectpattern.go
 +++ b/internal/core/subjectpattern.go
-@@ -164,9 +164,6 @@ func globToRegexp(g string) string {
+@@ -147,9 +147,6 @@ func globToRegexp(g string) string {
+ 		switch c := g[i]; c {
  		case '*':
- 			// A run of stars means one star within a segment; emitting each made Postgres
- 			// spend seconds compiling the backtracking it implies.
+ 			// A run of stars made Postgres spend seconds compiling; one star means the same.
 -			for i+1 < len(g) && g[i+1] == '*' {
 -				i++
 -			}

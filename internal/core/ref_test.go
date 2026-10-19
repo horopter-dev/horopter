@@ -27,9 +27,7 @@ func TestNewRefComposesAndRoundTrips(t *testing.T) {
 	assert.Equal(t, r, back, "String and ParseRef must round-trip exactly")
 }
 
-// The zero Ref stands in for "this event has no correlation ref", which is what "" meant
-// before. It must render empty: a point event's correlation_ref is "" in the egress JSON,
-// and a zero Ref rendering as "/" would change every point event's payload.
+// The zero Ref renders empty: rendering a slash would change every point event's egress JSON.
 func TestZeroRefIsZeroAndRendersEmpty(t *testing.T) {
 	var r core.Ref
 	assert.True(t, r.IsZero())
@@ -44,10 +42,7 @@ func TestNewRefRejectsAZeroLocusAndAnEmptyProducerRef(t *testing.T) {
 	require.Error(t, err, "an empty producer ref composes to ci/, which names no change")
 }
 
-// A producer ref may contain "/" — only the locus may not. "dev/deploy/api/7" is a legal
-// stored ref whose producer part is "deploy/api/7", and splitting at the LAST slash is the
-// plausible wrong implementation: it would yield locus "dev/deploy/api", which NewLocus
-// would then have to reject, turning a legal ref into an error.
+// Split at the first slash: the last would yield locus dev/deploy/api, which NewLocus rejects.
 func TestParseRefSplitsAtTheFirstSlashOnly(t *testing.T) {
 	r, err := core.ParseRef("dev/deploy/api/7")
 	require.NoError(t, err)
@@ -56,9 +51,7 @@ func TestParseRefSplitsAtTheFirstSlashOnly(t *testing.T) {
 	assert.Equal(t, "dev/deploy/api/7", r.String(), "the stored form must survive intact")
 }
 
-// ParseRef is deliberately stricter than the database. change_ref_has_locus is
-// strpos(ref, '/') > 1, which constrains only the locus side, so "ci/" is legally storable.
-// ParseRef refuses it because a ref naming no change is not a query worth running.
+// ParseRef refuses "ci/", which change_ref_has_locus admits: it names no change to query.
 func TestParseRefRefusesShapesTheDatabaseWouldAccept(t *testing.T) {
 	for name, in := range map[string]string{
 		"no slash":           "dep-7",
@@ -72,9 +65,7 @@ func TestParseRefRefusesShapesTheDatabaseWouldAccept(t *testing.T) {
 	}
 }
 
-// RefFromRow is the other half of that asymmetry and is why it is safe. A row holding "ci/"
-// must round-trip: RebuildProjection reads every stored ref, and a validating constructor
-// would make a legally-written row unreadable.
+// RefFromRow round-trips "ci/": a validating constructor would make a stored row unreadable.
 func TestRefFromRowDoesNotValidate(t *testing.T) {
 	r := core.RefFromRow("ci/")
 	assert.Equal(t, "ci/", r.String(), "a stored value must survive a read unchanged")

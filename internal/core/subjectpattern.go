@@ -11,29 +11,20 @@ import (
 // ErrBadSubjectPattern reports a subject pattern that is malformed or too large.
 var ErrBadSubjectPattern = errors.New("bad subject pattern")
 
-// errReversedRange marks a class range whose low end is above its high end, such as [1-0].
-// path.Match accepts one and never matches it; a regexp refuses it, and so does this, since a
-// range that can match nothing is a mistake rather than a filter.
+// errReversedRange marks a class range such as [1-0], which path.Match accepts but never matches.
 var errReversedRange = errors.New("reversed range")
 
 const (
 	maxSubjectPatternBytes = 1024
 	maxSubjectAlternatives = 64
-	// maxSubjectRegexpBytes bounds the expression Postgres compiles for one request. Its
-	// compile cost, not the match, is what a hostile pattern spends, and past its own
-	// complexity limit Postgres refuses the query outright.
+	// maxSubjectRegexpBytes keeps a request under Postgres's regex compile complexity limit.
 	maxSubjectRegexpBytes = 4096
 )
 
-// SubjectPatterns is a set of subject globs, any of which may match: path.Match's syntax, as a
-// credential's subject_pattern uses — * and ? stop at "/", [...] is a class, \ escapes — plus
-// non-nesting {a,b} alternation, which Grafana's ${var:glob} emits for a multi-value variable.
-// It is held as one anchored regular expression that Postgres's ~ and Go's regexp both read,
-// so the store can match it and a test can check the translation against path.Match.
+// SubjectPatterns is a set of path.Match globs plus {a,b}, held as one anchored regexp.
 type SubjectPatterns struct{ regexp string }
 
-// ParseSubjectPatterns parses each non-empty raw pattern and ORs them. An empty value is no
-// filter, as for every other filter; all empty is the zero SubjectPatterns.
+// ParseSubjectPatterns ORs the non-empty raw patterns; all empty is the zero, no filter.
 func ParseSubjectPatterns(raw []string) (SubjectPatterns, error) {
 	var alts []string
 	for _, p := range raw {
@@ -61,8 +52,7 @@ func ParseSubjectPatterns(raw []string) (SubjectPatterns, error) {
 	return SubjectPatterns{regexp: re}, nil
 }
 
-// patternAlternatives validates one raw pattern and returns the regular expression for each
-// of its brace alternatives.
+// patternAlternatives validates one raw pattern and returns a regexp per brace alternative.
 func patternAlternatives(p string) ([]string, error) {
 	if !utf8.ValidString(p) {
 		return nil, fmt.Errorf("%w: not valid UTF-8", ErrBadSubjectPattern)
@@ -95,9 +85,7 @@ func (p SubjectPatterns) IsZero() bool { return p.regexp == "" }
 // Regexp is the anchored regular expression the patterns compile to.
 func (p SubjectPatterns) Regexp() string { return p.regexp }
 
-// expandBraces expands every non-nested {a,b,...} group, left to right, into the cross product
-// of its alternatives. A backslash escapes the next byte, so \{ is a literal brace. The product
-// is bounded as it is built, so {a,b} repeated forty times is refused rather than expanded.
+// expandBraces expands non-nested {a,b} groups into a cross product bounded as it is built.
 func expandBraces(p string) ([]string, error) {
 	open, closing, err := firstBraceGroup(p)
 	if err != nil || open < 0 {
@@ -120,8 +108,7 @@ func expandBraces(p string) ([]string, error) {
 	return out, nil
 }
 
-// firstBraceGroup returns the indexes of p's first unescaped '{' and its '}', or -1 for both
-// when p has no group. A second '{' before the '}' is nesting, which is refused.
+// firstBraceGroup returns p's first unescaped brace pair, or -1, -1; nesting is refused.
 func firstBraceGroup(p string) (open, closing int, err error) {
 	open = nextUnescapedBrace(p, 0)
 	switch {
@@ -140,8 +127,7 @@ func firstBraceGroup(p string) (open, closing int, err error) {
 	return open, closing, nil
 }
 
-// nextUnescapedBrace returns the index of the first '{' or '}' in p at or after from that no
-// backslash escapes, or -1.
+// nextUnescapedBrace returns the next unescaped brace at or after from, or -1.
 func nextUnescapedBrace(p string, from int) int {
 	for i := from; i < len(p); i++ {
 		switch p[i] {
@@ -154,16 +140,13 @@ func nextUnescapedBrace(p string, from int) int {
 	return -1
 }
 
-// globToRegexp translates a path.Match pattern, already validated, to a regular expression.
-// It works bytewise: only ASCII bytes are special, and every other byte is copied as it is,
-// so a multi-byte rune passes through intact.
+// globToRegexp translates a validated glob bytewise, so multi-byte runes pass through intact.
 func globToRegexp(g string) string {
 	var b strings.Builder
 	for i := 0; i < len(g); i++ {
 		switch c := g[i]; c {
 		case '*':
-			// A run of stars means one star within a segment; emitting each made Postgres
-			// spend seconds compiling the backtracking it implies.
+			// A run of stars made Postgres spend seconds compiling; one star means the same.
 			for i+1 < len(g) && g[i+1] == '*' {
 				i++
 			}
@@ -182,12 +165,7 @@ func globToRegexp(g string) string {
 	return b.String()
 }
 
-// writeClass copies the class starting at g[i] and returns the index of its closing ']'.
-// Inside it every ASCII punctuation byte is escaped, escaped or not in the glob, except an
-// unescaped '-', which is path.Match's range operator. That is what keeps [[:digit:]] the
-// literal set path.Match reads it as — copied bare, a regexp reads a POSIX class, and Postgres
-// also reads [. and [= as collating openers. An escaped letter becomes the bare letter, since
-// \a or \d mean something else to a regexp. Like path.Match, a class may match "/".
+// writeClass escapes ASCII punctuation in a class except a bare -, so [[:digit:]] stays literal.
 func writeClass(b *strings.Builder, g string, i int) int {
 	b.WriteByte('[')
 	i++
@@ -221,9 +199,7 @@ func isASCIIPunct(c byte) bool {
 	return c < 0x80 && strings.IndexByte("\\.+*?()|[]{}^$-/#&~", c) >= 0
 }
 
-// checkRanges refuses a reversed range in any class of g, a pattern path.Match has already
-// validated, so every class is closed and every escape has its byte. Range ends are compared as
-// runes, as path.Match compares them.
+// checkRanges refuses a reversed range in any class of g, comparing ends as runes.
 func checkRanges(g string) error {
 	for i := 0; i < len(g); i++ {
 		switch g[i] {
