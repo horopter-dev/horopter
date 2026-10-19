@@ -12,8 +12,7 @@ import (
 	"horopter.dev/horopter/internal/client"
 )
 
-// startPoster runs a poster against url until the test ends, with retries backing off from
-// backoff so a test can tell a retried event from one posted behind it.
+// startPoster's backoff lets a test tell a retried event from one posted behind it.
 func startPoster(t *testing.T, url string, backoff time.Duration) *poster {
 	t.Helper()
 	retryBase = backoff

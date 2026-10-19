@@ -15,8 +15,7 @@ const (
 	helmRevision      = "helm.toolkit.fluxcd.io/revision"
 )
 
-// MapEvent records what only a Kubernetes Event carries: a Kustomization's changeset, one
-// event per object its apply touched, and HelmRelease outcomes that never reach status.
+// MapEvent records what only a Kubernetes Event carries: changesets and event-only outcomes.
 func MapEvent(cluster string, ev Event) []client.NewEvent {
 	switch ev.InvolvedObject.Kind {
 	case "Kustomization":
@@ -36,8 +35,7 @@ func (ev Event) object() Metadata {
 	return Metadata{Namespace: o.Namespace, Name: o.Name}
 }
 
-// occurredAt is when the Event last happened: Kubernetes updates one Event in place for a
-// repeat, raising count and moving lastTimestamp.
+// occurredAt prefers lastTimestamp: Kubernetes updates an Event in place for a repeat.
 func (ev Event) occurredAt() time.Time {
 	if ev.LastTimestamp != nil && !ev.LastTimestamp.IsZero() {
 		return *ev.LastTimestamp
@@ -48,9 +46,7 @@ func (ev Event) occurredAt() time.Time {
 	return time.Time{}
 }
 
-// changeset turns each "<object> <action>" line of a Progressing message into an event on the
-// revision's change. Lifecycle none: these say what the rollout touched, and move neither its
-// start nor its end. Lines that do not name an object are skipped.
+// changeset turns each "<object> <action>" line of a Progressing message into an event.
 func changeset(cluster string, ev Event) []client.NewEvent {
 	rev := ev.Metadata.Annotations[kustomizeRevision]
 	if !gitRevision.MatchString(rev) {
@@ -86,15 +82,13 @@ func isObjectPath(s string) bool {
 	return !slices.Contains(parts, "")
 }
 
-// eventOnlyOutcome reports a HelmRelease reason status never shows: drift correction, tests
-// and uninstalls.
+// eventOnlyOutcome reports a HelmRelease reason status never shows.
 func eventOnlyOutcome(reason string) bool {
 	return reason == "DriftCorrected" || reason == "DriftCorrectionFailed" ||
 		strings.HasPrefix(reason, "Test") || strings.HasPrefix(reason, "Uninstall")
 }
 
-// helmReleasePoint keys each occurrence of the Event by its uid and count, so a re-delivery
-// repeats the key and a repeat of the occurrence does not.
+// helmReleasePoint keys an occurrence by uid and count, so only a re-delivery repeats the key.
 func helmReleasePoint(cluster string, ev Event) client.NewEvent {
 	attrs := objectAttributes("HelmRelease", ev.object())
 	attrs["reason"], attrs["chart_version"] = ev.Reason, ev.Metadata.Annotations[helmRevision]
@@ -109,8 +103,7 @@ func helmReleasePoint(cluster string, ev Event) client.NewEvent {
 	}
 }
 
-// snakeCase turns a Flux reason such as DriftCorrected into drift_corrected, keeping an
-// acronym one word: OCIArtifactFailed is oci_artifact_failed.
+// snakeCase turns OCIArtifactFailed into oci_artifact_failed.
 func snakeCase(s string) string {
 	runes := []rune(s)
 	var b strings.Builder
@@ -123,8 +116,7 @@ func snakeCase(s string) string {
 	return b.String()
 }
 
-// startsWord reports whether the capital at runes[i] begins a word: it follows a lower-case
-// letter, or ends an acronym by preceding one.
+// startsWord reports whether the capital at runes[i] begins a word.
 func startsWord(runes []rune, i int) bool {
 	if !unicode.IsUpper(runes[i-1]) {
 		return true

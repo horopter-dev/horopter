@@ -13,9 +13,7 @@ import (
 	"horopter.dev/horopter/internal/client"
 )
 
-// postBudget bounds one post with internal/client's own retries of network errors and 503s.
-// Past it, or on another 5xx or a 429, the event is requeued with backoff from retryBase to
-// retryMax.
+// postBudget bounds one post, including internal/client's own retries.
 const (
 	postBudget = 30 * time.Second
 	retryMax   = 5 * time.Minute
@@ -24,12 +22,7 @@ const (
 // retryBase is a variable so a test can shorten it.
 var retryBase = time.Second
 
-// poster posts events, retrying an event Horopter could not take with backoff. A ref's events
-// are posted one at a time in the order they were queued: only a ref's head is in the queue,
-// and the next waits until the head is recorded or refused for good, so a retried event never
-// lands after one the mapping derived later. An event with no correlation ref is its own ref.
-// Events are queued by idempotency key, so one derived again while it waits keeps its place,
-// and its ref, and is posted once, as last derived.
+// poster queues only a ref's head, so a retried event never lands after a later one.
 type poster struct {
 	client  *client.Client
 	queue   workqueue.TypedRateLimitingInterface[string]
@@ -111,8 +104,7 @@ func (p *poster) run(ctx context.Context) {
 	}
 }
 
-// refusedForGood reports an answer a later attempt cannot change: a 4xx other than 429. A 5xx
-// or 429 is a server or proxy that cannot take the event now.
+// refusedForGood reports an answer a later attempt cannot change: a 4xx other than 429.
 func refusedForGood(status int) bool {
 	return status >= 400 && status < 500 && status != http.StatusTooManyRequests
 }

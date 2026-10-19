@@ -7,13 +7,10 @@ import (
 	"horopter.dev/horopter/internal/client"
 )
 
-// gitRevision matches a Git SHA-1 revision as Flux reports it, e.g.
-// refs/heads/main@sha1:<40 hex>. Only these start a commit's change: an OCI source's
-// latest@sha256:… needs a uniqueness check first.
+// gitRevision matches a Git SHA-1 revision; an OCI latest@sha256:… is not known to be unique.
 var gitRevision = regexp.MustCompile(`@sha1:[0-9a-f]{40}$`)
 
-// MapGitRepository starts a commit's change when cur's artifact is at a Git revision prev's
-// was not, titled title. prev is nil when the object is seen for the first time.
+// MapGitRepository starts a commit's change when cur's artifact is at a new Git revision.
 func MapGitRepository(cluster string, prev *GitRepository, cur GitRepository, title string,
 ) []client.NewEvent {
 	art := cur.Status.Artifact
@@ -39,13 +36,10 @@ func MapGitRepository(cluster string, prev *GitRepository, cur GitRepository, ti
 	}}
 }
 
-// storedArtifact is source-controller's NewArtifact message for a Git source, quoting the
-// commit's subject as Flux shortened it.
+// storedArtifact is source-controller's NewArtifact message, quoting the commit's subject.
 var storedArtifact = regexp.MustCompile(`^stored artifact for commit '(.*)'$`)
 
-// ArtifactTitle is the commit subject that repo's NewArtifact Event quotes for its current
-// revision, and whether events hold one. Status never carries the subject; only that Event
-// does, and Kubernetes expires it after about an hour.
+// ArtifactTitle is the commit subject repo's NewArtifact Event quotes, which expires in an hour.
 func ArtifactTitle(repo GitRepository, events []Event) (string, bool) {
 	if repo.Status.Artifact == nil {
 		return "", false
@@ -71,8 +65,7 @@ func announces(ev Event, repo GitRepository) bool {
 
 const sourceRevision = "source.toolkit.fluxcd.io/revision"
 
-// ShortRevision titles a commit whose subject is lost: refs/heads/main@sha1:b1f2477… reads
-// main@b1f2477.
+// ShortRevision turns refs/heads/main@sha1:b1f2477… into main@b1f2477.
 func ShortRevision(rev string) string {
 	ref, sha, ok := strings.Cut(rev, "@sha1:")
 	if !ok {

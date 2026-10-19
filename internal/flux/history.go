@@ -7,8 +7,7 @@ import (
 	"horopter.dev/horopter/internal/client"
 )
 
-// attempt is the newest install or upgrade a HelmRelease's history shows, how it ended, and
-// the rollback that remediated it, if one did.
+// attempt is the newest install or upgrade in history, and its remediating rollback, if any.
 type attempt struct {
 	snap        Snapshot
 	action      string
@@ -22,10 +21,7 @@ type remediation struct {
 	at        time.Time
 }
 
-// newestAttempt reads the attempt from history. history[0] names its action after an install
-// or upgrade. After a rollback, history[0] is the rollback's revision with no action, and the
-// attempt it remediated is history[1], rewritten as "rollback"; only an upgrade is rolled back.
-// Older snapshots have lost their action and are not read.
+// newestAttempt is history[0], or history[1] when a rollback rewrote it as "rollback".
 func newestAttempt(hr HelmRelease) (attempt, bool) {
 	h := hr.Status.History
 	switch {
@@ -37,8 +33,7 @@ func newestAttempt(hr HelmRelease) (attempt, bool) {
 	return attempt{}, false
 }
 
-// releasedAttempt is the install or upgrade at history[0], and a rollback that failed to
-// remediate it, which leaves no revision of its own.
+// releasedAttempt is history[0]; a failed rollback leaves no revision of its own.
 func releasedAttempt(hr HelmRelease) (attempt, bool) {
 	snap := hr.Status.History[0]
 	if snap.Status != "deployed" && snap.Status != "failed" {
@@ -55,8 +50,6 @@ func releasedAttempt(hr HelmRelease) (attempt, bool) {
 }
 
 // rolledBackAttempt is the upgrade at history[1] that the rollback at history[0] remediated.
-// The Remediated condition says how the rollback ended and when; without it, the rollback's
-// own revision does.
 func rolledBackAttempt(hr HelmRelease) attempt {
 	h := hr.Status.History
 	rem := &remediation{succeeded: h[0].Status == "deployed", at: h[0].LastDeployed}
@@ -68,10 +61,7 @@ func rolledBackAttempt(hr HelmRelease) attempt {
 		end: releasedAt(hr, h[1], "upgrade", true), remediation: rem}
 }
 
-// releasedAt is when helm-controller set Released for snap's outcome, once Helm's wait
-// returned. Helm stamps lastDeployed as it writes the release, near the action's start, so it is
-// the end only when Released does not show that outcome. A rollback leaves Released as the
-// failed upgrade set it.
+// releasedAt prefers Released: Helm stamps lastDeployed near the action's start, not its end.
 func releasedAt(hr HelmRelease, snap Snapshot, action string, failed bool) time.Time {
 	rel, ok := condition(hr.Status.Conditions, "Released")
 	if ok && rel.Reason == outcomeReason(action, failed) &&
@@ -94,10 +84,7 @@ func outcomeReason(action string, failed bool) string {
 	return "UpgradeSucceeded"
 }
 
-// outcomes posts the newest attempt's end and remediation that prev did not already show. The
-// end goes on the open change's ref when there is one, so a mispredicted revision does not
-// leave it open; otherwise a start is posted with it, approximated from the action's duration,
-// which repeats the live start's key if that was posted.
+// outcomes ends the open change's ref, if any, so a mispredicted revision does not leave it open.
 func (r release) outcomes(mem ReleaseMemory, prev *HelmRelease, out []client.NewEvent,
 ) ([]client.NewEvent, ReleaseMemory) {
 	a, ok := newestAttempt(r.hr)
@@ -179,8 +166,7 @@ func (a attempt) title() string {
 	return a.snap.ChartVersion
 }
 
-// approximateStart is the start of an attempt whose live start was not seen: its end less
-// the last action's duration, with no trigger.
+// approximateStart is an unseen attempt's start: its end less the last action's duration.
 func (r release) approximateStart(a attempt, version int, action string) client.NewEvent {
 	at := a.end
 	if d, err := time.ParseDuration(r.hr.Status.LastAttemptedReleaseActionDuration); err == nil {

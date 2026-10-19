@@ -23,8 +23,7 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// ingest is a stub ingress that records every post by idempotency key and answers with
-// respond, 201 by default.
+// ingest is a stub ingress that records every post by idempotency key.
 type ingest struct {
 	mu       sync.Mutex
 	posts    map[string][]map[string]any
@@ -199,8 +198,7 @@ func TestA503IsRetriedUntilTheEventIsRecorded(t *testing.T) {
 		5*time.Second, 10*time.Millisecond)
 }
 
-// captureLogs swaps the process-wide slog default for one writing JSON to a buffer. Setting
-// slog's default also redirects the stdlib log package, so that is restored as well.
+// captureLogs restores the stdlib log package too: setting slog's default redirects it.
 func captureLogs(t *testing.T) func() []map[string]any {
 	var mu sync.Mutex
 	var buf bytes.Buffer

@@ -1,8 +1,4 @@
-// Package flux maps the state of Flux's objects to Horopter events: a GitRepository's new
-// artifact starts a commit's change, a Kustomization's Ready condition ends it, and a
-// HelmRelease's status brackets each Helm install or upgrade as a release change. Every
-// function here is pure: the same states give the same events and idempotency keys, so a
-// re-derivation after a restart repeats keys the server already holds.
+// Package flux maps Flux object state to Horopter events with deterministic idempotency keys.
 package flux
 
 import (
@@ -71,10 +67,7 @@ type HelmRelease struct {
 	} `json:"status"`
 }
 
-// Snapshot is one entry of a HelmRelease's status.history, newest first. helm-controller
-// rewrites a snapshot whenever Helm writes its release again, so Action is reliable only on
-// the newest: a superseded snapshot loses it, and a rollback marks the attempt it remediated
-// "rollback" while its own new revision carries none.
+// Snapshot is one entry of status.history, newest first; Action is reliable only on the newest.
 type Snapshot struct {
 	Action       string    `json:"action"`
 	Version      int       `json:"version"`

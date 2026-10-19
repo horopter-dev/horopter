@@ -42,9 +42,7 @@ func dropCondition(hr *flux.HelmRelease, typ string) {
 		func(c flux.Condition) bool { return c.Type == typ })
 }
 
-// preAction is hr after helm-controller's pre-action patch for action as the watch first sees
-// it: the patch helper sends the conditions before the rest of status, so lastAttempted* still
-// describe the previous attempt.
+// preAction is the conditions write alone: lastAttempted* still describe the previous attempt.
 func preAction(t *testing.T, hr flux.HelmRelease, action, when string) flux.HelmRelease {
 	t.Helper()
 	hr.Status.Conditions = slices.Clone(hr.Status.Conditions)
@@ -56,8 +54,7 @@ func preAction(t *testing.T, hr flux.HelmRelease, action, when string) flux.Helm
 	return hr
 }
 
-// running is hr once the rest of the pre-action patch has landed too, with the chart version
-// the action is about to roll out.
+// running is hr once the rest of the pre-action patch has landed too.
 func running(t *testing.T, hr flux.HelmRelease, action, chartVersion, when string,
 ) flux.HelmRelease {
 	t.Helper()
@@ -75,8 +72,7 @@ func finished(hr flux.HelmRelease, snap flux.Snapshot, duration string) flux.Hel
 	return hr
 }
 
-// released is hr after helm-controller set Released for the action's outcome, once Helm's wait
-// returned: later than the snapshot's lastDeployed, which Helm stamps as it writes the release.
+// released sets Released later than lastDeployed, which Helm stamps as it writes the release.
 func released(t *testing.T, hr flux.HelmRelease, status, reason, when string) flux.HelmRelease {
 	t.Helper()
 	hr.Status.Conditions = slices.Clone(hr.Status.Conditions)
@@ -183,8 +179,7 @@ func TestAReleasedConditionForAnotherOutcomeLeavesTheEndAtLastDeployed(t *testin
 func TestTheProgressPatchAfterAnActionStartsNothing(t *testing.T) {
 	before := deployed(t)
 	during := running(t, before, "upgrade", "0.3.2", "2026-10-09T18:00:00Z")
-	// helm-controller patches once the action returns, history included, before it clears
-	// Reconciling: the Running message is stale.
+	// History lands before Reconciling clears, so the Running message is stale.
 	progress := finished(during, snapshot(t, "upgrade", 11, "deployed", "0.3.2", "v0.7.2",
 		"2026-10-09T18:00:20Z"), "20s")
 	progress.Status.Conditions = during.Status.Conditions
@@ -307,8 +302,7 @@ func TestAnAttemptSaysWhatChangedAndARetryHasNone(t *testing.T) {
 func TestARetryStartsWhenReadyTurnsUnknownNotWhenReconcilingFirstDid(t *testing.T) {
 	failed := finished(running(t, deployed(t), "upgrade", "0.3.2", "2026-10-09T18:00:00Z"),
 		snapshot(t, "upgrade", 11, "failed", "0.3.2", "v0.7.2", "2026-10-09T18:05:00Z"), "5m0s")
-	// helm-controller left Reconciling True from the first attempt, so its time stands; Ready
-	// went False on the failure and turns Unknown again at the retry.
+	// Reconciling stays True from the first attempt; Ready turns Unknown again at the retry.
 	retry := running(t, failed, "upgrade", "0.3.2", "2026-10-09T18:00:00Z")
 	setCondition(&retry, flux.Condition{Type: "Ready", Status: "Unknown", Reason: "Progressing",
 		LastTransitionTime: at(t, "2026-10-09T18:30:00Z")})
@@ -331,8 +325,7 @@ func TestARestartMidActionRepeatsTheLiveStartAndEnd(t *testing.T) {
 	coldStart, mem := flux.MapHelmRelease(cluster, flux.ReleaseMemory{}, nil, during)
 	coldEnd, _ := flux.MapHelmRelease(cluster, mem, &during, after)
 
-	// The cold list also re-derives v10, whose events the live client posted before; the
-	// server holds their keys already.
+	// The cold list also re-derives v10, whose keys the server already holds.
 	delete(liveStart[1].Attributes, "trigger")
 	assert.Equal(t, []string{
 		cluster + "/" + hrRef(10) + "/started", cluster + "/" + hrRef(10) + "/completed",
@@ -398,8 +391,7 @@ func TestAnUnchangedHelmReleasePostsNothingAgain(t *testing.T) {
 	}
 }
 
-// rolledBack is hr after helm-controller rolled a failed v11 upgrade back: v11's snapshot
-// rewritten as "rollback" and superseded, and the rollback's own v12 with no action.
+// rolledBack rewrites v11 as "rollback" under the rollback's own v12, which has no action.
 func rolledBack(t *testing.T, failed flux.HelmRelease) flux.HelmRelease {
 	hr := failed
 	hr.Status.History = slices.Clone(failed.Status.History)
@@ -526,8 +518,7 @@ func TestAnOrphanedStartIsClosedFailedAndTheRetryIsTheNextRevision(t *testing.T)
 func TestALaterStartClosesAnOrphanedOne(t *testing.T) {
 	before := deployed(t)
 	during := running(t, before, "upgrade", "0.3.2", "2026-10-09T18:00:00Z")
-	// helm-controller restarted mid-action; the next reconcile ran a new upgrade with no
-	// PendingRelease patch in between that the client saw.
+	// helm-controller restarted mid-action, with no PendingRelease patch the client saw.
 	again := running(t, during, "upgrade", "0.3.2", "2026-10-09T18:20:00Z")
 	again.Status.LastAttemptedGeneration++
 
