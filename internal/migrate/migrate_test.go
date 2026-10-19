@@ -30,16 +30,7 @@ func dsn(t *testing.T) string {
 	return v
 }
 
-// TestRunRebuildsATenantsProjection covers the operator surface for the safety property
-// the whole derived-view design rests on: the projection is always rebuildable. Until
-// --rebuild-tenant existed there was no way for an operator to exercise it, which made it
-// a claim rather than a capability — and migration 0003's truthful backfill leaves rows
-// that only a replay can correct.
-//
-// The projection is corrupted directly rather than by staging a fold bug, because what
-// this has to prove is that the flag reaches RebuildProjection at all: a row visibly wrong
-// before the run and visibly right after it is the same evidence, without needing a bug to
-// exist.
+// The projection is corrupted directly: what is proved is that the flag reaches the rebuild.
 func TestRunRebuildsATenantsProjection(t *testing.T) {
 	d := dsn(t)
 	ctx := context.Background()
@@ -48,10 +39,7 @@ func TestRunRebuildsATenantsProjection(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(store.Close)
 
-	// The test database is never truncated, so the tenant and the event id must be ones
-	// no other test or earlier run has used: event.id is a global primary key, and
-	// Validate requires it to be a syntactically valid ULID, so it comes from
-	// core.NewULID rather than the token embedded in the tenant id below.
+	// The test database is never truncated, and event.id is a global key that must be a ULID.
 	token := strconv.FormatInt(time.Now().UnixNano(), 36)
 	tn := testdb.NewTenant(t, "migrate-rebuild-"+token)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -85,9 +73,7 @@ func TestRunRebuildsATenantsProjection(t *testing.T) {
 			"surviving means the flag never reached RebuildProjection")
 }
 
-// TestRunWithoutRebuildTenantLeavesTheProjectionAlone is the other half: the flag must be
-// opt-in. A rebuild that ran on every migrate would take every tenant's write lock on
-// every deploy, and this is the only place that would notice.
+// A rebuild on every migrate would take every tenant's write lock on every deploy.
 func TestRunWithoutRebuildTenantLeavesTheProjectionAlone(t *testing.T) {
 	d := dsn(t)
 	ctx := context.Background()
@@ -123,8 +109,7 @@ func TestRunWithoutRebuildTenantLeavesTheProjectionAlone(t *testing.T) {
 		"migrating without --rebuild-tenant must not replay anyone's event log")
 }
 
-// isolatedSchemaDSN gives a test its own empty schema, so a migration run inside it starts
-// from nothing however many times the suite has run against this database before.
+// isolatedSchemaDSN gives a test its own empty schema.
 func isolatedSchemaDSN(t *testing.T, base string) string {
 	t.Helper()
 	ctx := context.Background()
@@ -149,9 +134,7 @@ func isolatedSchemaDSN(t *testing.T, base string) string {
 	return u.String()
 }
 
-// captureLog installs a JSON logger writing to the returned buffer, with the timestamp
-// dropped so two runs that logged the same thing produce byte-identical output. That is
-// what lets the assertion below compare the runs directly rather than by keyword.
+// captureLog drops the timestamp so two runs that logged the same thing are byte-identical.
 func captureLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	previous := slog.Default()
@@ -169,13 +152,7 @@ func captureLog(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// TestVerifyAndRebuildLogsWhichMigrationsItApplied pins the difference between a run that
-// built the schema and one that found it already current. Both used to log the single line
-// "schema up to date", so an operator reading the logs of a migrate Job could not tell
-// whether any DDL had run against their database — the two cases were indistinguishable.
-//
-// The runs are compared to each other, not only to keywords, because equality is the defect
-// stated exactly: it is the identical output that was the bug.
+// Both runs once logged only "schema up to date": the identical output was the bug.
 func TestVerifyAndRebuildLogsWhichMigrationsItApplied(t *testing.T) {
 	base := dsn(t)
 	ctx := context.Background()
@@ -205,8 +182,6 @@ func TestVerifyAndRebuildLogsWhichMigrationsItApplied(t *testing.T) {
 			"identity is the defect this test exists for")
 }
 
-// TestRunRequiresADSN pins Run's own guard: an empty dsn must fail before any connection
-// is attempted, with a message naming the environment variable an operator sets.
 func TestRunRequiresADSN(t *testing.T) {
 	err := Run(context.Background(), "", "")
 	require.Error(t, err)
