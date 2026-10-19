@@ -10,7 +10,6 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
-// recorderProvider returns a provider that records into rec, for asserting on spans.
 func recorderProvider() (*sdktrace.TracerProvider, *tracetest.SpanRecorder) {
 	rec := tracetest.NewSpanRecorder()
 	return sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)), rec
@@ -26,8 +25,6 @@ func TestFilteredSuppressesADisabledArea(t *testing.T) {
 	assert.Empty(t, rec.Ended(), "a disabled area must produce no spans")
 }
 
-// The half of the assertion usually omitted, and the half that catches a filter
-// matching everything.
 func TestFilteredLeavesOtherAreasRecording(t *testing.T) {
 	inner, rec := recorderProvider()
 	p := filtered(inner, map[string]bool{"sql": true})
