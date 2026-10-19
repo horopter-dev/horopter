@@ -12,8 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestMain lets a test run this binary as horo itself, so it can start horo with signals
-// already ignored, as nohup and background jobs do.
+// TestMain lets a test run this binary as horo, started with signals already ignored.
 func TestMain(m *testing.M) {
 	if os.Getenv("HORO_TEST_AS_HORO") == "1" {
 		main()
@@ -25,9 +24,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// TestNohupStillProtectsTheCommand: nohup starts horo with SIGHUP ignored. Catching it would
-// un-ignore it, exec would reset it to the default, and the wrapped command would die on a
-// hangup — the opposite of what nohup is for.
+// Catching SIGHUP would un-ignore it, and exec would give the command the default action.
 func TestNohupStillProtectsTheCommand(t *testing.T) {
 	f := &fakeIngress{}
 	url := f.server(t)
@@ -45,10 +42,7 @@ func TestNohupStillProtectsTheCommand(t *testing.T) {
 	assert.Equal(t, "deployment.completed", f.posted()[1]["type"])
 }
 
-// TestABackgroundJobOnATerminalIsNotInTheForeground runs this binary in a pty through
-// script(1), once in the foreground and once as a job-controlled background job. Only the
-// foreground job receives a terminal's Ctrl-C, so only it may skip forwarding SIGINT; a
-// background horo that thought otherwise would never pass a kill -INT on to its command.
+// Only a foreground job gets a terminal's Ctrl-C, so only it may skip forwarding SIGINT.
 func TestABackgroundJobOnATerminalIsNotInTheForeground(t *testing.T) {
 	_, err := exec.LookPath("script")
 	require.NoError(t, err, "this test needs script(1) for a pty: util-linux on Linux, "+

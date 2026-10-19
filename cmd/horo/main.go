@@ -1,5 +1,4 @@
-// Command horo explores what Horopter recorded: the changes a window and filters select, and
-// one change with all its events. It reads egress with a reader key.
+// Command horo explores what Horopter recorded, and records changes.
 package main
 
 import (
@@ -60,9 +59,7 @@ func run(args []string, env func(string) string, stdout, stderr io.Writer, tty b
 	}
 }
 
-// interruptible is a context that ends when SIGINT, SIGTERM, SIGHUP or SIGQUIT arrives, with the
-// signal as its cause: a dropped SSH session or Ctrl-\ must not kill horo and leave the change
-// open. horo keeps running, so it can still record how a wrapped command ended.
+// interruptible ends on SIGINT, SIGTERM, SIGHUP or SIGQUIT, with the signal as its cause.
 func interruptible() (context.Context, func()) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	signals := make(chan os.Signal, 1)
@@ -151,8 +148,7 @@ func (c *common) client() (*client.Client, error) {
 
 const readerHint = "--key / HOROPTER_EGRESS_KEY must be a reader key"
 
-// secret is a flag whose default comes from the environment but is never shown: usage output
-// prints a flag's default, and CI keeps stderr in its logs.
+// secret is a flag whose default is never shown: usage prints defaults, and CI keeps stderr.
 type secret struct{ v *string }
 
 func (s secret) String() string     { return "" }
@@ -221,8 +217,7 @@ func runChanges(
 		writeChanges(stdout, c.format, location(c.utc), cl.Changes(ctx, q)), readerHint))
 }
 
-// window sets q's window from --since, or from --from and --to; giving both is an error rather
-// than a silent choice of one.
+// window sets q's window from --since, or from --from and --to, refusing both.
 func window(fs *flag.FlagSet, q *client.ChangeQuery, since time.Duration, from, to string) error {
 	if from == "" && to == "" {
 		q.To = time.Now()

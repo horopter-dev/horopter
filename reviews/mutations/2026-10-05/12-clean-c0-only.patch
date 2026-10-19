@@ -4,11 +4,11 @@
 # expect: none predicted; the hostile fixture uses only ESC, BEL, LF and TAB
 
 diff --git a/cmd/horo/output.go b/cmd/horo/output.go
-index aebaaa8..3d0ce3f 100644
+index d557126..4474321 100644
 --- a/cmd/horo/output.go
 +++ b/cmd/horo/output.go
-@@ -101,7 +101,7 @@ func writeShowTable(
- // JSON output is left as egress sent it.
+@@ -99,7 +99,7 @@ func writeShowTable(
+ // clean replaces control characters, which a terminal would act on; JSON is left as sent.
  func clean(s string) string {
  	return strings.Map(func(r rune) rune {
 -		if unicode.IsControl(r) {

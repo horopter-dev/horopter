@@ -8,10 +8,7 @@ import (
 	"horopter.dev/horopter/internal/core"
 )
 
-// runReport is what --report writes: what horo run posted and how the change ended, for a
-// wrapper such as a CI step summary that must not parse stderr. Outcome is null when the
-// command was not run and no change was closed; reason is null only when the change was recorded
-// in full.
+// runReport is what --report writes, for a wrapper that must not parse stderr.
 type runReport struct {
 	StartPosted bool            `json:"start_posted"`
 	EndPosted   bool            `json:"end_posted"`
@@ -27,8 +24,7 @@ func (r *runReport) started(ref string) {
 	r.Ref = &ref
 }
 
-// endPosted records a confirmed end and the stored ref it answered with: after an interrupted
-// start, the end is how that ref is learnt.
+// endPosted also sets Ref: after an interrupted start, the end is how it is learnt.
 func (r *runReport) endPosted(ref string) {
 	r.EndPosted = true
 	r.Ref = &ref
@@ -41,8 +37,7 @@ func (r *runReport) because(why error) {
 	r.Reason = &s
 }
 
-// write saves the report at path, if one was asked for. A report that cannot be written is
-// warned about and does not change horo's exit code: recording never blocks the work.
+// write only warns on failure: recording never blocks the work.
 func (r *runReport) write(path string, stderr io.Writer) {
 	if path == "" {
 		return

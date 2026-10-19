@@ -19,9 +19,7 @@ import (
 // startWindow bounds the start post: the command waits on it. A variable so a test can shorten it.
 var startWindow = 10 * time.Second
 
-// abortWindow bounds the cancellation post when the command is not run: after an interrupt the
-// user has asked to stop, and under --strict the start has already used its window, so this is
-// short. A variable so a test can shorten it.
+// abortWindow bounds the cancellation post: the user has already asked to stop.
 var abortWindow = 3 * time.Second
 
 // runner is one horo run invocation.
@@ -66,8 +64,7 @@ func (x *runner) recordRun(ctx context.Context, argv []string, stdout io.Writer)
 	return x.finish(ctx, startErr == nil, out)
 }
 
-// parseRun reads run's flags and the command after --. ok is false after a usage error, which
-// it has already reported.
+// parseRun reads run's flags and command; ok is false after a usage error it reported.
 func parseRun(
 	args []string, env func(string) string, stderr io.Writer,
 ) (x *runner, argv []string, ok bool) {
@@ -98,15 +95,13 @@ func parseRun(
 	return x, argv, true
 }
 
-// afterDashes reports whether argv, what flag left unparsed, followed a --. flag also stops at
-// the first non-flag argument, and then a flag written after the command would reach the command.
+// afterDashes reports whether argv followed a --: flag also stops at the first non-flag.
 func afterDashes(args, argv []string) bool {
 	dash := len(args) - len(argv) - 1
 	return len(argv) > 0 && dash >= 0 && args[dash] == "--"
 }
 
-// connect is the client run posts with. A missing URL or key is Horopter being unreachable as
-// far as run is concerned: an unset CI secret expands to "", and must not fail the deploy.
+// connect is the client run posts with; a missing URL or key counts as unreachable.
 func (r *recording) connect() (*client.Client, error) {
 	if err := r.target(); err != nil {
 		return nil, err
@@ -127,8 +122,7 @@ func (x *runner) unrecorded(argv []string, why error, stdout io.Writer) int {
 	return out.exitCode
 }
 
-// eventType is the type of this invocation's event at lc. The close command must carry the type
-// the end post would have, so both build it here.
+// eventType is the type at lc, shared by the end post and the close command.
 func (x *runner) eventType(lc core.Lifecycle) string { return x.r.typ + "." + string(lc) }
 
 // event is an event about this invocation's change.
@@ -164,8 +158,7 @@ func (x *runner) abort(ctx context.Context) int {
 	return signalExit(ctx)
 }
 
-// refuse handles --strict after the start could not be recorded: the command is not run. Unless
-// ingress refused the start, it may have stored it, perhaps on an attempt before the last.
+// refuse handles a --strict refusal, closing any start ingress may have stored.
 func (x *runner) refuse(ctx context.Context, startErr error) int {
 	if client.Refused(startErr) {
 		say(x.stderr, "horo run: --strict, so the command was not run")
@@ -176,9 +169,7 @@ func (x *runner) refuse(ctx context.Context, startErr error) int {
 	return exitError
 }
 
-// cancel closes the change as cancelled when the command was not run: the start may already
-// have reached ingress, and the change must not be left open. why is the event's reason and
-// begins the warning; reason is the report's, extended if the cancellation is not confirmed.
+// cancel closes an unrun command's change; why goes in the event, reason in the report.
 func (x *runner) cancel(ctx context.Context, why string, reason error) {
 	at := time.Now()
 	x.report.ended(core.LifecycleCancelled)
@@ -200,8 +191,7 @@ func (x *runner) cancel(ctx context.Context, why string, reason error) {
 func (x *runner) finish(ctx context.Context, started bool, out outcome) int {
 	x.report.ended(out.lifecycle)
 	if !started {
-		// An end without its start would record a change that never began, and would hold the
-		// step for endWindow against a Horopter already known to be unreachable.
+		// An end without its start would record a change that never began.
 		say(x.stderr, "horo run: the start was not recorded, "+
 			"so the outcome is not recorded either")
 		return out.exitCode
@@ -234,10 +224,7 @@ func (x *runner) postEnd(ctx context.Context, ev client.NewEvent, window time.Du
 	return err
 }
 
-// postUnlessInterrupted posts ev, giving up if a signal arrives first. It is used once the
-// command has ended, or was never started: whoever interrupts then is waiting only on Horopter,
-// and wants the close command rather than more waiting. An interrupt cancels run's context, so
-// the post runs without it.
+// postUnlessInterrupted posts ev, abandoning it on a signal; run's context may be cancelled.
 func (x *runner) postUnlessInterrupted(
 	ctx context.Context, ev client.NewEvent, window time.Duration,
 ) (client.Appended, error) {
@@ -261,12 +248,7 @@ func (x *runner) postUnlessInterrupted(
 	}
 }
 
-// closeCommand is the horo event that closes the change, every argument single-quoted so a
-// subject with spaces or quotes pastes as one word. It uses the producer ref: --ref takes that
-// form, and the stored <locus>/<ref> would have its locus doubled. It carries the time the
-// command ended, so a change closed hours later does not count the outage in its duration, and
-// the end post's own idempotency key: a post that timed out may still have been stored, and
-// then pasting this is a harmless replay rather than a second end.
+// closeCommand is the pasteable horo event that closes the change, replaying the end's key.
 func (x *runner) closeCommand(lc core.Lifecycle, at time.Time) string {
 	args := []string{"horo", "event", "--ref", x.r.ref, "--subject", x.r.subject,
 		"--type", x.eventType(lc), "--lifecycle", string(lc),
@@ -279,12 +261,10 @@ func (x *runner) closeCommand(lc core.Lifecycle, at time.Time) string {
 	return strings.Join(quoted, " ")
 }
 
-// shellSafe are the characters no shell treats specially, so a word made only of them needs no
-// quotes.
+// shellSafe are the characters no shell treats specially.
 const shellSafe = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./:@%+,=-"
 
-// shellQuote quotes s unless every character is shell-safe — an allowlist, so a tab or the
-// trailing newline a CI variable carries is quoted too. A leading = is quoted: zsh expands =cmd.
+// shellQuote quotes s unless it is all shell-safe; a leading = is quoted, as zsh expands =cmd.
 func shellQuote(s string) string {
 	unsafe := func(r rune) bool { return !strings.ContainsRune(shellSafe, r) }
 	if s != "" && !strings.HasPrefix(s, "=") && !strings.ContainsFunc(s, unsafe) {
