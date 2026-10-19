@@ -16,8 +16,7 @@ const (
 	dbWaitThresholdVar = "HOROPTER_EGRESS_DB_WAIT_THRESHOLD"
 )
 
-// setLimitsEnv sets every variable LimitsFromEnv reads, to the value in values or to empty, so
-// nothing leaks in from the shell.
+// Sets every variable, empty when absent, so nothing leaks in from the shell.
 func setLimitsEnv(t *testing.T, values map[string]string) {
 	t.Helper()
 	for _, name := range []string{readMemoryBytesVar, admissionWaitVar, dbWaitThresholdVar} {

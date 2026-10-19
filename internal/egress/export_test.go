@@ -5,8 +5,7 @@ import (
 	"time"
 )
 
-// SetAfterAdmissionHook installs fn as the hook admit calls once a read holds its concurrency
-// permit, or clears it when fn is nil. Holding a read there is how a test fills the limit.
+// SetAfterAdmissionHook installs fn as the hook admit calls once a read holds its permit.
 func SetAfterAdmissionHook(fn func()) { afterAdmissionHook = fn }
 
 // ReadExpansionFactor exposes readExpansionFactor.
@@ -18,12 +17,10 @@ var RetryAfterSeconds = retryAfterSeconds
 // ReadConcurrencyLimit returns s's current read concurrency limit.
 func ReadConcurrencyLimit(s *Server) int { return s.limiter.Limit() }
 
-// InFlight returns the number of reads s's concurrency limiter currently holds a permit
-// for.
+// InFlight returns how many reads hold a concurrency permit.
 func InFlight(s *Server) int { return s.limiter.InFlight() }
 
-// ReadOverloaded reports whether a read whose connection acquisitions waited waits, all
-// succeeding, counts as overloaded against threshold.
+// ReadOverloaded reports whether successful acquisitions that waited count as overloaded.
 func ReadOverloaded(threshold time.Duration, waits ...time.Duration) bool {
 	state := &readState{}
 	observe := state.connectionWaitObserver(context.Background())
@@ -33,8 +30,7 @@ func ReadOverloaded(threshold time.Duration, waits ...time.Duration) bool {
 	return state.overloaded(threshold)
 }
 
-// ReadOverloadedByAcquisition reports whether a single connection acquisition that waited wait
-// and ended with err, observed under requestCtx, counts as overloaded against threshold.
+// ReadOverloadedByAcquisition reports whether one acquisition counts as overloaded.
 func ReadOverloadedByAcquisition(
 	requestCtx context.Context, threshold, wait time.Duration, err error,
 ) bool {
@@ -43,8 +39,7 @@ func ReadOverloadedByAcquisition(
 	return state.overloaded(threshold)
 }
 
-// ReserveReadMemory takes n bytes from s's read memory pool as though a read held them, and
-// returns the function that gives them back.
+// ReserveReadMemory reserves n bytes of s's read memory pool and returns the release.
 func ReserveReadMemory(s *Server, n int64) (func(), error) {
 	if err := s.memory.Reserve(context.Background(), n); err != nil {
 		return nil, err

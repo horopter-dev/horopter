@@ -37,11 +37,7 @@ import (
 
 var fixed = time.Date(2026, 9, 14, 10, 30, 0, 0, time.UTC)
 
-// The tests share a database that nothing truncates, so every tenant and event id a
-// test puts into it has to be one no earlier execution used. procToken separates one
-// `go test` process from the next; seedSeq and tenantSeq separate every call within a
-// process, which is what makes -count=N (and rerunning the mutations below by hand)
-// do real work instead of colliding with a prior run.
+// The shared database is never truncated, so ids are unique per process and per call.
 var (
 	procToken = strconv.FormatInt(time.Now().UnixNano(), 36)
 	seedSeq   atomic.Uint64
@@ -54,10 +50,7 @@ func newServer(t *testing.T) (http.Handler, *postgres.Store, string) {
 	return srv.Routes(), s, tn
 }
 
-// newServerWith serves a store whose pool holds poolMaxConns connections — zero leaves pgxpool's
-// default — under limits, authenticating through a fresh Authenticator over that same store. The
-// concurrency limit starts at the pool size, so a small pool is how a test lets one held read
-// fill it.
+// The concurrency limit starts at the pool size, so a small pool lets one held read fill it.
 func newServerWith(
 	t *testing.T, poolMaxConns int, limits egress.Limits,
 ) (*egress.Server, *postgres.Store, string) {
@@ -69,8 +62,6 @@ func newServerWith(
 	return srv, s, tn
 }
 
-// openTestStore opens the test database with a pool of poolMaxConns connections, zero for
-// pgxpool's default, and returns it with a tenant no other test uses.
 func openTestStore(t *testing.T, poolMaxConns int) (*postgres.Store, string) {
 	t.Helper()
 	v := os.Getenv("HOROPTER_TEST_DSN")
@@ -94,14 +85,7 @@ func openTestStore(t *testing.T, poolMaxConns int) (*postgres.Store, string) {
 
 func fixedClock() time.Time { return fixed }
 
-// seedCredential inserts a principal and a credential of role, scoped to tenantID ("" for a
-// global credential), registering cleanup for both, and returns the plaintext key SplitKey
-// resolves. Every egress test now needs a credential: every non-probe route requires one.
-//
-// The insert goes through s's own pool, live for the call; the cleanup goes through
-// testdb's shared pool instead, since several tests in this package close s's pool before
-// the test ends, and a cleanup racing that closed pool would silently leave the row behind
-// for testdb's own tenant cleanup to trip over as a foreign-key violation.
+// Cleanup uses testdb's pool: several tests close s's pool before the test ends.
 func seedCredential(t *testing.T, s *postgres.Store, role, tenantID string) string {
 	t.Helper()
 	key, prefix, hash, err := auth.NewKey(rand.Reader)
@@ -131,10 +115,6 @@ func seedCredential(t *testing.T, s *postgres.Store, role, tenantID string) stri
 	return key
 }
 
-// deleteRow removes id from table through testdb's shared, never-closed pool. Failures are
-// logged, not fatal, matching testdb's own cleanup helper: residue is exactly the condition
-// being removed, so failing an otherwise passing test over it would trade a tidy database
-// for a flaky suite.
 func deleteRow(t *testing.T, table, id string) {
 	t.Helper()
 	pool, err := testdb.Pool()
@@ -148,20 +128,12 @@ func deleteRow(t *testing.T, table, id string) {
 	}
 }
 
-// readerKey mints a reader credential scoped to tn on s. It is the credential most tests in
-// this file drive requests with, since most of what egress serves is scoped to one tenant.
 func readerKey(t *testing.T, s *postgres.Store, tn string) string {
 	t.Helper()
 	return seedCredential(t, s, "reader", tn)
 }
 
-// warmCredentialCache issues one authenticated request so key's credential is cached before
-// the caller does whatever it means to measure or constrain next: an uncached lookup's own
-// database round trip — or, against a pool this call is about to exhaust or close, its
-// failure — would otherwise land on that measurement instead of on this throwaway read.
-//
-// This file is compiled under -race, unlike expansion_test.go: keep this here, not there, or
-// a race build fails on every caller outside that file.
+// Keep in this file: expansion_test.go is excluded under -race.
 func warmCredentialCache(t *testing.T, h http.Handler, key, tn string) {
 	t.Helper()
 	rec := get(t, h, key, "/v1/changes?tenant="+tn+
@@ -169,12 +141,6 @@ func warmCredentialCache(t *testing.T, h http.Handler, key, tn string) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
-// seed writes directly through the store: egress has no write path of its own.
-// core.Event.Validate requires event.id to be a syntactically valid ULID, so id comes
-// from core.NewULID with crypto/rand entropy — the same source production uses — rather
-// than a counter-built string; crypto/rand's 80 bits of entropy per millisecond is what
-// keeps ids unique across every tenant and every execution of this never-truncated
-// database, the same guarantee production relies on.
 func seed(t *testing.T, s *postgres.Store, tn, ref, typ string, at time.Time) {
 	t.Helper()
 	id := core.NewULID(time.Now(), rand.Reader)
@@ -188,12 +154,6 @@ func seed(t *testing.T, s *postgres.Store, tn, ref, typ string, at time.Time) {
 	require.NoError(t, err)
 }
 
-// seedManyEvents inserts n raw event rows in a single batched round trip, bypassing
-// AppendEvent's projection fold entirely. The MaxLimit truncation tests need more
-// rows than the cap, and folding each one into a change through a full transaction
-// (as AppendEvent does) would make that setup slow for no benefit: these tests only
-// exercise the HTTP layer's limit handling, not the store's write path, which is
-// already covered elsewhere and which egress does not call in the first place.
 func seedManyEvents(t *testing.T, s *postgres.Store, tn string, n int) {
 	t.Helper()
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
@@ -216,20 +176,13 @@ func seedManyEvents(t *testing.T, s *postgres.Store, tn string, n int) {
 	}
 }
 
-// seedManyChanges inserts n raw change rows directly, one per distinct ref, for the
-// same reason and by the same means as seedManyEvents: QueryChanges reads only the
-// change table, so this is the cheapest way to put more than MaxLimit rows in front
-// of it.
 func seedManyChanges(t *testing.T, s *postgres.Store, tn string, n int) {
 	t.Helper()
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
 	batch := &pgx.Batch{}
 	for range n {
 		ref := fmt.Sprintf("ci/bulk-%s-%s-%d", t.Name(), procToken, tenantSeq.Add(1))
-		// start_at and end_effective are omitted deliberately: Postgres generates both,
-		// and a generated column rejects any value an INSERT supplies for it. started_at
-		// carries the asserted start these rows stand in for; first_seen_at repeats it,
-		// which is what a ref whose earliest event IS its start event folds to.
+		// start_at and end_effective are generated columns and reject supplied values.
 		batch.Queue(`
 			INSERT INTO change (tenant, ref, subject, type, title, actor, started_at,
 			                     first_seen_at, end_at, status, attributes, last_event_id)
@@ -245,7 +198,6 @@ func seedManyChanges(t *testing.T, s *postgres.Store, tn string, n int) {
 	}
 }
 
-// get drives an authenticated GET against h, sending key as a bearer credential.
 func get(t *testing.T, h http.Handler, key, url string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, url, nil)
@@ -255,9 +207,6 @@ func get(t *testing.T, h http.Handler, key, url string) *httptest.ResponseRecord
 	return rec
 }
 
-// getUnauthenticated drives a request against h with no Authorization header. route is a
-// registered pattern, "METHOD /path" as routesOf and collectRoutePatterns report it — not a
-// full URL — so the method is split off before the request is built.
 func getUnauthenticated(t *testing.T, h http.Handler, route string) *httptest.ResponseRecorder {
 	t.Helper()
 	method, path, ok := strings.Cut(route, " ")
@@ -267,8 +216,6 @@ func getUnauthenticated(t *testing.T, h http.Handler, route string) *httptest.Re
 	return rec
 }
 
-// postTo drives an authenticated POST against h, with no body: every use of this in the
-// package drives a route that either no longer exists or never reads one.
 func postTo(t *testing.T, h http.Handler, key, url string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, url, nil)
@@ -278,35 +225,25 @@ func postTo(t *testing.T, h http.Handler, key, url string) *httptest.ResponseRec
 	return rec
 }
 
-// routesOf enumerates every route Routes registers, read from server.go's own AST via
-// collectRoutePatterns: net/http's ServeMux has no method that lists its own registrations,
-// so this reads the source instead of hand-maintaining a duplicate list. h is unused; it is
-// a parameter so a call at the point of use reads like it is asking the running server.
+// ServeMux cannot list its routes, so they are read from server.go's AST.
 func routesOf(t *testing.T, _ http.Handler) []string {
 	t.Helper()
 	return collectRoutePatterns(t)
 }
 
-// isProbe reports whether route is one of the two unauthenticated liveness/readiness
-// probes.
 func isProbe(route string) bool {
 	return route == "GET /healthz" || route == "GET /readyz"
 }
 
-// admittedCount reports how many reads srv's concurrency limiter currently holds a permit
-// for.
 func admittedCount(t *testing.T, srv *egress.Server) int {
 	t.Helper()
 	return egress.InFlight(srv)
 }
 
-// jsonChange is the subset of a rendered /v1/changes entry the tests in this file read
-// back.
 type jsonChange struct {
 	Ref string `json:"ref"`
 }
 
-// changesOf decodes a /v1/changes response body.
 func changesOf(t *testing.T, rec *httptest.ResponseRecorder) []jsonChange {
 	t.Helper()
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -353,13 +290,6 @@ func TestGrafanaAdapterUsesEpochMillis(t *testing.T) {
 		"an open change ends at the injected clock, not the wall clock")
 }
 
-// TestGrafanaRejectsMalformedEpochMillis exists because
-// TestEgressRejectsMalformedTimeParams only exercises rfc3339Param, via /v1/changes —
-// nothing drove a malformed value through epochMillisParam, the parser the Grafana
-// endpoint actually uses. The needle is "epoch milliseconds" rather than "from":
-// an earlier assertion on the bare word "id" was satisfied by the word "invalid" in
-// the error's own prefix, so this pins wording long enough that only the intended
-// message can match it.
 func TestGrafanaRejectsMalformedEpochMillis(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
@@ -388,8 +318,6 @@ func TestOTLPAdapterUsesNanoseconds(t *testing.T) {
 			"string — the unit and the string encoding both live in the adapter")
 }
 
-// onlySpan reaches through the OTLP envelope to the single span a test's fixture
-// produces.
 func onlySpan(t *testing.T, envelope map[string]any) map[string]any {
 	t.Helper()
 	resourceSpans, ok := envelope["resourceSpans"].([]any)
@@ -430,11 +358,7 @@ func TestListEventsReturnsRawLog(t *testing.T) {
 	assert.Equal(t, "ci/dep-10", events[0]["correlation_ref"])
 	assert.Equal(t, "deployment.started", events[0]["type"])
 
-	// The second seed() call above passes ref "", which stores CorrelationRef as the zero
-	// core.Ref — a point event. Every other seed() call in this suite passes a non-empty
-	// ref, so nothing else exercises how a point event's correlation_ref renders. It is
-	// fetched here with no ref filter, since a point's projection ref is <locus>/<its own
-	// event id>, which this test never captures on its own.
+	// The "" ref seeded above is the suite's only point event.
 	full := get(t, h, key, "/v1/events?tenant="+tn)
 	require.Equal(t, http.StatusOK, full.Code, full.Body.String())
 	all := eventsBody(t, full)
@@ -449,10 +373,7 @@ func TestListEventsReturnsRawLog(t *testing.T) {
 		"a point event's correlation_ref must render as the empty string, not \"/\"")
 }
 
-// TestLimitParamRejectsInvalidValues pins that a non-numeric or negative "limit" is
-// rejected outright rather than silently falling through to the store's own "0 means
-// unlimited" convention — a reader credential can already reach a tenant's whole change
-// history in one request if MaxLimit is not enforced.
+// A negative or non-numeric limit must not fall through to the store's 0 = unlimited.
 func TestLimitParamRejectsInvalidValues(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
@@ -469,10 +390,6 @@ func TestLimitParamRejectsInvalidValues(t *testing.T) {
 		"the response must name the accepted range")
 }
 
-// TestListEventsIsCappedAtMaxLimit seeds more rows than MaxLimit and checks both that
-// the default (no "limit" parameter) truncates to it, and that a caller-supplied
-// value above the cap is clamped rather than honored — the second case is what an
-// unbounded-query mutation would restore.
 func TestListEventsIsCappedAtMaxLimit(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
@@ -494,10 +411,6 @@ func TestListEventsIsCappedAtMaxLimit(t *testing.T) {
 	assert.Equal(t, "true", recBig.Header().Get(egress.TruncatedHeader))
 }
 
-// TestQueryChangesIsCappedAtMaxLimit is TestListEventsIsCappedAtMaxLimit's
-// counterpart for /v1/changes, which reads through a separate store method
-// (QueryChanges, not ListEvents) with its own independent LIMIT application — the two
-// caps are not proven by one test alone.
 func TestQueryChangesIsCappedAtMaxLimit(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
@@ -512,28 +425,13 @@ func TestQueryChangesIsCappedAtMaxLimit(t *testing.T) {
 		"a result cut short at exactly the cap must say so")
 }
 
-// TestReadyzReportsReadyWithLiveDatabase and its 503 counterparts below drive the probe
-// with no Authorization header, since an orchestrator holds no credential to send — probes
-// stay reachable without one.
 func TestReadyzReportsReadyWithLiveDatabase(t *testing.T) {
 	h, _, _ := newServer(t)
 	rec := getUnauthenticated(t, h, "GET /readyz")
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
-// TestHealthzWorksWithNilStore proves healthz never touches the database, without
-// needing a live one: New does not dereference a nil store — concurrencyBounds
-// special-cases nil rather than calling its Pool() — and a Server built with a nil
-// store still has to answer 200 from healthz for that to hold. It runs
-// unconditionally — no HOROPTER_TEST_DSN skip, and driven through the real Routes()
-// mux rather than calling the handler directly — because it is the one property in
-// this suite that a database-less CI leg can actually exercise: every other test here
-// skips without a live Postgres, so without this one the liveness/readiness split
-// would have zero coverage in that environment. If a future change reintroduces a
-// Pool().Ping call into healthz, this test panics on the nil store and fails.
-//
-// The authenticator's own lookup is nil too: healthz is registered unwrapped, so nothing
-// ever calls it.
+// Runs without a database: the only liveness coverage on a DB-less CI leg.
 func TestHealthzWorksWithNilStore(t *testing.T) {
 	authn := auth.New(nil, fixedClock, auth.DefaultOptions())
 	srv, err := egress.New(nil, fixedClock, egress.DefaultLimits(), authn)
@@ -544,11 +442,6 @@ func TestHealthzWorksWithNilStore(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "healthz must not require a database")
 }
 
-// TestNewRejectsANilAuthenticator pins the guard where it is structural rather than
-// remembered: every non-probe route is gated on the authenticator, so a Server built
-// without one would either panic on the first request or need every caller to remember
-// the check itself. It runs unconditionally: a constructor that refuses its argument
-// needs no database.
 func TestNewRejectsANilAuthenticator(t *testing.T) {
 	srv, err := egress.New(nil, fixedClock, egress.DefaultLimits(), nil)
 	require.Error(t, err, "a nil authenticator would panic on the first request rather "+
@@ -556,10 +449,6 @@ func TestNewRejectsANilAuthenticator(t *testing.T) {
 	assert.Nil(t, srv, "a rejected configuration must not yield a usable server")
 }
 
-// routeHandleCall reports the mux.Handle/mux.HandleFunc pattern a call expression
-// registers, and whether it is such a call at all. It exists so
-// collectRoutePatterns's walk can filter with one call instead of the four chained
-// type assertions that recognizing a route-registration call requires.
 func routeHandleCall(t *testing.T, call *ast.CallExpr) (string, bool) {
 	t.Helper()
 	sel, ok := call.Fun.(*ast.SelectorExpr)
@@ -579,10 +468,6 @@ func routeHandleCall(t *testing.T, call *ast.CallExpr) (string, bool) {
 	return pattern, true
 }
 
-// collectRoutePatterns parses server.go and returns the pattern string registered by
-// every mux.Handle/mux.HandleFunc call inside the Routes method — the route table
-// TestEveryNonProbeEgressRouteRequiresACredential and TestNoWriteRouteIsRegisteredAnywhere
-// check.
 func collectRoutePatterns(t *testing.T) []string {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -610,14 +495,6 @@ func collectRoutePatterns(t *testing.T) []string {
 	return patterns
 }
 
-// TestNoWriteRouteIsRegisteredAnywhere asserts, with a general structural check, that
-// egress exposes no write route anywhere: every pattern collectRoutePatterns finds must
-// start with "GET ". A single HTTP probe against one path can only ever prove that one
-// path has no write twin; a write route registered at any other path — POST
-// /v1/ingest, PUT /v1/changes — would pass every HTTP-level test in this file while
-// never being exercised. Reading the source is what generalizes the property to "no
-// write route anywhere", not just "no write route at this one URL".
-// It needs no database and runs unconditionally, like TestHealthzWorksWithNilStore.
 func TestNoWriteRouteIsRegisteredAnywhere(t *testing.T) {
 	patterns := collectRoutePatterns(t)
 
@@ -628,15 +505,7 @@ func TestNoWriteRouteIsRegisteredAnywhere(t *testing.T) {
 	}
 }
 
-// TestTruncationIsSignalledOnEveryReadEndpoint drives both directions of the signal
-// through all four read endpoints. Three of them read changes and one reads events, and
-// two render vendor-owned shapes that could not carry an envelope flag — which is why the
-// signal is a header, and why one endpoint's coverage says nothing about the other three.
-//
-// The untruncated case is the one that matters most: it asks for exactly as many rows as
-// exist, which is precisely the case a "did we hit the limit?" count cannot tell apart
-// from a truncated one. Only the over-fetch can, so a mechanism that marked every
-// at-the-limit result as truncated would fail here.
+// Asking for exactly as many rows as exist is the case a count cannot tell from truncation.
 func TestTruncationIsSignalledOnEveryReadEndpoint(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
@@ -667,16 +536,7 @@ func TestTruncationIsSignalledOnEveryReadEndpoint(t *testing.T) {
 	}
 }
 
-// TestQueryChangesEmitsBothStartFacts pins the two keys migration 0003 split "start" into.
-// The central argument for splitting them is that first_seen_at < started_at — an event
-// claiming to predate the change's declared start — must be a QUERYABLE anomaly rather
-// than one the fold destroyed. That is unreachable if the read side never emits the two
-// facts, so the split buys nothing without these keys.
-//
-// The absent case is asserted as well as the present one: started_at missing means "no
-// producer has asserted a start yet", which is a different fact from any timestamp, and a
-// renderer that defaulted it to first_seen_at would put the inference back in the
-// assertion's slot — the exact conflation 0003 exists to undo.
+// An absent started_at must stay absent, never default to first_seen_at.
 func TestQueryChangesEmitsBothStartFacts(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
@@ -692,7 +552,6 @@ func TestQueryChangesEmitsBothStartFacts(t *testing.T) {
 		return changes[0]
 	}
 
-	// An annotation only: evidence the change exists, with nothing asserting its start.
 	seed(t, s, tn, "ci/dep-facts", "deployment.annotated", seen)
 
 	inferred := only()
@@ -703,7 +562,6 @@ func TestQueryChangesEmitsBothStartFacts(t *testing.T) {
 	assert.Equal(t, seen.Format(time.RFC3339Nano), inferred["start"],
 		"start falls through to the inference while the assertion is NULL")
 
-	// Now a start event asserting a LATER time than the earliest evidence.
 	seed(t, s, tn, "ci/dep-facts", "deployment.started", asserted)
 
 	got := only()
@@ -716,15 +574,7 @@ func TestQueryChangesEmitsBothStartFacts(t *testing.T) {
 		"start follows the assertion once there is one")
 }
 
-// TestReadyzReports503WhenTheDatabaseIsUnreachable is the half of the readiness contract
-// that matters. A readiness probe exists to remove a pod from the load balancer, so a
-// readyz that only ever answers 200 is worse than none: it keeps a daemon that cannot
-// reach its database in rotation, answering every query with a 500. The happy path above
-// cannot catch that — a handler that returned 200 unconditionally passes it.
-//
-// Closing the pool is a real database outage rather than a faked error: Ping then fails
-// the way it fails when Postgres is gone, which is the case readyz exists for.
-// pgxpool.Close is guarded by a sync.Once, so newServer's own t.Cleanup close is safe.
+// pgxpool.Close is idempotent, so newServer's own cleanup close stays safe.
 func TestReadyzReports503WhenTheDatabaseIsUnreachable(t *testing.T) {
 	h, s, _ := newServer(t)
 	s.Close()
@@ -735,10 +585,7 @@ func TestReadyzReports503WhenTheDatabaseIsUnreachable(t *testing.T) {
 		"an operator reading the probe's body must be told what is wrong")
 }
 
-// TestReadyzDoesNotRelayTheDatabaseError pins what the 503 body withholds. The probe is
-// unauthenticated — an orchestrator has no credential to send — and pgx formats a failed
-// connection with the database user, database name, host and port, so relaying the error
-// handed all four to anyone who could reach the port during an outage.
+// pgx's error names the DB user, name, host and port; the probe is unauthenticated.
 func TestReadyzDoesNotRelayTheDatabaseError(t *testing.T) {
 	h, s, _ := newServer(t)
 	s.Close()
@@ -749,9 +596,6 @@ func TestReadyzDoesNotRelayTheDatabaseError(t *testing.T) {
 		"the database error must not reach an unauthenticated caller")
 }
 
-// TestFailedReadinessProbeLogsItsCause is the other half: withholding the error from the
-// body must not lose it. A pod that drops out of rotation with no record of why leaves an
-// operator reproducing the probe by hand to find out.
 func TestFailedReadinessProbeLogsItsCause(t *testing.T) {
 	h, s, _ := newServer(t)
 	s.Close()
@@ -767,15 +611,7 @@ func TestFailedReadinessProbeLogsItsCause(t *testing.T) {
 	assert.True(t, logged, "the probe's failure must reach the server log; got %v", records())
 }
 
-// TestEgressRejectsAnInvertedWindow pins from > to as the caller's error on every window
-// parser egress has. It was accepted: the overlap predicate is
-// "start_at <= :to AND end_effective >= :from", so an inverted window does not return
-// nothing, it returns the changes SPANNING the interval the caller inverted — a
-// plausible-looking answer to a question nobody asked.
-//
-// Both transports are driven because the rule lives in newWindow and each parser has to
-// route through it; a parser that built a window literal instead would pass every other
-// test in this file.
+// An inverted window returned the changes spanning it, not an empty list.
 func TestEgressRejectsAnInvertedWindow(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
@@ -799,15 +635,7 @@ func TestEgressRejectsAnInvertedWindow(t *testing.T) {
 	}
 }
 
-// TestGrafanaRejectsAnOutOfRangeEpochWindow pins the epoch bound. epochMillisParam
-// accepted any int64, and the failure that produced was silent rather than loud:
-// to=9223372036854775807 is a year-292278994 time.Time, pgx encodes timestamptz as
-// microseconds since 2000-01-01 in an int64, and that overflows — measured on this stack
-// it binds as 1969-12-31T23:59:59.999Z. The endpoint answered 200 with an empty list, so
-// a caller asking for everything up to the end of time was told there was nothing, with
-// no error raised anywhere for an operator to see. The assertions check both halves: the
-// status is the caller's own 400, and the body names the caller's parameter rather than
-// our store.
+// int64-max millis overflowed pgx's timestamptz encoding and silently returned [].
 func TestGrafanaRejectsAnOutOfRangeEpochWindow(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
@@ -828,10 +656,6 @@ func TestGrafanaRejectsAnOutOfRangeEpochWindow(t *testing.T) {
 	}
 }
 
-// TestGrafanaAcceptsTheEpochBoundsThemselves pins the other side of the bound: the epoch
-// itself and the open-ended sentinel are valid instants, and a dashboard asking for
-// "everything" sends exactly those. Making either comparison strict refuses them as out of
-// range, which only a test at the bound can tell from a correct check.
 func TestGrafanaAcceptsTheEpochBoundsThemselves(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
@@ -841,12 +665,7 @@ func TestGrafanaAcceptsTheEpochBoundsThemselves(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
-// recordSpans installs a recording provider and returns it with a restore function.
-//
-// This is a copy of internal/store/postgres/append_test.go's helper of the same name,
-// not an import: that file is package postgres_test and this is package egress_test, so
-// it cannot be imported. The restore is best-effort and deliberately named for what it
-// attempts rather than what it guarantees — see the postgres copy for why.
+// Copied from postgres/append_test.go: a _test package cannot be imported.
 func recordSpans(t *testing.T) (*tracetest.SpanRecorder, func()) {
 	t.Helper()
 	rec := tracetest.NewSpanRecorder()
@@ -855,11 +674,7 @@ func recordSpans(t *testing.T) (*tracetest.SpanRecorder, func()) {
 	return rec, func() { otel.SetTracerProvider(prev) }
 }
 
-// spanAttrValues returns key's value from every ended span named spanName, in the order
-// the spans ended. A span lacking the attribute is SKIPPED rather than contributing an
-// empty entry. Pass "" as spanName to match every span. kv.Value.String() is used rather
-// than the deprecated Emit(), which staticcheck rejects under SA1019 on the pinned otel
-// v1.46.0.
+// Spans lacking key are skipped. Value.String, not Emit: staticcheck SA1019.
 func spanAttrValues(rec *tracetest.SpanRecorder, spanName, key string) []string {
 	var out []string
 	for _, span := range rec.Ended() {
@@ -875,21 +690,9 @@ func spanAttrValues(rec *tracetest.SpanRecorder, spanName, key string) []string 
 	return out
 }
 
-// TestFailedRenderStillRecordsTheAdapter is the failure half of horopter.adapter. Which
-// vendor shape a request was for is known before the query runs, and a failing query is
-// exactly when it matters — "Grafana's annotation calls are erroring" and "the OTLP span
-// endpoint is erroring" are different incidents. Recording it after the query succeeded
-// left every 500 unattributed.
-//
-// Closing the store is what makes the query fail without reaching into the handler:
-// pgxpool.Close is idempotent, so newServer's own t.Cleanup(s.Close) still runs safely.
 func TestFailedRenderStillRecordsTheAdapter(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
-	// Warmed before spans are recorded and the pool closes: the authenticator shares the
-	// store's own pool, so an unwarmed cache would answer 503 from the credential lookup
-	// instead of from the render this test means to exercise, and its own span would
-	// pollute what this test asserts about the render's.
 	warmCredentialCache(t, h, key, tn)
 
 	rec, restore := recordSpans(t)
@@ -905,14 +708,10 @@ func TestFailedRenderStillRecordsTheAdapter(t *testing.T) {
 		"a failed render must still say which adapter asked")
 }
 
-// readRoute is one request against one egress read route, naming the pattern Routes
-// registers it under so TestEveryReadRouteHasAFailureCase can match the two up.
 type readRoute struct {
 	pattern, url string
 }
 
-// readRoutes returns one well-formed request per egress read route, naming tenant tn.
-// Every request is valid, so a failure can only come from the store.
 func readRoutes(tn string) []readRoute {
 	const rfc3339Window = "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
 	return []readRoute{
@@ -929,9 +728,7 @@ func (rr readRoute) serve(t *testing.T, h http.Handler, key string) *httptest.Re
 	return get(t, h, key, rr.url)
 }
 
-// captureLogs sends slog's default logger to a buffer until the test ends, and returns a
-// function decoding every record written so far. Swapping a process-wide default is safe
-// only because no test in this package calls t.Parallel.
+// Swapping the process-wide default is safe only while no test here calls t.Parallel.
 func captureLogs(t *testing.T) func() []map[string]any {
 	t.Helper()
 	var buf bytes.Buffer
@@ -950,11 +747,6 @@ func captureLogs(t *testing.T) func() []map[string]any {
 	}
 }
 
-// TestEveryReadRouteHasAFailureCase keeps readRoutes complete. The two failure-policy
-// tests below drive every route in it, so a read route registered in Routes but missing
-// here would be one whose failures nobody checks are logged or withheld — exactly how all
-// four read paths came to fail silently. The probes are excluded: they read no tenant's
-// data and have their own failure tests.
 func TestEveryReadRouteHasAFailureCase(t *testing.T) {
 	var covered []string
 	for _, route := range readRoutes("any") {
@@ -970,18 +762,9 @@ func TestEveryReadRouteHasAFailureCase(t *testing.T) {
 		"readRoutes must list every read route Routes registers, and nothing else")
 }
 
-// TestEveryFailedReadIsLoggedWithItsCause pins the server-side half of egress's failure
-// policy. Every read route used to answer a store failure with a 500 and log nothing, so
-// an operator watching an hour of blank Grafana panels found two startup lines in the
-// daemon's output and no record of why; the only copy of the cause went to a caller the
-// operator does not control. Tracing is no substitute: it is off by default.
-//
-// The tenant is asserted with the cause because which tenant's reads are failing is the
-// first thing an operator needs from the line.
 func TestEveryFailedReadIsLoggedWithItsCause(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
-	// Warmed before the pool closes: see TestFailedRenderStillRecordsTheAdapter.
 	warmCredentialCache(t, h, key, tn)
 	s.Close()
 
@@ -1003,16 +786,9 @@ func TestEveryFailedReadIsLoggedWithItsCause(t *testing.T) {
 	}
 }
 
-// TestFailedReadDoesNotRelayStoreErrorText pins the caller-facing half. The store's error
-// names tables, columns and constraints — and for a failed connection the database host,
-// user and name — so relaying it published that detail to anyone holding a valid
-// credential. The wrapped error also carried the caller's own tenant string, making every
-// failing route a reflector for caller-chosen text. Ingress's appendFailed withholds the
-// same text for the same reason.
 func TestFailedReadDoesNotRelayStoreErrorText(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
-	// Warmed before the pool closes: see TestFailedRenderStillRecordsTheAdapter.
 	warmCredentialCache(t, h, key, tn)
 	s.Close()
 
@@ -1028,9 +804,6 @@ func TestFailedReadDoesNotRelayStoreErrorText(t *testing.T) {
 	}
 }
 
-// seedWith appends an event with an explicit subject, so a filter test can tell the
-// subject and type columns apart. seed() hardcodes one subject for every event, so a
-// test built on it cannot distinguish filtering by subject from filtering by type.
 func seedWith(t *testing.T, s *postgres.Store, tn, ref, typ, subject string, at time.Time) {
 	t.Helper()
 	id := core.NewULID(time.Now(), rand.Reader)
@@ -1044,7 +817,6 @@ func seedWith(t *testing.T, s *postgres.Store, tn, ref, typ, subject string, at 
 	require.NoError(t, err)
 }
 
-// refsIn returns the refs of a /v1/changes response, for comparing result sets.
 func refsIn(t *testing.T, rec *httptest.ResponseRecorder) []string {
 	t.Helper()
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -1057,15 +829,7 @@ func refsIn(t *testing.T, rec *httptest.ResponseRecorder) []string {
 	return refs
 }
 
-// The subject, type and status query parameters had no end-to-end coverage: the store
-// tests call QueryChanges with a hand-built struct and so skip the URL-to-struct wiring
-// entirely. A transposition there — Subject reading "type", Type reading "subject" — is
-// invisible to every other test, and it is the mechanism a Grafana dashboard uses to
-// scope a query.
-//
-// The two changes differ in BOTH subject and type, so a swap makes each filter select
-// nothing rather than selecting the wrong row. A fixture sharing one subject cannot tell
-// the two columns apart at all.
+// The changes differ in subject AND type, so a transposed wire selects nothing.
 func TestQueryChangesFiltersBySubjectAndType(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
@@ -1086,9 +850,6 @@ func TestQueryChangesFiltersBySubjectAndType(t *testing.T) {
 		"type= must filter on type, not on subject")
 }
 
-// status= is wired separately and is dropped just as silently: without it the endpoint
-// answers every status query with the unfiltered set, so a dashboard asking for failures
-// is handed everything and shows no error.
 func TestQueryChangesFiltersByStatus(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
@@ -1110,15 +871,7 @@ func TestQueryChangesFiltersByStatus(t *testing.T) {
 		"the complementary status must select the other change")
 }
 
-// seedSpec is one change to seed, named rather than positional. seedWith hardcodes source
-// "ci" and empty attributes, which is enough for the subject and type filters and not for
-// these.
-//
-// The stored ref's first segment is what change.locus is generated from, so ref "gha/dep-1"
-// seeds a change in the gha locus.
-//
-// Named seedSpec, not seed: seed is already the package's existing single-event helper
-// above, and a struct sharing its name would not compile alongside it.
+// The ref's first segment becomes change.locus.
 type seedSpec struct {
 	tenant, ref, source string
 	attrs               map[string]any
@@ -1142,13 +895,7 @@ func seedChange(t *testing.T, s *postgres.Store, sd seedSpec, at time.Time) {
 	require.NoError(t, err)
 }
 
-// TestQueryChangesFiltersByLocusAndSource pins the two scalar filters together, because
-// they are wired in adjacent lines from adjacent query parameters and a transposition
-// between them is invisible to every other test.
-//
-// The two changes share a source and differ in locus, then share a locus and differ in
-// source, so each filter is the only thing that can select exactly one row — a clause
-// reading the other column matches none or both, never the one expected.
+// Each filter alone selects exactly one row; a transposed column matches none or both.
 func TestQueryChangesFiltersByLocusAndSource(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
@@ -1177,9 +924,7 @@ func TestQueryChangesFiltersByLocusAndSource(t *testing.T) {
 		"a present but empty value is no filter, as an empty subject= is")
 }
 
-// TestQueryChangesFiltersByAllowlistedAttribute covers the ?attr.<key>= surface, including
-// that everything after the prefix is the key: attribute keys are dotted by convention, so
-// a parser splitting on "." would truncate every real one to "deployment".
+// Attribute keys are dotted, so everything after the prefix is the key.
 func TestQueryChangesFiltersByAllowlistedAttribute(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
@@ -1201,21 +946,7 @@ func TestQueryChangesFiltersByAllowlistedAttribute(t *testing.T) {
 		"an empty value is no filter, as an empty subject= is")
 }
 
-// TestQueryChangesRefusesAnUnfilterableAttributeKey is the assertion that proves the
-// allowlist reaches the HTTP surface. Filtering on an allowlisted key passes whether or not
-// the allowlist is enforced; only a refusal discriminates.
-//
-// 400 rather than 500: an unknown key is the caller's mistake, and readFailed's 500 would
-// tell them the server is broken when their query is. And 400 rather than an unfiltered
-// 200, because a caller handed every row in answer to a narrowing question has been told
-// something false.
-//
-// The empty-value case is the interesting one, and it is deliberately NOT treated as "no
-// filter" the way an empty subject= is. What is wrong is the KEY, not the filter: accepting
-// ?attr.typo.key= and then refusing ?attr.typo.key=prod would make one mistake behave two
-// ways depending on whether the caller filled the box in, which is a worse answer than
-// either. An allowlisted key with an empty value IS no filter — that is
-// TestQueryChangesFiltersByAllowlistedAttribute's second assertion.
+// An unknown key is refused even with an empty value: the key is the mistake.
 func TestQueryChangesRefusesAnUnfilterableAttributeKey(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
@@ -1236,9 +967,6 @@ func TestQueryChangesRefusesAnUnfilterableAttributeKey(t *testing.T) {
 	}
 }
 
-// TestChangesRenderTheirSources pins the field to the response. A filter on a value the
-// caller cannot read back is half a feature: source was asked for both returned AND
-// filtered.
 func TestChangesRenderTheirSources(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
@@ -1256,14 +984,7 @@ func TestChangesRenderTheirSources(t *testing.T) {
 		"ref already carries the locus; a second copy is a second thing to keep in agreement")
 }
 
-// TestEveryNonProbeEgressRouteRequiresACredential asserts, by enumerating the mux rather
-// than driving a hand-written list of URLs, that a credential guards every route but the
-// two probes. A hand-written list of routes can go stale the moment a route is added; this
-// cannot, because it is the same enumeration TestNoWriteRouteIsRegisteredAnywhere reads.
-//
-// isProbe itself is a hand-written two-entry list, so the count below is what keeps it
-// honest: without it, a fifth non-probe route would just be looped over and asserted like
-// the other four, and nothing would say the count had changed at all.
+// The count keeps isProbe's hand-written list honest.
 func TestEveryNonProbeEgressRouteRequiresACredential(t *testing.T) {
 	srv, _, _ := newServerWith(t, 0, egress.DefaultLimits())
 	h := srv.Routes()
@@ -1285,12 +1006,6 @@ func TestEveryNonProbeEgressRouteRequiresACredential(t *testing.T) {
 	}
 }
 
-// TestAuthRejectsBeforeAdmissionSpendsAPermit is the ordering guarantee Routes' shape
-// exists for: s.authz(auth.CapRead, s.admit(...)), never the reverse. If admission ran
-// first, an unauthenticated request would consume a read permit before being rejected — a
-// free denial of service against the limiter — and the credential lookup itself takes a
-// pool connection admission is sized from, so an unauthenticated flood would also compete
-// for what admission exists to protect.
 func TestAuthRejectsBeforeAdmissionSpendsAPermit(t *testing.T) {
 	srv, s, tn := newServerWith(t, 1, testLimits())
 	h := srv.Routes()
@@ -1303,15 +1018,7 @@ func TestAuthRejectsBeforeAdmissionSpendsAPermit(t *testing.T) {
 	require.Equal(t, 1, admittedCount(t, srv),
 		"the limiter's one permit must be held, or this test proves nothing")
 
-	// A wrong ordering — admission reached before auth — would not answer 401 here: the
-	// limiter's one permit is held, so the concurrency gate alone would wait out
-	// AdmissionWait and shed with 503, and admit's own tenant resolution (which needs the
-	// principal auth attaches) would refuse with 400 before it ever found one to read.
-	// Comparing InFlight() before and after this call does not discriminate a wrong
-	// ordering from the correct one: a permit taken and released within this one
-	// synchronous request is gone again by the time the caller reads the count afterward,
-	// so that comparison would pass either way. 401 is the only outcome the correct
-	// ordering produces.
+	// Only 401 discriminates: an InFlight comparison passes for either ordering.
 	rec := getUnauthenticated(t, h, "GET /v1/changes")
 	assert.Equal(t, http.StatusUnauthorized, rec.Code,
 		"auth outside admit: an unauthenticated request must be rejected before it can "+
@@ -1375,9 +1082,7 @@ func TestFetchByRefNeedsNoWindow(t *testing.T) {
 	assert.Len(t, changesOf(t, rec), 1)
 }
 
-// TestFetchByRefRoundTripsADotDotSegment pins that ref is a query parameter, not a path
-// segment: net/http's ServeMux path-cleans a URL path before it ever reaches a handler,
-// which would silently collapse "legacy/../etc" into "legacy" if ref were routed that way.
+// ServeMux path-cleans paths, so ref must stay a query parameter.
 func TestFetchByRefRoundTripsADotDotSegment(t *testing.T) {
 	srv, s, tn := newServerWith(t, 0, egress.DefaultLimits())
 	h := srv.Routes()
@@ -1390,9 +1095,7 @@ func TestFetchByRefRoundTripsADotDotSegment(t *testing.T) {
 		"a query parameter is not path-cleaned; this is why the lookup is not a path route")
 }
 
-// TestTheAnnotationPOSTRoutesAreGone drives both former POST routes. The two status codes
-// differ because one pattern survives (as a GET) and the other does not: ServeMux answers
-// 405 for a method mismatch on a registered path, 404 when nothing matches.
+// ServeMux answers 405 for a method mismatch, 404 when nothing matches.
 func TestTheAnnotationPOSTRoutesAreGone(t *testing.T) {
 	srv, s, tn := newServerWith(t, 0, egress.DefaultLimits())
 	h := srv.Routes()
@@ -1404,11 +1107,6 @@ func TestTheAnnotationPOSTRoutesAreGone(t *testing.T) {
 		"no {tenant} pattern survives, so this path matches nothing at all")
 }
 
-// TestGrafanaAnnotationsRejectsARef pins the route's shape. The ref filter belongs to
-// GET /v1/changes: it takes the full stored <locus>/<ref>, which no Grafana dashboard
-// variable can produce, and it makes the window meaningless — this route answered "what
-// overlapped from/to" while demanding a window changeSelection then discarded. Refusing it
-// names the route that does the lookup instead of quietly offering a second spelling.
 func TestGrafanaAnnotationsRejectsARef(t *testing.T) {
 	srv, s, tn := newServerWith(t, 0, egress.DefaultLimits())
 	h := srv.Routes()
@@ -1422,9 +1120,6 @@ func TestGrafanaAnnotationsRejectsARef(t *testing.T) {
 		"the refusal must name the route that does support a ref lookup")
 }
 
-// TestListEventsReturnsOriginAndEdited pins the two server-set columns on the audit route.
-// Both are stored and neither was readable: origin is the only record of whether a human or
-// a process appended the event, which is exactly what an export exists to carry.
 func TestListEventsReturnsOriginAndEdited(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
@@ -1440,10 +1135,6 @@ func TestListEventsReturnsOriginAndEdited(t *testing.T) {
 	assert.Equal(t, false, events[0]["edited"])
 }
 
-// TestListEventsReturnsLifecycle pins the producer-set field the whole opening-a-change
-// branch exists for: a producer auditing its own log must be able to tell an explicit
-// "lifecycle": "started" from a ".started" type suffix, and GET /v1/events was silently
-// omitting the one field that distinguishes them.
 func TestListEventsReturnsLifecycle(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
@@ -1466,13 +1157,7 @@ func TestListEventsReturnsLifecycle(t *testing.T) {
 		"the explicit assertion must render, not just the type suffix that would imply it")
 }
 
-// TestListEventsReturnsLocus pins the field that explains the ref transformation this route
-// otherwise shows without its input: the producer sent "dep-locus" and the stored
-// correlation_ref reads back "gha/dep-locus". Without locus, nothing in the rendered event
-// says where the prefix came from.
-//
-// The locus deliberately differs from the source, because they default to the same value and
-// a fixture using "ci" for both would pass while rendering either one.
+// Locus differs from source on purpose: they default to the same value.
 func TestListEventsReturnsLocus(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
@@ -1543,7 +1228,6 @@ func TestALongQueryIsCutAndFlagged(t *testing.T) {
 	assert.Equal(t, true, line["query_truncated"])
 }
 
-// changesBody decodes a /v1/changes envelope's rows.
 func changesBody(t *testing.T, rec *httptest.ResponseRecorder) []map[string]any {
 	t.Helper()
 	var body struct {
@@ -1554,7 +1238,6 @@ func changesBody(t *testing.T, rec *httptest.ResponseRecorder) []map[string]any 
 	return body.Changes
 }
 
-// eventsBody decodes a /v1/events envelope's rows.
 func eventsBody(t *testing.T, rec *httptest.ResponseRecorder) []map[string]any {
 	t.Helper()
 	var body struct {
@@ -1579,7 +1262,6 @@ func TestBothNeutralRoutesAnswerWithAnEnvelope(t *testing.T) {
 	assert.Empty(t, empty)
 }
 
-// follow reads every page of url by following next, returning all rows and the page count.
 func follow(t *testing.T, h http.Handler, key, url, field string) ([]map[string]any, int) {
 	t.Helper()
 	var rows []map[string]any
@@ -1610,15 +1292,13 @@ func follow(t *testing.T, h http.Handler, key, url, field string) ([]map[string]
 func TestFollowingNextReturnsEveryChangeOnceInOrder(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)
-	// seedManyChanges seeds every change at the same instant, so every page boundary falls
-	// inside a run of equal start_at values: only the ref tie-break keeps them apart.
+	// Every change starts at the same instant: only the ref tie-break separates pages.
 	seedManyChanges(t, s, tn, 2500)
 	rows, pages := follow(t, h, key,
 		"/v1/changes?from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z", "changes")
 	assert.Equal(t, 3, pages)
 	assert.Len(t, rows, 2500)
-	// Uniqueness and the count, not Go string order: Postgres orders ref by the database's
-	// collation, which need not agree with byte order, and the keyset compares the same way.
+	// Postgres collation, not Go byte order, decides ref order, so check uniqueness and count.
 	seen := map[string]bool{}
 	for _, row := range rows {
 		ref, _ := row["ref"].(string)
@@ -1671,7 +1351,6 @@ func TestTheAdapterRoutesIgnoreACursor(t *testing.T) {
 	assert.Empty(t, withCursor.Header().Get("Link"))
 }
 
-// seedChangesWithSubject seeds n correlated changes under subject, an hour apart.
 func seedChangesWithSubject(t *testing.T, s *postgres.Store, tn, subject string, n int) {
 	t.Helper()
 	for i := range n {
@@ -1698,9 +1377,7 @@ func TestNextKeepsAFilterThatNeedsEscaping(t *testing.T) {
 	assert.Len(t, rows, 3)
 }
 
-// TestFollowingNextAcrossSubSecondStartsReturnsEachChangeOnce: real starts carry fractions of a
-// second, and the cursor must keep them. A cursor cut back to the whole second resumes before
-// rows it already returned, so a caller paging with curl sees them again, page after page.
+// A cursor cut to whole seconds re-returns rows on every page.
 func TestFollowingNextAcrossSubSecondStartsReturnsEachChangeOnce(t *testing.T) {
 	h, s, tn := newServer(t)
 	key := readerKey(t, s, tn)

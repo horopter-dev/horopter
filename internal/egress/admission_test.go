@@ -24,7 +24,6 @@ import (
 	"horopter.dev/horopter/internal/store/postgres"
 )
 
-// testLimits are the defaults with a short admission wait, so a shed read answers quickly.
 func testLimits() egress.Limits {
 	limits := egress.DefaultLimits()
 	limits.AdmissionWait = 50 * time.Millisecond
@@ -35,13 +34,7 @@ func changesURL(tn string) string {
 	return "/v1/changes?tenant=" + tn + "&from=2026-09-14T09:00:00Z&to=2026-09-14T11:00:00Z"
 }
 
-// newServerWithWarmedAuth is newServerWith, plus one authenticated request already made
-// through a throwaway server that shares the returned server's Authenticator. The
-// concurrency limiter raises its limit by one on every admitted, non-overloaded read, so a
-// test that asserts the limiter's exact value cannot pay an unwarmed credential cache's cost
-// on the server it is measuring — that first lookup would itself count as a read and nudge
-// the limit up before the test ever gets to look at it. The throwaway server pays that cost
-// on a limiter nothing asserts against.
+// Warms auth on a throwaway server: the first lookup would itself raise this limiter.
 func newServerWithWarmedAuth(
 	t *testing.T, poolMaxConns int, limits egress.Limits,
 ) (srv *egress.Server, s *postgres.Store, tn, key string) {
@@ -59,10 +52,7 @@ func newServerWithWarmedAuth(
 	return srv, s, tn, key
 }
 
-// holdRead starts an authenticated GET of url on h and returns once that read holds its
-// concurrency permit, with a function that lets it finish and returns its response. Only the
-// first read admitted after the call is held; later ones pass the hook straight through. The
-// read is let go when the test ends if the test has not done so.
+// Holds only the first read admitted after the call; later ones pass straight through.
 func holdRead(t *testing.T, h http.Handler, key, url string) func() *httptest.ResponseRecorder {
 	t.Helper()
 	held, release := make(chan struct{}), make(chan struct{})
@@ -115,8 +105,6 @@ func recordsWithMessage(records []map[string]any, msg string) []map[string]any {
 	return out
 }
 
-// TestAReadOverTheConcurrencyLimitIsShed fills a one-connection server's limit of one with a
-// held read, so the next read can only be shed.
 func TestAReadOverTheConcurrencyLimitIsShed(t *testing.T) {
 	rec, restore := recordSpans(t)
 	defer restore()
@@ -161,28 +149,7 @@ func TestAReadOverTheConcurrencyLimitIsShed(t *testing.T) {
 			"connection-wait attribute; the shed read never acquired one and must not")
 }
 
-// TestConcurrencyShedFromAGlobalCredentialDoesNotQueryTenantExists pins the property that
-// took two revisions to land: resolving a global credential's named tenant is a database
-// round trip (TenantExists), and it must be neither ungated by the concurrency limiter (an
-// earlier revision resolved before Acquire, so the lookup ran once per request rather than
-// once per admitted one — an unbounded burst of global-credential requests reached Postgres
-// before admission ever applied) nor reachable from the shed path itself (a still earlier
-// revision re-resolved the tenant after Acquire had already failed, so a request the limiter
-// had just refused queried the database anyway, exactly because it was congested).
-//
-// Neither failure is visible in the HTTP response — both are about what the database saw, not
-// what the caller got back — so this checks the otelpgx statement spans every real query
-// carries, via the "db.query.text" attribute pool.go documents them as carrying. Holding one
-// read fills the one-connection limiter; the second request, on a global credential naming a
-// tenant that genuinely exists, must be shed without ever running TenantExists — if resolution
-// ran either before the gate or from the shed path, this is the query that would appear.
-//
-// recordSpans runs before newServerWith, not after: otelpgx binds its tracer to whatever
-// provider is global at pool construction (postgres/pool.go), not dynamically per query, so
-// starting the recorder any later would leave rec seeing no database spans at all — the
-// negative assertion below would then pass whether or not TenantExists ran. The held read is
-// finished, not merely released, before that assertion: its own query is the positive control
-// proving spans are actually being captured.
+// recordSpans first: otelpgx binds its tracer to the global provider at pool construction.
 func TestConcurrencyShedFromAGlobalCredentialDoesNotQueryTenantExists(t *testing.T) {
 	rec, restore := recordSpans(t)
 	defer restore()
@@ -229,8 +196,6 @@ func TestProbesPassNoGate(t *testing.T) {
 	assert.Equal(t, http.StatusOK, getUnauthenticated(t, h, "GET /readyz").Code)
 }
 
-// TestEveryReadRouteIsGated reads Routes' source: every route but the probes must be registered
-// through s.admit, so a read route added later cannot bypass admission unnoticed.
 func TestEveryReadRouteIsGated(t *testing.T) {
 	gated, ungated := routeGating(t)
 
@@ -243,8 +208,6 @@ func TestEveryReadRouteIsGated(t *testing.T) {
 	assert.ElementsMatch(t, reads, gated)
 }
 
-// routeGating splits the patterns Routes registers into those whose handler is a call to
-// s.admit and those whose handler is not.
 func routeGating(t *testing.T) (gated, ungated []string) {
 	t.Helper()
 	file, err := parser.ParseFile(token.NewFileSet(), "server.go", nil,
@@ -274,9 +237,7 @@ func routeGating(t *testing.T) (gated, ungated []string) {
 	return gated, ungated
 }
 
-// isAdmitCall reports whether e is a call to a method named admit, or a call to authz whose
-// last argument is one: Routes wraps every gated handler as
-// s.authz(cap, s.admit(handler)), so admit sits one call deeper than it used to.
+// Routes wraps gated handlers as s.authz(cap, s.admit(h)).
 func isAdmitCall(e ast.Expr) bool {
 	call, ok := e.(*ast.CallExpr)
 	if !ok {
@@ -305,8 +266,6 @@ func TestRetryAfterRoundsTheAdmissionWaitUpToWholeSeconds(t *testing.T) {
 	}
 }
 
-// holdConnections takes n of the store's pool connections outside any read, and returns a
-// function giving them back. They are given back when the test ends if not before.
 func holdConnections(t *testing.T, s *postgres.Store, n int) func() {
 	t.Helper()
 	conns := make([]*pgxpool.Conn, 0, n)
@@ -327,8 +286,6 @@ func holdConnections(t *testing.T, s *postgres.Store, n int) func() {
 	return release
 }
 
-// TestAReadThatWaitsForAConnectionHalvesTheLimit holds a two-connection pool's connections
-// while a read starts, so the read waits past the threshold before it gets one.
 func TestAReadThatWaitsForAConnectionHalvesTheLimit(t *testing.T) {
 	limits := egress.DefaultLimits()
 	limits.DBWaitThreshold = 50 * time.Millisecond
@@ -365,16 +322,14 @@ func TestAReadThatWaitsForAConnectionHalvesTheLimit(t *testing.T) {
 	assert.Equal(t, 2, egress.ReadConcurrencyLimit(srv), "a healthy read raises the limit again")
 }
 
-// TestAReadWhoseClientGivesUpDoesNotLowerTheLimit ends the request's context while the read waits
-// for a connection, briefly: a client giving up says nothing about the database.
+// A client giving up says nothing about the database.
 func TestAReadWhoseClientGivesUpDoesNotLowerTheLimit(t *testing.T) {
 	limits := egress.DefaultLimits()
 	limits.DBWaitThreshold = 500 * time.Millisecond
 	srv, s, tn := newServerWith(t, 2, limits)
 	h := srv.Routes()
 	key := readerKey(t, s, tn)
-	// Warmed before both connections are held: an uncached credential lookup would itself
-	// wait on them, on a context this test never cancels, rather than reaching the read.
+	// Warmed first: an uncached lookup would wait on the held connections.
 	require.Equal(t, http.StatusOK, get(t, h, key, changesURL(tn)).Code)
 	holdConnections(t, s, 2)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
@@ -390,10 +345,7 @@ func TestAReadWhoseClientGivesUpDoesNotLowerTheLimit(t *testing.T) {
 	assert.GreaterOrEqual(t, egress.ReadConcurrencyLimit(srv), 2)
 }
 
-// TestAFailedConnectionAcquisitionHalvesTheLimit closes the pool, then reads with a live request
-// context: a pool that cannot hand out connections is overloaded, however briefly the read
-// waited. A second read against the still-closed pool must not log a second decrease: the limit
-// is already at its floor, so releasing it again changes nothing to report.
+// A second read must not log another decrease: the limit is already at its floor.
 func TestAFailedConnectionAcquisitionHalvesTheLimit(t *testing.T) {
 	srv, s, tn, key := newServerWithWarmedAuth(t, 2, egress.DefaultLimits())
 	h := srv.Routes()
@@ -429,11 +381,7 @@ func TestOverloadIsDecidedByTheLongestConnectionWait(t *testing.T) {
 		"a read that acquired nothing waited for nothing")
 }
 
-// TestAClientThatGaveUpAfterALongWaitStillCountsAsOverloaded pins that a failed acquisition
-// still reports how long it waited. Whether the acquisition's own FAILURE counts
-// against the database depends on the request's context being live — a client that disconnected
-// says nothing about the database — but the wait itself is recorded regardless, and still weighs
-// against threshold either way.
+// The wait counts against threshold even when the client disconnected.
 func TestAClientThatGaveUpAfterALongWaitStillCountsAsOverloaded(t *testing.T) {
 	threshold := 100 * time.Millisecond
 	cancelled, cancel := context.WithCancel(context.Background())

@@ -17,8 +17,7 @@ import (
 	"horopter.dev/horopter/internal/egress"
 )
 
-// recordMetrics installs a meter provider with a manual reader for the rest of the test. Call it
-// before egress.New, which creates its instruments from the global provider as it stands.
+// Call before egress.New, which takes its instruments from the global provider.
 func recordMetrics(t *testing.T) *sdkmetric.ManualReader {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
@@ -32,9 +31,7 @@ func recordMetrics(t *testing.T) *sdkmetric.ManualReader {
 	return reader
 }
 
-// readMetricPoints collects every horopter.read.* data point, keyed by the instrument's name
-// and its attribute set's encoding joined by "|", such as
-// "horopter.read.shed|horopter.read.shed.gate=memory".
+// Keyed "name|attrs", e.g. "horopter.read.shed|horopter.read.shed.gate=memory".
 func readMetricPoints(t *testing.T, reader *sdkmetric.ManualReader) map[string]int64 {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
@@ -66,24 +63,16 @@ func addPoints(t *testing.T, points map[string]int64, m metricdata.Metrics) {
 	}
 }
 
-// instrumentShape is what TestReadAdmissionMetrics checks about each instrument beyond its data
-// points: the scope it was created under, its unit, and its aggregation kind.
 type instrumentShape struct {
 	scope, unit, kind string
 }
 
-// wantShape is the scope every read admission instrument shares, paired with the unit and
-// kind under test — the one property every instrument shares, spelled once rather than five
-// times.
 func wantShape(unit, kind string) instrumentShape {
 	return instrumentShape{
 		scope: "horopter.dev/horopter/internal/egress", unit: unit, kind: kind,
 	}
 }
 
-// readMetricShapes collects every horopter.read.* instrument's scope, unit and kind, keyed by
-// name. A name appears at most once here regardless of how many attribute sets its data points
-// carry, unlike readMetricPoints.
 func readMetricShapes(t *testing.T, reader *sdkmetric.ManualReader) map[string]instrumentShape {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
@@ -99,10 +88,7 @@ func readMetricShapes(t *testing.T, reader *sdkmetric.ManualReader) map[string]i
 	return shapes
 }
 
-// kindOf names m's aggregation: "gauge" for an observable gauge, "monotonic_sum" for a counter,
-// "sum" for a non-monotonic one such as an UpDownCounter — the shape wantShape's callers never
-// ask for, so a counter built as one is caught by differing from every entry under test rather
-// than by a dedicated check here.
+// A non-monotonic "sum" matches no wanted shape, so a counter built as one is caught.
 func kindOf(m metricdata.Metrics) string {
 	switch data := m.Data.(type) {
 	case metricdata.Gauge[int64]:
@@ -117,8 +103,6 @@ func kindOf(m metricdata.Metrics) string {
 	}
 }
 
-// TestReadAdmissionMetrics drives a shed at each gate and checks every instrument, with exactly
-// the attribute sets they may carry: none on the gauges, the gate alone on the shed counter.
 func TestReadAdmissionMetrics(t *testing.T) {
 	reader := recordMetrics(t)
 	limits := testLimits()

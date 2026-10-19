@@ -19,9 +19,7 @@ import (
 	"horopter.dev/horopter/internal/store/postgres"
 )
 
-// memoryFixture is three changes in changesURL's window, each seeded by one event, and estimates
-// of both: firstTwo, from a limit of 1, which over-fetches the second row, and all, as a read of
-// changesURL/eventsURL makes. key is a reader credential scoped to tn.
+// firstTwo is estimated from limit 1, which over-fetches the second row.
 type memoryFixture struct {
 	s              *postgres.Store
 	tn             string
@@ -63,7 +61,6 @@ func newMemoryFixture(t *testing.T) memoryFixture {
 	}
 }
 
-// server serves the fixture with a read memory pool of capacity bytes.
 func (f memoryFixture) server(t *testing.T, capacity int64) *egress.Server {
 	t.Helper()
 	limits := testLimits()
@@ -78,7 +75,6 @@ func bytesAttr(n int64) []string { return []string{strconv.FormatInt(n, 10)} }
 
 func eventsURL(tn string) string { return "/v1/events?tenant=" + tn }
 
-// tooLargeBody is the exact 422 body a read whose first row alone exceeds capacity gets.
 func tooLargeBody(capacity int64) string {
 	return fmt.Sprintf(
 		`{"error":"the first row of this read is larger than egress's read memory limit of `+
@@ -108,8 +104,6 @@ func TestAReadThatFitsTheMemoryPoolIsServedWhole(t *testing.T) {
 		"a finished read gives its reservation back")
 }
 
-// TestAReadLargerThanTheMemoryPoolIsCutAndMarked sizes the pool to hold exactly the first two
-// rows, so the whole read cannot fit but its first row can.
 func TestAReadLargerThanTheMemoryPoolIsCutAndMarked(t *testing.T) {
 	rec, restore := recordSpans(t)
 	defer restore()
@@ -183,9 +177,6 @@ func TestAReadIsShedWhileTheMemoryPoolIsHeld(t *testing.T) {
 		spanAttrValues(rec, "", "horopter.admission.outcome"))
 }
 
-// TestAnEventsReadLargerThanTheMemoryPoolIsCutAndMarked is
-// TestAReadLargerThanTheMemoryPoolIsCutAndMarked's counterpart for /v1/events: a separate route,
-// a separate EstimateEvents/ListEvents pair, and its own independent admitMemory call.
 func TestAnEventsReadLargerThanTheMemoryPoolIsCutAndMarked(t *testing.T) {
 	f := newMemoryFixture(t)
 	capacity := egress.ReadExpansionFactor * f.eventsFirstTwo.TotalBytes
@@ -199,8 +190,6 @@ func TestAnEventsReadLargerThanTheMemoryPoolIsCutAndMarked(t *testing.T) {
 	assert.Equal(t, "true", resp.Header().Get(egress.TruncatedHeader))
 }
 
-// TestAnEventsReadWhoseFirstRowExceedsTheMemoryPoolIsRefused is
-// TestAReadWhoseFirstRowExceedsTheMemoryPoolIsRefused's counterpart for /v1/events.
 func TestAnEventsReadWhoseFirstRowExceedsTheMemoryPoolIsRefused(t *testing.T) {
 	f := newMemoryFixture(t)
 	capacity := egress.ReadExpansionFactor*f.eventsFirstTwo.FirstRowBytes - 1
@@ -212,8 +201,6 @@ func TestAnEventsReadWhoseFirstRowExceedsTheMemoryPoolIsRefused(t *testing.T) {
 	assert.JSONEq(t, tooLargeBody(capacity), resp.Body.String())
 }
 
-// TestAMemoryCutPageOffersNextThatResumes: a page the pool cuts short is a page, not a dead
-// end. Following next under the same small pool reaches every change the fixture holds.
 func TestAMemoryCutPageOffersNextThatResumes(t *testing.T) {
 	f := newMemoryFixture(t)
 	small := f.server(t, egress.ReadExpansionFactor*f.firstTwo.TotalBytes)
@@ -227,8 +214,6 @@ func TestAMemoryCutPageOffersNextThatResumes(t *testing.T) {
 	assert.Len(t, rows, len(whole), "paging under the small pool reaches every change once")
 }
 
-// TestARefusedReadOffersNoNext: a first row larger than the pool is refused with 422, as read
-// admission already does, and never answered 200 with a next it could not continue from.
 func TestARefusedReadOffersNoNext(t *testing.T) {
 	f := newMemoryFixture(t)
 	srv := f.server(t, egress.ReadExpansionFactor*f.firstTwo.FirstRowBytes-1)
@@ -238,9 +223,7 @@ func TestARefusedReadOffersNoNext(t *testing.T) {
 	assert.NotContains(t, resp.Body.String(), `"next"`)
 }
 
-// TestALaterPageIsAdmittedOnItsOwnFirstRow: each page is estimated with its own cursor, so a
-// page whose first row is too large for the pool is refused like any first page would be. An
-// estimate taken without the cursor sizes page two by page one's first row and admits it.
+// Without its own cursor, page two would be estimated from page one's first row.
 func TestALaterPageIsAdmittedOnItsOwnFirstRow(t *testing.T) {
 	s, tn := openTestStore(t, 0)
 	base := time.Date(2026, 9, 14, 9, 30, 0, 0, time.UTC)

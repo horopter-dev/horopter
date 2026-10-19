@@ -26,10 +26,7 @@ type expansionShape struct {
 	attrs map[string]any
 }
 
-// expansionShapes are the data the factor is measured on: what producers are documented to send;
-// H-3's shape of many entries of about 60 bytes; and short keys with small numbers, which cost
-// the most heap per byte of text, since each number becomes a boxed float64 in a map entry. Row
-// counts give each shape megabytes of row text, so background allocation is noise.
+// Short keys with small numbers cost the most heap per byte: each number is a boxed float64.
 func expansionShapes() []expansionShape {
 	manyKeys := make(map[string]any, 500)
 	for i := range 500 {
@@ -46,8 +43,6 @@ func expansionShapes() []expansionShape {
 	}
 }
 
-// realisticAttributes are the Attributes page's recommended keys, fully populated, with a
-// 40-line release note as the description: about 3 KiB of JSON.
 func realisticAttributes() map[string]any {
 	return map[string]any{
 		"service.name":                  "checkout-api",
@@ -67,8 +62,6 @@ func realisticAttributes() map[string]any {
 	}
 }
 
-// seedShape inserts rows closed changes and rows events for tn, each carrying attrs, in one
-// batched round trip that bypasses the fold, as seedManyChanges does.
 func seedShape(t *testing.T, s *postgres.Store, tn string, rows int, attrs map[string]any) {
 	t.Helper()
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
@@ -103,8 +96,6 @@ type expansionRead struct {
 	estimate   postgres.ReadEstimate
 }
 
-// expansionReads are the four renderings of tn's rows, each with the estimate admission makes
-// for it. The POST annotations routes render exactly as the GET does.
 func expansionReads(t *testing.T, s *postgres.Store, tn string) []expansionRead {
 	t.Helper()
 	ctx := context.Background()
@@ -127,13 +118,7 @@ func expansionReads(t *testing.T, s *postgres.Store, tn string) []expansionRead 
 	}
 }
 
-// allocatedDuring returns the bytes the process allocated on the heap while fn ran.
-//
-// runtime.ReadMemStats flushes every processor's allocation cache before reading, so its total
-// is exact; the runtime otherwise records small allocations only when a cached span is refilled
-// or released. Two collections beforehand empty every sync.Pool, so a buffer another read left
-// pooled cannot hide what this one needs. The count is process-wide, so anything else running
-// adds to it, which can only make the test fail, never pass.
+// ReadMemStats flushes per-P caches, so the total is exact; the GCs empty every sync.Pool.
 func allocatedDuring(fn func()) uint64 {
 	runtime.GC()
 	runtime.GC()
@@ -144,16 +129,8 @@ func allocatedDuring(fn func()) uint64 {
 	return after.TotalAlloc - before.TotalAlloc
 }
 
-// TestReadAllocationsStayWithinExpansionFactor holds readExpansionFactor true. Admission reserves
-// estimate × factor bytes for a read, so a read that allocates more than that can use more memory
-// than it reserved. Decoding, rendering, dependencies and the Go runtime all move the ratio, and
-// this test runs on every change to any of them.
 func TestReadAllocationsStayWithinExpansionFactor(t *testing.T) {
-	// This test measures what a whole read allocates, so admission must never cut one of its
-	// reads short: a pool sized for production would legitimately cut the heaviest shapes below,
-	// which would fail on the no-truncation precondition before any ratio was even computed. A
-	// reservation is only a count against a semaphore, not an allocation, so a 16 GiB pool costs
-	// this test nothing.
+	// A huge pool so admission never truncates: a reservation allocates nothing.
 	limits := egress.DefaultLimits()
 	limits.ReadMemoryBytes = 1 << 34
 	srv, s, base := newServerWith(t, 0, limits)
@@ -161,9 +138,7 @@ func TestReadAllocationsStayWithinExpansionFactor(t *testing.T) {
 	for _, shape := range expansionShapes() {
 		tn := testdb.NewTenant(t, base+"-"+shape.name)
 		seedShape(t, s, tn, shape.rows, shape.attrs)
-		// A tenant-scoped reader, not a superuser: a global credential's tenant is checked
-		// against the store on every request, an extra allocation this test's ratio must
-		// not have to absorb. Minted and warmed outside every measured closure below.
+		// Tenant-scoped, not superuser: a global credential's tenant check allocates per request.
 		key := readerKey(t, s, tn)
 		warmCredentialCache(t, h, key, tn)
 		for _, read := range expansionReads(t, s, tn) {
@@ -185,9 +160,7 @@ func assertWithinExpansionFactor(t *testing.T, h http.Handler, key string, read 
 	ratio := float64(allocated) / float64(read.estimate.TotalBytes)
 	t.Logf("%d bytes allocated for %d bytes of row text: ratio %.2f",
 		allocated, read.estimate.TotalBytes, ratio)
-	//nolint:gosec // G115: TotalBytes is a measured row-text size and is never negative, and
-	// readExpansionFactor is a small positive constant, so the product cannot overflow int64
-	// far enough to invert sign before this conversion to uint64.
+	//nolint:gosec // G115: both factors are small and non-negative, so the product cannot overflow.
 	assert.LessOrEqual(t, allocated, uint64(egress.ReadExpansionFactor*read.estimate.TotalBytes),
 		"the read allocated %.2f bytes per byte of row text; readExpansionFactor is %d",
 		ratio, egress.ReadExpansionFactor)
