@@ -20,12 +20,7 @@ func TestSchemaVersionIsRecordedByMigration(t *testing.T) {
 	assert.NoError(t, s.AssertSchemaVersion(ctx))
 }
 
-// TestAssertSchemaVersionFailsLoudlyOnMismatch runs against isolatedSchemaDSN, not the
-// shared public schema newStore opens: it corrupts the GLOBAL schema_version singleton
-// to prove AssertSchemaVersion refuses to run against it, and a killed or panicking run
-// would leave that corruption behind for real — t.Cleanup only restores it on a normal
-// exit. An isolated schema is dropped, corrupted row and all, whether the test finishes
-// cleanly or not, so there is nothing left for an interrupted run to brick.
+// Isolated schema: an interrupted run would otherwise leave schema_version corrupted.
 func TestAssertSchemaVersionFailsLoudlyOnMismatch(t *testing.T) {
 	ctx := context.Background()
 	s, err := postgres.Open(ctx, isolatedSchemaDSN(t, dsn(t)))
@@ -42,28 +37,13 @@ func TestAssertSchemaVersionFailsLoudlyOnMismatch(t *testing.T) {
 		"the error must tell the operator how to fix it")
 }
 
-// daemonMainFiles are the daemons that must never apply DDL: several replicas start
-// together on every rolling deploy, and the only safe number of processes migrating
-// is one. cmd/horopter-migrate/main.go is deliberately absent from this list — it is
-// the one binary that must keep calling postgres.Open.
+// cmd/horopter-migrate is absent: it is the one binary that may migrate.
 var daemonMainFiles = []string{
 	"../../../cmd/horopter-ingress/main.go",
 	"../../../cmd/horopter-egress/main.go",
 }
 
-// TestDaemonsNeverMigrateOnStartup is the structural counterpart to
-// TestNoWriteRouteIsRegisteredAnywhere in internal/egress/server_test.go: no test
-// anywhere under cmd/ exercises a daemon's startup wiring against a real database, and
-// no configured linter has a rule against calling postgres.Open outside
-// horopter-migrate, so nothing previously caught a daemon being reverted to the
-// migrating constructor. This parses each daemon's main.go and inspects every
-// postgres.* call it makes.
-//
-// A bare "must not call postgres.Open" assertion would pass a file that opens no
-// store at all, so it also requires the file to call postgres.OpenNoMigrate — and,
-// because a broken path or a renamed import could make the walk silently see nothing,
-// it fails loudly if it finds zero postgres.* calls to begin with, rather than
-// reporting safety it never actually checked.
+// Also requires OpenNoMigrate and at least one postgres.* call, so it cannot pass vacuously.
 func TestDaemonsNeverMigrateOnStartup(t *testing.T) {
 	for _, path := range daemonMainFiles {
 		t.Run(path, func(t *testing.T) {
@@ -105,20 +85,7 @@ func TestDaemonsNeverMigrateOnStartup(t *testing.T) {
 	}
 }
 
-// TestMigrateDoesNotDowngradeARecordedSchemaVersion covers running an OLD
-// horopter-migrate against a NEWER database, which happens on any rollback or skewed
-// rollout. The recorded version used to come from the highest migration the BINARY
-// embeds, so the old binary rewrote schema_version downward while applied_migration still
-// listed every file actually applied — the recorded version then contradicted the
-// database's real structure and nothing raised a word.
-//
-// A ledger row the binary does not embed is what simulates the newer database: this
-// binary's embedded set stops well below 9999, so an embedded-list derivation records its
-// own lower number and a ledger derivation records 9999.
-//
-// It runs against an isolated schema, not the shared public one: it writes a bogus ledger
-// row and a version no daemon would accept, and leaving either behind in public would make
-// every later run of the suite fail.
+// A ledger row the binary does not embed simulates a newer database.
 func TestMigrateDoesNotDowngradeARecordedSchemaVersion(t *testing.T) {
 	ctx := context.Background()
 	s, err := postgres.Open(ctx, isolatedSchemaDSN(t, dsn(t)))

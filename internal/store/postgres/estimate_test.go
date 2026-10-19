@@ -15,8 +15,6 @@ import (
 
 var sizedBase = time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
 
-// sizedChanges seeds three changes ten minutes apart whose single attribute's value is 1, 11
-// and 21 bytes long, and returns their refs in start order with each row's measured size.
 func sizedChanges(t *testing.T, s *postgres.Store, tn string) ([]string, []int64) {
 	t.Helper()
 	producerRefs := []string{"sized-a", "sized-b", "sized-c"}
@@ -28,8 +26,7 @@ func sizedChanges(t *testing.T, s *postgres.Store, tn string) ([]string, []int64
 		ev.Attributes = map[string]any{"k": strings.Repeat("x", 1+10*i)}
 		_, _, err := s.AppendEvent(context.Background(), ev)
 		require.NoError(t, err)
-		// The stored ref, not the producer's: mkEvent composes the locus onto it, and a
-		// row is only measurable by the ref it was actually written under.
+		// The stored ref: rows are measurable only by the ref they were written under.
 		ref := core.RefFor(ev).String()
 		refs = append(refs, ref)
 		sizes = append(sizes, changeRowBytes(t, s, tn, ref))
@@ -37,9 +34,7 @@ func sizedChanges(t *testing.T, s *postgres.Store, tn string) ([]string, []int64
 	return refs, sizes
 }
 
-// changeRowBytes measures one change row with the simplest query that can: the oracle the
-// estimate and byte-cut tests compare against, independent of the aggregate over a limited,
-// filtered subquery that the code under test runs.
+// The simplest query that measures a row: an oracle independent of the code under test.
 func changeRowBytes(t *testing.T, s *postgres.Store, tn, ref string) int64 {
 	t.Helper()
 	var n int64
@@ -206,8 +201,6 @@ func TestListEventsCutsAtTheByteBudget(t *testing.T) {
 	}
 }
 
-// TestAByteCutOfAnEmptyReadIsNotTruncated guards the other side of the zero-row case: a cut
-// that returns nothing because there was nothing must not claim rows were discarded.
 func TestAByteCutOfAnEmptyReadIsNotTruncated(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	q := sizedWindow(t, tn, 10)
@@ -220,9 +213,7 @@ func TestAByteCutOfAnEmptyReadIsNotTruncated(t *testing.T) {
 	assert.False(t, truncated)
 }
 
-// TestReadSizingIgnoresColumnsReadsDoNotReturn: subject_first_seen is never returned by a read,
-// so it must not make one look larger — neither to the estimate admission reserves memory by,
-// nor to the byte cut that trims a result to its budget.
+// subject_first_seen is never returned by a read, so it must not size one.
 func TestReadSizingIgnoresColumnsReadsDoNotReturn(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 10, 6, 16, 0, 0, 0, time.UTC)

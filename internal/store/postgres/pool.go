@@ -10,9 +10,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 )
 
-// storeFromPool wraps an open pool and applies opts. The append and refold counters are
-// created here, from the global meter provider as it stands when the store opens — which
-// is why every binary calls telemetry.Setup before opening a store.
+// Counters come from the global meter provider, so call telemetry.Setup first.
 func storeFromPool(pool *pgxpool.Pool, opts []Option) *Store {
 	s := &Store{pool: pool, appends: appendCounter(), refolds: refoldCounter()}
 	for _, opt := range opts {
@@ -21,23 +19,13 @@ func storeFromPool(pool *pgxpool.Pool, opts []Option) *Store {
 	return s
 }
 
-// connect opens a pool for dsn and confirms it is reachable, closing the pool again if
-// the ping fails. Open and OpenNoMigrate both need exactly this sequence before they
-// diverge, so it lives here once rather than as two copies that a later change (a
-// timeout, a retry, a pool setting) could silently update on only one path.
-//
-// connectErrHint is the caller-specific, operator-facing suggestion appended to a
-// connect failure; the ping failure message is identical for both callers, so it is
-// not parameterised.
+// Shared by Open and OpenNoMigrate, so connection changes apply to both.
 func connect(ctx context.Context, dsn, connectErrHint string) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse the postgres dsn: %w; %s", err, connectErrHint)
 	}
-	// otelpgx traces each statement. Bound values are NOT included: they carry event
-	// payloads, and query parameters are exactly where user data would leak into
-	// telemetry. The statement text itself is this project's own SQL and is what makes
-	// a span identifiable. poolTracer wraps it to report connection waits to egress.
+	// Bound values are not traced: they carry event payloads.
 	cfg.ConnConfig.Tracer = poolTracer{Tracer: otelpgx.NewTracer()}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
@@ -51,14 +39,10 @@ func connect(ctx context.Context, dsn, connectErrHint string) (*pgxpool.Pool, er
 	return pool, nil
 }
 
-// poolName names the pool on pgxpool.* metrics in place of otelpgx's default,
-// host:port/database, which would publish the database's address and name on /metrics.
+// Replaces host:port/database, which would publish the database's address on /metrics.
 const poolName = "horopter"
 
-// recordPoolStats exports the pool's statistics as pgxpool.* metrics through the global
-// meter provider as it stands now. It runs only once the pool has answered a ping, so a
-// pool that failed to connect registers nothing. A registration failure is logged: pool
-// statistics are not worth refusing to open a store over.
+// Registration failures are logged: pool stats are not worth refusing to open over.
 func recordPoolStats(pool *pgxpool.Pool) {
 	err := otelpgx.RecordStats(pool,
 		otelpgx.WithStatsAttributes(semconv.DBClientConnectionPoolName(poolName)))

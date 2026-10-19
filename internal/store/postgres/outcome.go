@@ -9,21 +9,14 @@ import (
 	"horopter.dev/horopter/internal/core"
 )
 
-// The dedupe paths an append can take. Distinguishing them matters because the second
-// is the concurrent-retry recovery, which fires when two in-flight requests carry one
-// idempotency key and the loser hits the unique index. It is exercised by a single
-// test and is otherwise invisible; how often it happens in production says whether
-// producer retry behaviour is what anyone assumed.
+// The second is concurrent-retry recovery, otherwise invisible in production.
 const (
 	dedupeNone            = "none"
 	dedupeLookup          = "lookup"
 	dedupeUniqueViolation = "unique_violation"
 )
 
-// appendOutcome collects what one append did, for recording on its span in a single
-// call. Accumulating and emitting once — rather than setting attributes from each
-// branch — keeps instrumentation out of the control flow and produces one wide event
-// per unit of work rather than a scatter of narrow ones.
+// Accumulated and emitted once, keeping instrumentation out of the control flow.
 type appendOutcome struct {
 	created     bool
 	dedupePath  string
@@ -36,17 +29,13 @@ type appendOutcome struct {
 	errKind     string
 }
 
-// The error taxonomy, mirroring the core.ErrInvalidEvent sentinel that already decides
-// 400 from 503 at the HTTP edge. The branch exists; this records it, so "how many
-// appends were rejected as malformed" and "how many failed because the store was
-// unavailable" become two different questions rather than one 5xx rate.
+// Mirrors core.ErrInvalidEvent, so malformed and unavailable are counted apart.
 const (
 	errKindInvalidEvent = "invalid_event"
 	errKindTransient    = "transient"
 )
 
-// errKindOf classifies a failed append the same way appendFailed does at the HTTP edge.
-// Both read the same sentinel, so a span and a status code can never disagree.
+// Reads the same sentinel as appendFailed, so span and status never disagree.
 func errKindOf(err error) string {
 	if err == nil {
 		return ""
@@ -57,30 +46,24 @@ func errKindOf(err error) string {
 	return errKindTransient
 }
 
-// attributes renders the outcome and the event that produced it. High cardinality is
-// deliberate: tenant, ref and event id are exactly the dimensions an incident is
-// sliced by, and a backend that cannot hold them is the wrong backend.
+// High cardinality is deliberate: incidents are sliced by tenant, ref and event id.
 func (o appendOutcome) attributes(ev core.Event) []attribute.KeyValue {
 	attrs := o.baseAttributes(ev)
 	if o.errKind != "" {
-		// Present only on failure, so its absence is a reliable filter for success
-		// rather than a value that has to be compared against "".
+		// Present only on failure, so its absence filters for success.
 		attrs = append(attrs, attribute.String("horopter.error.kind", o.errKind))
 	}
 	return attrs
 }
 
-// The outcomes horopter.event.appends distinguishes. They are derived from created and
-// errKind rather than stored, so the counter cannot disagree with the telemetry span, which
-// records the same two facts.
+// Derived from created and errKind, so the counter matches the span.
 const (
 	outcomeCreated      = "created"
 	outcomeDeduplicated = "deduplicated"
 	outcomeFailed       = "failed"
 )
 
-// result names what the append did. A failure is checked first: an append can fail after
-// its event was written, when the commit itself fails.
+// Failure first: an append can fail after writing, when the commit fails.
 func (o appendOutcome) result() string {
 	switch {
 	case o.errKind != "":
@@ -92,13 +75,7 @@ func (o appendOutcome) result() string {
 	}
 }
 
-// metricAttributes is the bounded part of the outcome, for horopter.event.appends. Every
-// value comes from a set fixed in code, and nothing identifies a caller or an entity: a
-// metric keeps a series for every distinct set it has seen, and on the unauthenticated side
-// a tenant is whatever string a caller sends. Tenant, ref and event id stay on the span.
-//
-// The keys match the span's, so a metric and a span describing the same append can be
-// matched.
+// Bounded values only: a metric keeps a series per distinct set. Keys match the span's.
 func (o appendOutcome) metricAttributes() attribute.Set {
 	attrs := []attribute.KeyValue{
 		attribute.String("horopter.append.outcome", o.result()),
@@ -113,8 +90,7 @@ func (o appendOutcome) metricAttributes() attribute.Set {
 
 func (o appendOutcome) baseAttributes(ev core.Event) []attribute.KeyValue {
 	return []attribute.KeyValue{
-		// Repeated from the server span deliberately: a query that slices store spans by
-		// tenant should not have to join across a trace to do it.
+		// Repeated from the server span so store spans slice by tenant without a join.
 		attribute.String("horopter.tenant", ev.Tenant),
 		attribute.String("horopter.event.id", ev.ID),
 		attribute.String("horopter.event.type", ev.Type),

@@ -11,26 +11,10 @@ import (
 	"horopter.dev/horopter/internal/core"
 )
 
-// RebuildLockTimeout bounds how long a rebuild waits for the tenant lock.
-//
-// It is longer than AppendLockTimeout because what a rebuild waits for is in-flight
-// appends finishing — milliseconds each — so reaching this bound means the tenant is under
-// sustained write load rather than that anything is wrong. Giving up then, with a message
-// telling the operator to retry, beats queueing indefinitely behind a stream of appends.
+// RebuildLockTimeout bounds the rebuild's tenant-lock wait; hitting it means sustained writes.
 const RebuildLockTimeout = 10 * time.Second
 
-// lockRebuildWrite takes the tenant-scoped advisory lock exclusively, excluding every
-// append for that tenant — see lockProjectionWrite for why the granularity is the tenant
-// and not the ref.
-//
-// The wait is bounded by RebuildLockTimeout so a rebuild that cannot get the lock promptly
-// gives up and says so, rather than queueing behind a stream of appends while holding a
-// connection of its own.
-//
-// Setting that bound is still the FIRST thing the rebuild transaction does, because this
-// call is RebuildProjection's first statement after Begin — the property AppendEvent had
-// to hoist setLockTimeout out of lockProjectionWrite to obtain, and which a rebuild
-// already had. Nothing may be added to RebuildProjection above this call.
+// Must stay RebuildProjection's first statement, so the lock timeout covers everything.
 func lockRebuildWrite(ctx context.Context, tx pgx.Tx, tenantID string) error {
 	if err := setLockTimeout(ctx, tx, RebuildLockTimeout, "rebuild"); err != nil {
 		return err
@@ -51,89 +35,12 @@ func lockRebuildWrite(ctx context.Context, tx pgx.Tx, tenantID string) error {
 	return nil
 }
 
-// RebuildProjection discards a tenant's projection and replays its event log in ULID
-// order, holding the tenant's advisory lock exclusively so no append can interleave
-// with the delete-and-reinsert.
-//
-// Without that lock an appender blocked on a row this transaction deleted re-checks,
-// finds nothing, folds from nil and overwrites the rebuilt row — the same lost-update
-// mechanism the per-ref lock exists to stop. A per-ref lock is the wrong granularity
-// here because a rebuild touches refs no appender is holding, including refs that do
-// not exist yet; see lockProjectionWrite for how the two locks compose.
-//
-// What it reproduces is the id-ordered fold. From this version on, that is also what a
-// live append converges to: applyToProjection (append.go) detects an event whose id sorts
-// below the change's current watermark and re-folds that ref from the log instead of
-// folding the event in incrementally, so a rebuild finds nothing left to change for any
-// ref appended to entirely under this version.
-//
-// An append still arrives out of order for the same reasons it always could — an event's
-// id is minted from s.clock() on the receiving ingress replica BEFORE its append
-// transaction starts, and nothing afterwards keeps the two orders aligned:
-//
-//   - Across replicas the divergence window is the CLOCK SKEW between them, not one
-//     millisecond. A deployment.completed handled by replica B can carry a lower id than a
-//     deployment.started handled by replica A that arrived earlier, and then folds second.
-//   - Within a single replica the per-ref advisory lock itself reorders: a request that
-//     minted a lower id can lose the race for the lock while one holding a higher id folds
-//     first. The window is everything between minting the id and taking that lock — Begin,
-//     the idempotency lookup, the event INSERT, and the lock wait, which AppendLockTimeout
-//     bounds at seconds.
-//   - Only then, as the narrowest of the three, does entropy matter: core.NewULID draws
-//     from crypto/rand rather than ulid.MonotonicEntropy, so two ids minted inside one
-//     millisecond do not even tie-break by generation order.
-//
-// What changed is the consequence, not the frequency: an out-of-order append now re-folds
-// its ref instead of letting the incremental answer stand, so live folding and a rebuild
-// agree for any ref appended to entirely under this version.
-//
-// The watermark the out-of-order check compares against, cur.LastEventID, is the ref's
-// true maximum id only if the ref has never folded out of id order before. A ref whose
-// drift predates this version holds a watermark below its real maximum, so a later append
-// whose id sits above the watermark but below that true maximum still takes the in-order
-// arm, and the pre-existing divergence survives untouched. --rebuild-tenant remains the
-// remedy for that case: a rebuild always replays the whole log in id order regardless of
-// what the watermark says.
-//
-// For a ref whose drift predates this version, a rebuild can still produce a different
-// Subject, Type, Title, Actor, attribute set, LastEventID, End or Status than what live
-// folding holds, under four different rules. Subject, Type and LastEventID are assigned
-// unconditionally: "the last event folded wins". Actor, and Title when no start event carries
-// one, are guarded non-empty, so their rule is "the last NON-EMPTY event folded wins" — a
-// reorder still moves them between two events that both carry one, but an event carrying none
-// cannot blank what a previous event recorded, which is why the guard exists. A titled start
-// fixes Title instead, by the earliest such start, which no reorder moves. Attributes MERGE,
-// so the set of keys is a union and commutative — no reorder loses or gains one — while the value
-// at a key that two events both set follows last-wins like the first group; a query filtering
-// on such a key can therefore match a different set of changes afterwards. End and Status follow
-// the fourth: "the last TERMINAL event folded wins". The guard on End being nil is what stops a
-// NON-terminal event moving them — a late annotation cannot reopen a change that already closed
-// — but a terminal event is NOT guarded, and overwrites both whether the change is open or
-// closed: transitions[stateClosed][assertsTerminal] is {setAsserted, setsEnd: true}. So
-// reordering two terminal events swaps the recorded outcome, which is the flip an operator
-// actually meets. Start, StartedAt, FirstSeenAt and the source set are NOT in that set: both
-// start facts are minima (migration 0003, core.Fold) and the source set is a union, so all of
-// them are commutative and the two orders agree on them. Every event is still folded in, and the
-// rebuild is still deterministic — replaying the same log again gives the same answer — but
-// "reproduces the projection exactly" is only true up to that ordering.
-//
-// See docs/reference/known-limits.md, and the docs site's "Rebuild a Tenant's Projection"
-// how-to, for what an operator meets today.
-//
-// Operational exposure, which v0.1 does not remove: the exclusive lock blocks every
-// append for this tenant for the rebuild's whole duration. Blocked appends fail after
-// AppendLockTimeout with a retryable error rather than pinning pool connections, so the
-// bound on an event's delay is the producer's own retry patience. There is no batching,
-// no progress reporting and no online rebuild.
+// RebuildProjection replays a tenant's log in id order, exclusively locked; see known-limits.md.
 func (s *Store) RebuildProjection(ctx context.Context, tenantID string) (err error) {
 	ctx, span := tracer().Start(ctx, "RebuildProjection")
 	defer span.End()
 
-	// Recorded from a defer, not after the replay, so the failure an operator actually
-	// meets is covered: a rebuild that gives up in lockRebuildWrite on RebuildLockTimeout
-	// used to produce a span saying neither which tenant it was for nor how long it
-	// waited. The counters stay zero on that path, which is the truth — nothing was
-	// replayed.
+	// Deferred, so a rebuild that times out on the lock still records its tenant and wait.
 	var (
 		lockWait time.Duration
 		events   int
@@ -158,8 +65,7 @@ func (s *Store) RebuildProjection(ctx context.Context, tenantID string) (err err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// lockWait is assigned before the error is checked, so a lock that timed out reports
-	// the wait that ended in the timeout rather than zero.
+	// Assigned before the error check, so a timed-out lock reports its wait.
 	lockStart := time.Now()
 	lockErr := lockRebuildWrite(ctx, tx, tenantID)
 	lockWait = time.Since(lockStart)
@@ -181,15 +87,7 @@ func (s *Store) RebuildProjection(ctx context.Context, tenantID string) (err err
 	return nil
 }
 
-// replayProjection folds a tenant's whole event log in id order and writes the result,
-// returning the number of events replayed and the number of refs they folded into.
-//
-// Kept out of RebuildProjection so that function stays legible while it carries the lock,
-// the clear, the span and the commit — and so it has complexity headroom, which it does
-// not otherwise have.
-// The results are NAMED because they are two bare ints in a row: nothing catches a
-// transposition at either end, and TestRebuildRecordsItsShapeOnASpan seeds two events
-// onto one ref specifically so the two values differ and a swap is visible.
+// Named results: two bare ints are easy to transpose.
 func replayProjection(
 	ctx context.Context, tx pgx.Tx, tenantID string,
 ) (events, refs int, err error) {
@@ -206,8 +104,6 @@ func replayProjection(
 	return events, len(acc), nil
 }
 
-// clearProjection discards a tenant's projection inside the rebuild transaction. The hook
-// is what lets a test hold the rebuild open in the window an append must not enter.
 func clearProjection(ctx context.Context, tx pgx.Tx, tenantID string) error {
 	if _, err := tx.Exec(ctx, `DELETE FROM change WHERE tenant = $1`, tenantID); err != nil {
 		return fmt.Errorf("clear projection for tenant %q: %w", tenantID, err)
@@ -218,9 +114,6 @@ func clearProjection(ctx context.Context, tx pgx.Tx, tenantID string) error {
 	return nil
 }
 
-// foldEventLog replays a tenant's event log in ULID order and returns the projection it
-// implies, keyed by ref, each entry carrying the change folded for that ref together with
-// the number of events that produced it.
 func foldEventLog(
 	ctx context.Context, tx pgx.Tx, tenantID string,
 ) (map[core.Ref]foldedRef, error) {

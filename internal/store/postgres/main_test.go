@@ -21,18 +21,12 @@ func dsn(t *testing.T) string {
 	return v
 }
 
-// siblingTenant derives a second tenant from a test's own, for the tests that need two,
-// creates its row, and registers its cleanup alongside. Building the name by hand leaves
-// the sibling behind: DropTenantAfter matches the exact tenant deliberately, because a
-// prefix match would have to escape the LIKE metacharacters that Go subtest names
-// legitimately contain.
+// DropTenantAfter matches exactly, so the sibling needs its own cleanup.
 func siblingTenant(t *testing.T, base, suffix string) string {
 	t.Helper()
 	return testdb.NewTenant(t, base+"-"+suffix)
 }
 
-// changeQuery builds a tenant-scoped ChangeQuery. NewChangeQuery refuses the zero TenantID,
-// which no caller here passes, so the error is asserted once here rather than at every site.
 func changeQuery(
 	t *testing.T, tn string, from, to time.Time, limit int, attrs map[string]string,
 ) postgres.ChangeQuery {

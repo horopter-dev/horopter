@@ -5,16 +5,7 @@ import (
 	"fmt"
 )
 
-// ExpectedSchemaVersion is the schema this build understands. Ingress and egress ship
-// as separate images and can therefore be deployed at different versions; each asserts
-// this at startup so a skewed rollout fails loudly instead of corrupting data quietly.
-//
-// Migrate derives the recorded version from the highest filename in the applied_migration
-// ledger — what the DATABASE has actually run, not what this binary embeds — so this
-// constant must be raised in the same change that adds a migration. It is deliberately not
-// read from the SQL: a daemon has to be able to refuse a schema newer than the one its
-// binary was built against, and an old binary run against a newer database records that
-// database's true, higher version precisely so this assertion fails loudly.
+// ExpectedSchemaVersion is the schema this build understands; raise it with every migration.
 const ExpectedSchemaVersion = 11
 
 // SchemaVersion reads the version recorded by the migration.
@@ -41,8 +32,7 @@ func (s *Store) AssertSchemaVersion(ctx context.Context) error {
 	return nil
 }
 
-// OpenNoMigrate connects without applying migrations, for daemons that must not
-// migrate. Only horopter-migrate changes the schema.
+// OpenNoMigrate connects without migrating; only horopter-migrate changes the schema.
 func OpenNoMigrate(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 	pool, err := connect(ctx, dsn, "check DATABASE_URL")
 	if err != nil {

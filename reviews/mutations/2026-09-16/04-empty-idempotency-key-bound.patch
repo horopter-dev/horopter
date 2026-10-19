@@ -4,11 +4,11 @@
 # expect: a test that two keyless events in one tenant are both stored
 
 diff --git a/internal/store/postgres/append.go b/internal/store/postgres/append.go
-index 36cf441..ab110ee 100644
+index 94b26b8..4ea1ab3 100644
 --- a/internal/store/postgres/append.go
 +++ b/internal/store/postgres/append.go
-@@ -231,7 +231,7 @@ func (s *Store) writeEvent(
- // make every keyless event collide with every other one.
+@@ -159,7 +159,7 @@ func (s *Store) writeEvent(
+ // An empty key binds as NULL: uq_event_idem is partial on IS NOT NULL.
  func insertEvent(ctx context.Context, tx pgx.Tx, ev core.Event) error {
  	var idem *string
 -	if ev.IdempotencyKey != "" {

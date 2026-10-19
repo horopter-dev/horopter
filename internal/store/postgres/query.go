@@ -15,76 +15,45 @@ import (
 	"horopter.dev/horopter/internal/core"
 )
 
-// ChangeKey is a change's position in a read's order, (start_at, ref). A cursor carries the
-// last returned row's key, and the next page starts strictly after it. ref is unique within a
-// tenant, so the pair is a total order even when many changes share one start_at.
+// ChangeKey is a change's (start_at, ref) position; ref makes it a total order in a tenant.
 type ChangeKey struct {
 	Start time.Time
 	Ref   string
 }
 
-// ChangeQuery selects changes overlapping a time window, or by ref alone. tenant is
-// unexported: NewChangeQuery is the only way to set it, so a query naming no tenant is a
-// compile error, not a struct literal that happens to select nothing.
+// ChangeQuery selects changes overlapping a window, or by ref; only NewChangeQuery sets tenant.
 type ChangeQuery struct {
 	tenant string
 	From   time.Time
 	To     time.Time
-	// Subjects matches a change when any subject in its scope matches any of the patterns: a
-	// subject first seen no later than the change's end, or any while it is open
-	// (core.Change.SubjectFirstSeen). The zero value is no filter.
+	// Subjects matches any subject in a change's scope against any pattern; nil is no filter.
 	Subjects core.SubjectPatterns
 	Type     string
 	Status   string
 	Locus    string
-	// Source filters for one system among a change's Sources: a change HAS several,
-	// a caller FILTERS for one. Matches when Source is any member of the set.
+	// Source matches when it is any member of a change's Sources.
 	Source string
-	// attributes filters on exact attribute values, by key. Only keys in
-	// FilterableAttributeKeys are accepted; NewChangeQuery refuses any other rather than
-	// ignoring it, because a filter that silently matches everything answers the caller's
-	// question wrongly. An empty value is no filter, as an empty Subject is. It is
-	// unexported so NewChangeQuery's allowlist check is the only way to set it — a field a
-	// caller could assign after construction would let that check be bypassed entirely.
+	// Unexported so NewChangeQuery's allowlist check cannot be bypassed; empty values are no filter.
 	attributes map[string]string
-	// Ref selects a single change by its (tenant, ref) primary key. When set, the window
-	// predicate is omitted entirely: From and To are ignored, since a ref lookup is already
-	// exact and a window could only narrow it redundantly.
+	// Ref selects one change by primary key; From and To are then ignored.
 	Ref   string
 	Limit int
 	// After, when set, selects only rows strictly after it in (start_at, ref) order.
 	After *ChangeKey
-	// MaxRowTextBytes cuts the result after the leading rows whose row text, summed in order,
-	// fits within it; zero means no cut. Row text is the size of the columns a read returns, as
-	// Postgres renders them, octet_length(ROW(columns)::text). A cut that discards rows reports
-	// the result truncated.
+	// MaxRowTextBytes cuts to the leading rows whose summed row text fits; zero means no cut.
 	MaxRowTextBytes int64
 }
 
-// ErrUnscopedQuery reports a query constructed from the zero core.TenantID.
-//
-// TenantID's unexported field is the compile-time half of the tenant gate: a query naming no
-// tenant cannot be written as a struct literal. Its zero value is still constructible, and a
-// query carrying one would select the empty tenant: an empty result set indistinguishable from a
-// legitimate one, which is the failure mode that makes this worth a runtime guard rather than
-// a convention. Nothing reaches it today; a future route registered without egress's admit
-// would.
+// ErrUnscopedQuery reports a query built from the zero TenantID, which would select nothing.
 var ErrUnscopedQuery = errors.New(
 	"query is not scoped to a tenant; a tenant comes from the authenticated principal")
 
-// FilterableAttributeKeys are the attribute keys a change query may filter on. Each one has
-// an expression index in the migration that added it; adding a key means adding both, and
-// the cost is the point. The list is a compatibility contract — an attribute key that
-// becomes filterable is one callers may depend on — and attributes are otherwise free-form
-// and producer-chosen, so without an allowlist every key a producer invents becomes a query
-// surface nobody designed and nobody can withdraw.
+// FilterableAttributeKeys are the filterable attribute keys; each needs an expression index.
 var FilterableAttributeKeys = map[string]struct{}{
 	"deployment.environment.name": {},
 }
 
-// ErrUnfilterableAttribute reports a change query naming an attribute key outside
-// FilterableAttributeKeys. It is always wrapped with the offending key and the permitted
-// list, so egress can answer 400 with the error's own text.
+// ErrUnfilterableAttribute reports a key outside FilterableAttributeKeys, wrapped with both.
 var ErrUnfilterableAttribute = errors.New("attribute key is not filterable")
 
 // filterableKeys renders the allowlist for an error message, sorted so the text is stable.
@@ -92,14 +61,7 @@ func filterableKeys() string {
 	return strings.Join(slices.Sorted(maps.Keys(FilterableAttributeKeys)), ", ")
 }
 
-// NewChangeQuery returns a ChangeQuery scoped to tenant over [from, to] — the only
-// constructor for one, and so the only place a core.TenantID crosses into the store
-// package. Subject, Type, Status, Locus, Source and Ref are optional filters, assigned on
-// the result afterward.
-//
-// attrs is a parameter rather than a field set afterward because it is the only filter that
-// can be invalid: an unallowlisted key must never reach the store, and a constructor is the
-// one place that can be guaranteed. Pass nil for no attribute filter.
+// NewChangeQuery is the only ChangeQuery constructor; attrs is validated here.
 func NewChangeQuery(
 	tenant core.TenantID, from, to time.Time, limit int, attrs map[string]string,
 ) (ChangeQuery, error) {
@@ -118,23 +80,18 @@ func NewChangeQuery(
 	}, nil
 }
 
-// EventQuery selects raw events for audit, export, and debugging. tenant is unexported for
-// the same reason ChangeQuery's is: NewEventQuery is the only way to set it.
+// EventQuery selects raw events; only NewEventQuery sets tenant.
 type EventQuery struct {
 	tenant string
 	Ref    string
 	Limit  int
 	// AfterID, when set, selects only events whose id sorts after it.
 	AfterID string
-	// MaxRowTextBytes cuts the result after the leading rows whose row text, summed in order,
-	// fits within it; zero means no cut. Row text is the size of the columns a read returns, as
-	// Postgres renders them, octet_length(ROW(columns)::text). A cut that discards rows reports
-	// the result truncated.
+	// MaxRowTextBytes cuts to the leading rows whose summed row text fits; zero means no cut.
 	MaxRowTextBytes int64
 }
 
-// NewEventQuery returns an EventQuery scoped to tenant, the only constructor for one. Ref
-// and MaxRowTextBytes are optional and assigned on the result afterward.
+// NewEventQuery is the only EventQuery constructor; Ref and MaxRowTextBytes are set afterward.
 func NewEventQuery(tenant core.TenantID, limit int) (EventQuery, error) {
 	if tenant.IsZero() {
 		return EventQuery{}, ErrUnscopedQuery
@@ -142,19 +99,14 @@ func NewEventQuery(tenant core.TenantID, limit int) (EventQuery, error) {
 	return EventQuery{tenant: tenant.String(), Limit: limit}, nil
 }
 
-// ReadEstimate is the size of what a read will fetch, measured before it runs: how many rows,
-// their total row text, and the first row's row text, in the read's order.
+// ReadEstimate is a read's row count, total row text and first row's text, measured beforehand.
 type ReadEstimate struct {
 	Rows          int
 	TotalBytes    int64
 	FirstRowBytes int64
 }
 
-// overFetch returns the LIMIT to send for a caller-requested limit, and reports whether a
-// limit applies at all. It is the caller's limit plus one: fetching a row beyond what was
-// asked for is what makes truncation DETECTABLE, because counting to the limit alone
-// cannot tell a result set of exactly Limit rows from one with more behind it. A limit of
-// zero or less means "no limit", for which no LIMIT clause is emitted.
+// Fetching one row beyond the limit is what makes truncation detectable.
 func overFetch(limit int) (int, bool) {
 	if limit <= 0 {
 		return 0, false
@@ -162,9 +114,6 @@ func overFetch(limit int) (int, bool) {
 	return limit + 1, true
 }
 
-// trimToLimit discards the over-fetched row and reports that the result was truncated.
-// The extra row never reaches the caller, so ChangeQuery.Limit and EventQuery.Limit still
-// mean exactly what the caller asked for.
 func trimToLimit[T any](rows []T, limit int) ([]T, bool) {
 	if limit <= 0 || len(rows) <= limit {
 		return rows, false
@@ -172,17 +121,12 @@ func trimToLimit[T any](rows []T, limit int) ([]T, bool) {
 	return rows[:limit], true
 }
 
-// selection is SQL selecting whole rows of one table for a read — its tenant, filters, order
-// and over-fetch limit — with the arguments it takes and the order its columns are sorted by.
-// A read's query, its estimate and its byte cut all select from the same selection, which is
-// what makes an estimate describe exactly the rows the read then fetches.
+// A read, its estimate and its byte cut share one selection, so the estimate fits the read.
 type selection struct {
 	sql   string
 	args  []any
 	order string
-	// columns are the columns the read returns. Sizing measures these and nothing else: a
-	// column a read never returns (a change's subject_first_seen, locus, end_effective) costs
-	// the response nothing, so it must not count against the budget.
+	// Only columns a read returns count against the budget.
 	columns string
 }
 
@@ -195,9 +139,7 @@ const eventColumns = `id, tenant, idempotency_key, schema_version, source, type,
 	actor, title, occurred_at, received_at, correlation_ref, attributes, origin, edited,
 	locus, lifecycle`
 
-// changeSelection selects the change rows q reads: by ref alone when q.Ref is set, or by
-// window otherwise. The two predicates are mutually exclusive, not layered — a window
-// alongside a ref would be redundant, since (tenant, ref) already selects at most one row.
+// By ref alone or by window, never both: (tenant, ref) already selects at most one row.
 func changeSelection(q ChangeQuery) selection {
 	sb := strings.Builder{}
 	var args []any
@@ -225,27 +167,14 @@ func changeSelection(q ChangeQuery) selection {
 	}
 }
 
-// eventSelection selects the event rows q reads. See ListEvents for the ref predicate.
-//
-// The ref is split in Go rather than in SQL so e.id stays a primary-key comparison; a
-// predicate on e.locus || '/' || e.id would compute a value per row and scan the table.
-// core.ParseRef is what splits it, so the one statement of the encoding serves the read
-// side as well as the write side.
+// The ref is split in Go so e.id stays a primary-key comparison.
 func eventSelection(q EventQuery) selection {
 	query := `SELECT e.* FROM event e WHERE e.tenant = $1`
 	args := []any{q.tenant}
 	if q.Ref != "" {
 		parsed, err := core.ParseRef(q.Ref)
 		if err != nil {
-			// A ref that does not parse names no change, so it must match nothing. Binding
-			// the impossible locus rather than returning an error keeps this function total
-			// and preserves the route's behaviour: a malformed ref answers 200 with an empty
-			// list, which TestListEventsIgnoresARefWithNoLocus and
-			// TestListEventsIgnoresARefWithAnEmptyLocus pin. The empty locus is what makes
-			// it impossible — event_locus_shape forbids one, so no row can carry it, which
-			// is the same reason the old strings.Cut form was safe, now stated rather than
-			// implied. The correlation_ref arm still binds q.Ref verbatim, so a stored ref
-			// ParseRef refuses stays findable by it.
+			// An unparseable ref binds the empty locus, which event_locus_shape makes match nothing.
 			args = append(args, q.Ref, "", "")
 		} else {
 			args = append(args, q.Ref, parsed.Locus().String(), parsed.ProducerRef())
@@ -267,14 +196,7 @@ func eventSelection(q EventQuery) selection {
 	return selection{sql: query, args: args, order: "id ASC", columns: eventColumns}
 }
 
-// byteCutSQL wraps sel so it returns only the leading rows whose row text, summed in sel's
-// order, fits within the budget bound at $budgetArg, selecting columns and then whether another
-// row followed each one before the cut. For the last row returned, that says whether the cut
-// discarded anything.
-//
-// The running sum is taken over rows already limited to sel's own over-fetch (the caller's
-// limit plus one), so it never scans past them, and it is filtered one level up because a WHERE
-// clause is applied before the window functions at its own level.
+// The running sum is filtered one level up: WHERE applies before window functions.
 func byteCutSQL(sel selection, budgetArg int) string {
 	return fmt.Sprintf(`
 		SELECT %[1]s, more FROM (
@@ -288,8 +210,7 @@ func byteCutSQL(sel selection, budgetArg int) string {
 		ORDER BY %[2]s`, sel.columns, sel.order, sel.sql, budgetArg)
 }
 
-// anyRows reports whether sel selects any row. A byte cut that returns no rows cannot tell
-// from its rows whether there were any to discard, so it asks.
+// A cut that returns no rows asks whether there were any to discard.
 func (s *Store) anyRows(ctx context.Context, sel selection) (bool, error) {
 	var exists bool
 	err := s.pool.QueryRow(ctx, "SELECT EXISTS ("+sel.sql+")", sel.args...).Scan(&exists)
@@ -299,26 +220,13 @@ func (s *Store) anyRows(ctx context.Context, sel selection) (bool, error) {
 	return exists, nil
 }
 
-// ListEvents selects raw events for a tenant, optionally scoped to one change's ref,
-// ordered by id ascending (which is chronological, since ids are ULIDs). It also reports
-// whether more rows matched than q.Limit allowed through; the over-fetch that detects that
-// is invisible to the caller, so q.Limit still means what it says.
-//
-// q.Ref is a projection ref, matched the way core.RefFor forms one: a correlated event's
-// correlation_ref, or an uncorrelated event's locus and own id. Filtering on
-// correlation_ref alone made listing a point change's events always return nothing,
-// even though that change is in every query result the egress read side serves. The id
-// arm is restricted to rows with no correlation_ref so it can only ever match the point
-// that owns the ref, never an unrelated event whose id happens to equal some other
-// change's correlation_ref.
+// ListEvents lists a tenant's events by id, optionally for one projection ref, with truncation.
 func (s *Store) ListEvents(
 	ctx context.Context, q EventQuery,
 ) (evs []core.Event, truncated bool, err error) {
 	ctx, span := tracer().Start(ctx, "ListEvents")
 	defer span.End()
-	// Recorded from a defer, not from the success path, so a query that fails still says
-	// which tenant asked for what. The limit is known at entry; rows and truncated read
-	// from the named results, which on every error path are the zero values this returns.
+	// Deferred, so a failed query still records its tenant and limit.
 	defer func() {
 		span.SetAttributes(
 			attribute.String("horopter.tenant", q.tenant),
@@ -376,8 +284,6 @@ func (s *Store) listEventsWithinBytes(
 	return evs, truncated || more, nil
 }
 
-// scanEvents reads every event row, naming tenantID in any error so a failure identifies
-// the query it came from. Extra destinations are scanned after the row's own columns.
 func scanEvents(rows pgx.Rows, tenantID string, extra ...any) ([]core.Event, error) {
 	var evs []core.Event
 	for rows.Next() {
@@ -408,28 +314,13 @@ func scanEvents(rows pgx.Rows, tenantID string, extra ...any) ([]core.Event, err
 	return evs, nil
 }
 
-// QueryChanges returns changes overlapping [q.From, q.To], and reports whether more rows
-// matched than q.Limit allowed through.
-//
-// The predicate is overlap, not start-containment. Filtering on start alone would hide
-// a change that began before the window and is still running — precisely the change
-// someone most needs to see when zooming into a spike.
-//
-// The ordering is start_at ASC unconditionally, so truncation discards the most recent
-// rows. That is why the truncated flag matters rather than being a nicety: a caller
-// otherwise cannot tell a result set of exactly q.Limit rows from one that dropped the
-// changes it most needed. The over-fetch that detects it is invisible to the caller —
-// q.Limit still means what it says.
+// QueryChanges returns changes overlapping [q.From, q.To] by start_at, reporting truncation.
 func (s *Store) QueryChanges(
 	ctx context.Context, q ChangeQuery,
 ) (out []core.Change, truncated bool, err error) {
 	ctx, span := tracer().Start(ctx, "QueryChanges")
 	defer span.End()
-	// Recorded from a defer, not from the success path, so a query that fails still says
-	// which tenant asked for what over how wide a window — the two dimensions a slow or
-	// failing dashboard query is diagnosed by. Limit and window are known at entry; rows
-	// and truncated read from the named results, which on every error path are the zero
-	// values this returns.
+	// Deferred, so a failed query still records its tenant and window.
 	defer func() {
 		span.SetAttributes(
 			attribute.String("horopter.tenant", q.tenant),
@@ -488,20 +379,7 @@ func (s *Store) queryChangesWithinBytes(
 	return out, truncated || more, nil
 }
 
-// appendChangeFilters adds the optional equality filters to the query and returns the
-// extended argument list. The placeholders are numbered from the argument list's own
-// length, so the two must grow together — which is why they are built in one place.
-//
-// The attribute loop ranges over FilterableAttributeKeys rather than over q.attributes, and
-// that is not a stylistic choice. The key is written into the SQL text rather than bound,
-// because ix_change_attr_environment indexes the expression
-// (attributes ->> 'deployment.environment.name') and Postgres matches an expression index by
-// comparing expressions: under a generic plan a bound $n is not folded to a constant, the
-// expressions stop matching, and the index is silently skipped — which would leave the
-// allowlist buying nothing. Ranging over the allowlist means the only strings that ever reach
-// the SQL are the literals declared in this file, whatever a caller supplied. The values stay
-// bound parameters. Sorting the allowlist also makes the generated SQL deterministic, which
-// Go's map iteration order is not.
+// Attribute keys are SQL literals from the allowlist: a bound $n would skip the expression index.
 func appendChangeFilters(sb *strings.Builder, args []any, q ChangeQuery) []any {
 	if !q.Subjects.IsZero() {
 		args = append(args, q.Subjects.Regexp())
@@ -536,9 +414,7 @@ func appendChangeFilters(sb *strings.Builder, args []any, q ChangeQuery) []any {
 	return args
 }
 
-// scanChanges reads every change row. start_at is read as well as the two facts it is
-// generated from, so a loaded Change carries the same start the database holds rather than
-// one recomputed from them. Extra destinations are scanned after the row's own columns.
+// start_at is read as stored, not recomputed from the two facts.
 func scanChanges(rows pgx.Rows, extra ...any) ([]core.Change, error) {
 	var out []core.Change
 	for rows.Next() {
@@ -567,9 +443,7 @@ func scanChanges(rows pgx.Rows, extra ...any) ([]core.Change, error) {
 	return out, nil
 }
 
-// TenantExists reports whether a tenant row named id exists. It answers egress's global
-// credential path: a superuser may name any tenant, and telling a real one from a typo
-// needs a lookup, not an inference from an empty result set.
+// TenantExists reports whether a tenant row named id exists, for egress's global credentials.
 func (s *Store) TenantExists(ctx context.Context, id string) (bool, error) {
 	var exists bool
 	err := s.pool.QueryRow(ctx,
@@ -580,9 +454,7 @@ func (s *Store) TenantExists(ctx context.Context, id string) (bool, error) {
 	return exists, nil
 }
 
-// EstimateChanges measures the rows QueryChanges would fetch for q without fetching them: the
-// same tenant, window, filters, order and over-fetch limit. q.MaxRowTextBytes is ignored; an
-// estimate is what decides whether to set it.
+// EstimateChanges measures what QueryChanges would fetch for q; q.MaxRowTextBytes is ignored.
 func (s *Store) EstimateChanges(ctx context.Context, q ChangeQuery) (ReadEstimate, error) {
 	return s.estimate(ctx, "EstimateChanges", q.tenant, changeSelection(q))
 }
@@ -592,8 +464,6 @@ func (s *Store) EstimateEvents(ctx context.Context, q EventQuery) (ReadEstimate,
 	return s.estimate(ctx, "EstimateEvents", q.tenant, eventSelection(q))
 }
 
-// estimate sums the row text of every row sel selects and takes the first row's by sel's
-// order, under a span named operation.
 func (s *Store) estimate(
 	ctx context.Context, operation, tenantID string, sel selection,
 ) (est ReadEstimate, err error) {

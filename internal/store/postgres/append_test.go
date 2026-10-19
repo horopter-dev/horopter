@@ -32,66 +32,31 @@ func newStore(t *testing.T) *postgres.Store {
 	s, err := postgres.Open(ctx, dsn(t))
 	require.NoError(t, err)
 	t.Cleanup(s.Close)
-	// Each test owns its own tenant, so tests are isolated without truncating shared
-	// tables. They must still run sequentially: afterLoadHook, afterIdemLookupHook and
-	// afterDeleteHook are package-level vars that the concurrency tests install and clear.
+	// Tests must run sequentially: the concurrency tests install package-level hooks.
 	return s
 }
 
-// The tests share a database that nothing truncates, so every identifier a test puts
-// into it has to be one no earlier execution used. Otherwise AppendEvent finds the
-// stored idempotency key, returns without folding, and the test asserts against rows
-// something else wrote — which is a silent vacuous pass for the concurrency test and an
-// outright failure for the others.
-//
-// procToken separates one `go test` process from the next; idSeq separates every call
-// within a process. The counter is what makes -count=N honest: a repetition reuses both
-// the process and the test name, so a token fixed at either would repeat identifiers
-// across iterations and the second iteration would do no work at all.
+// The shared database is never truncated, so ids are unique per process and per call.
 var (
 	procToken = strconv.FormatInt(time.Now().UnixNano(), 36)
 	idSeq     atomic.Uint64
 )
 
-// uniqueToken returns a token no other call in any execution has produced.
 func uniqueToken() string {
 	return procToken + "-" + strconv.FormatUint(idSeq.Add(1), 36)
 }
 
-// tenant returns a tenant id unique to this call, naming the test for traceability, and
-// creates the tenant row migration 0005's foreign keys now require before anything can
-// write under it.
+// Creates the tenant row migration 0005's foreign keys require.
 func tenant(t *testing.T) string {
 	t.Helper()
 	tn := "test-" + t.Name() + "-" + uniqueToken()
 	return testdb.NewTenant(t, tn)
 }
 
-// monotonicEntropy makes successive eventID calls sort in call order even when two land
-// in the same millisecond, which core.NewULID's production entropy (plain crypto/rand)
-// does not guarantee — see RebuildProjection's own doc comment on why that gap matters.
-// rebuild_test.go's projection-equality test depends on id order matching call order: a
-// tie broken by pure random entropy could let two same-millisecond events swap places
-// under RebuildProjection's id-ordered replay, which folds in a different order than the
-// live appends that built "before" did.
-//
-// It is package-level, not per-call, because monotonicity is a property of a SEQUENCE of
-// reads sharing one accumulator, and it is not safe for concurrent use — which is fine
-// here, since eventID is only ever called from a test's own goroutine, before any worker
-// goroutines the test spawns are released (see TestConcurrentAppendsToSameRefDoNotLoseUpdates
-// and TestConcurrentDuplicateIdempotencyKeyReturnsTheOriginal, both of which build every
-// event before starting a single goroutine).
+// Monotonic, so ids sort in call order; not safe for concurrent use.
 var monotonicEntropy = ulid.Monotonic(rand.Reader, 0)
 
-// eventID returns a fresh, valid ULID for use as an event id. event.id is a bare
-// primary key with no tenant in it, so ids must be unique across every tenant and every
-// execution, not merely within the tenant that writes them; monotonicEntropy's entropy
-// gives that guarantee the same way core.NewULID's does in production, plus the call
-// ordering guarantee production does not need and this package's tests do.
-//
-// core.Event.Validate rejects anything that is not a syntactically valid ULID, which
-// rules out embedding suffix in the id text the way this helper used to; suffix is
-// logged instead so a failing test's -v output still names the call that built the id.
+// event.id is global across tenants and runs; suffix is logged, not embedded.
 func eventID(t *testing.T, suffix string) string {
 	t.Helper()
 	id := core.NewULID(time.Now(), monotonicEntropy)
@@ -99,23 +64,12 @@ func eventID(t *testing.T, suffix string) string {
 	return id
 }
 
-// mkEvent builds the event ingest would have stored for a producer that posted
-// producerRef, which is why the locus is composed onto the ref here rather than passed in
-// already composed: ingress's resolveRef is what does it in production, and these tests
-// construct a core.Event directly, bypassing it. A fixture carrying a bare
-// correlation_ref would pin a shape no stored event has — and since 0006,
-// event_corr_ref_has_locus refuses one outright.
-//
-// The empty ref is left empty. That is a point event, whose ref core.RefFor composes from
-// the locus and the event's own id instead.
+// Composes the locus as ingress's resolveRef would; an empty ref is a point event.
 func mkEvent(tn, id, idem, producerRef, typ string, at time.Time) core.Event {
 	locus := core.LocusFromRow("ci")
 	var corr core.Ref
 	if producerRef != "" {
-		// Composed through NewRef rather than by restating "<locus>/<ref>" here, so the
-		// fixture depends on the one statement of the encoding as production does. The
-		// error is discarded because NewRef refuses exactly two shapes — a zero locus and
-		// an empty producer ref — and neither is reachable inside this branch.
+		// NewRef's two refusals are unreachable in this branch.
 		corr, _ = core.NewRef(locus, producerRef)
 	}
 	return core.Event{
@@ -180,11 +134,7 @@ func TestAppendEventRejectsInvalid(t *testing.T) {
 	assert.Contains(t, err.Error(), "subject")
 }
 
-// TestEventTenantForeignKeyIsEnforced pins migration 0005's event_tenant_fk as a real
-// database constraint, not merely a property AppendEvent happens to uphold by always
-// routing tenant through a credential that already references a tenant row. An insert
-// naming a tenant with no row must be refused by Postgres itself, which is the last-line
-// defence the whole task establishes: every write's tenant provably exists.
+// Postgres itself must refuse a tenant with no row.
 func TestEventTenantForeignKeyIsEnforced(t *testing.T) {
 	s := newStore(t)
 	missing := "tnt-missing-" + uniqueToken()
@@ -200,8 +150,6 @@ func TestEventTenantForeignKeyIsEnforced(t *testing.T) {
 	assert.Contains(t, err.Error(), "event_tenant_fk")
 }
 
-// TestChangeTenantForeignKeyIsEnforced is TestEventTenantForeignKeyIsEnforced's sibling
-// for change_tenant_fk, the projection's own foreign key.
 func TestChangeTenantForeignKeyIsEnforced(t *testing.T) {
 	s := newStore(t)
 	missing := "tnt-missing-" + uniqueToken()
@@ -216,12 +164,7 @@ func TestChangeTenantForeignKeyIsEnforced(t *testing.T) {
 	assert.Contains(t, err.Error(), "change_tenant_fk")
 }
 
-// TestAppendEventNormalizesNilAttributes pins the store's contract at the boundary
-// where the NOT NULL constraint actually lives: a nil Attributes map means "no
-// attributes," identically to an empty one, and AppendEvent must accept it rather than
-// let it reach Postgres as an explicit NULL, which the attributes column rejects
-// (DEFAULT only fires when a column is omitted from the INSERT list, not when NULL is
-// bound explicitly).
+// DEFAULT fires only when the column is omitted, not for an explicit NULL.
 func TestAppendEventNormalizesNilAttributes(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
@@ -240,39 +183,13 @@ func TestAppendEventNormalizesNilAttributes(t *testing.T) {
 	assert.Empty(t, evs[0].Attributes)
 }
 
-// concurrentAppends is how many goroutines fold onto the same ref at once. Two would
-// prove the point; a handful makes the failure message informative. It must not exceed
-// four, pgxpool's floor for MaxConns: every participant holds a connection for the whole
-// of its transaction, so a larger number can queue on the pool instead of overlapping.
+// At most four, pgxpool's MaxConns floor, or participants queue instead of overlapping.
 const concurrentAppends = 4
 
-// projectionWriteDelay is how long afterLoadHook holds each transaction between its
-// projection read and its write. It only has to outlast the time a released goroutine
-// needs to reach that read — single-digit milliseconds against a local database — so
-// this is headroom, not a tuned value.
+// Headroom, not a tuned value.
 const projectionWriteDelay = 200 * time.Millisecond
 
-// TestConcurrentAppendsToSameRefDoNotLoseUpdates is the reason applyToProjection takes
-// a per-ref advisory lock. Two ingress replicas folding two events onto the same ref
-// both read the same prior change and the second write silently discards the first
-// event's contribution — no error, nothing in the logs.
-//
-// Nothing seeds the ref first, and that is deliberate: it is the row-ABSENT path that
-// was broken. SELECT ... FOR UPDATE can only lock rows visible to the transaction's
-// snapshot, so with no row yet every participant folds from nil and the last
-// INSERT ... ON CONFLICT DO UPDATE overwrites the rest wholesale. A seeded ref sends
-// every participant down the row-EXISTS path instead, where FOR UPDATE does serialise
-// them, and the broken path is never touched. Restoring a seed here would make this
-// test pass against the defect it exists to catch.
-//
-// Two things make the outcome deterministic rather than a matter of timing. A start
-// channel releases every goroutine at once, so they overlap instead of serialising in
-// spawn order; and afterLoadHook holds each transaction between its read and its write
-// long enough that all of them have read before any of them writes.
-//
-// The hook has to be a sleep rather than a rendezvous between the participants: with
-// the lock in place only one transaction reaches the hook at a time, so a hook that
-// waited for the others would deadlock in exactly the case that must pass.
+// Unseeded: the row-absent path is the one that broke. The hook sleeps; a rendezvous deadlocks.
 func TestConcurrentAppendsToSameRefDoNotLoseUpdates(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
@@ -280,8 +197,7 @@ func TestConcurrentAppendsToSameRefDoNotLoseUpdates(t *testing.T) {
 	postgres.SetAfterLoadHook(func() { time.Sleep(projectionWriteDelay) })
 	t.Cleanup(func() { postgres.SetAfterLoadHook(nil) })
 
-	// Every event is built before any goroutine is released, so a released goroutine has
-	// nothing left to do but call AppendEvent.
+	// Every event is built before any goroutine is released.
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := 0; i < concurrentAppends; i++ {
@@ -310,24 +226,7 @@ func TestConcurrentAppendsToSameRefDoNotLoseUpdates(t *testing.T) {
 	}
 }
 
-// TestConcurrentDuplicateIdempotencyKeyReturnsTheOriginal covers a CI retry that fires
-// while the first attempt is still in flight. The check-then-insert is not atomic, so
-// both callers find nothing and both insert; the loser violates uq_event_idem. Duplicates
-// are normal traffic, not an error condition, so the loser must get the
-// stored event back exactly as the non-concurrent duplicate path returns it.
-//
-// The hook is a two-party rendezvous, not a sleep: both goroutines block there until
-// both have finished their idempotency lookup, so BOTH are guaranteed past the check
-// before either inserts, and one of them therefore MUST take the 23505 recovery path.
-// A sleep would only make that likely. The rendezvous is safe here — unlike
-// afterLoadHook, which must be a sleep — because the lookup is a plain SELECT that
-// takes no lock, so neither participant holds anything the other is waiting for.
-//
-// hookCalls is what stops the test passing vacuously. Delete the hook's call site in the
-// store and the rendezvous never happens: the two goroutines usually serialise, the loser
-// finds the row at the ordinary lookup, and every assertion below still holds — while the
-// recovery path the test is named for was never entered. Exactly two calls is proof both
-// goroutines really did get past the check before either inserted.
+// Exactly two hook calls proves both goroutines passed the check before either inserted.
 func TestConcurrentDuplicateIdempotencyKeyReturnsTheOriginal(t *testing.T) {
 	rec, restore := recordSpans(t)
 	defer restore()
@@ -406,13 +305,7 @@ func TestConcurrentDuplicateIdempotencyKeyReturnsTheOriginal(t *testing.T) {
 		"the recovery path must be counted as a deduplication, not a failure")
 }
 
-// recordSpans installs a recording provider and returns it with a restore function.
-//
-// The restore is best-effort and deliberately named for what it attempts rather than what
-// it guarantees: OTel's global provider delegates ONE WAY, so a provider installed once
-// cannot be fully uninstalled within a process, and a later test can still record into a
-// recorder installed here. That is why every assertion below filters by span name and
-// attribute key — never write one that depends on the recorder being otherwise empty.
+// Best-effort restore: OTel's global provider delegates one way, so filter by span name.
 func recordSpans(t *testing.T) (*tracetest.SpanRecorder, func()) {
 	t.Helper()
 	rec := tracetest.NewSpanRecorder()
@@ -421,10 +314,7 @@ func recordSpans(t *testing.T) (*tracetest.SpanRecorder, func()) {
 	return rec, func() { otel.SetTracerProvider(prev) }
 }
 
-// spanAttrValues returns key's value from every ended span named spanName, in the order
-// the spans ended. A span lacking the attribute is SKIPPED rather than contributing an
-// empty entry, so an exact-slice assertion reads "these spans carried it" instead of
-// "these spans existed". Pass "" as spanName to match every span.
+// Spans lacking key are skipped; pass "" to match every span.
 func spanAttrValues(rec *tracetest.SpanRecorder, spanName, key string) []string {
 	var out []string
 	for _, span := range rec.Ended() {
@@ -440,11 +330,7 @@ func spanAttrValues(rec *tracetest.SpanRecorder, spanName, key string) []string 
 	return out
 }
 
-// recordMetrics installs a meter provider with a manual reader for the rest of the test.
-//
-// Call it BEFORE newStore. A store creates its append counter from the global meter provider
-// when it opens, so a store opened first keeps counting into whatever provider was global
-// then — the same one-way delegation recordSpans documents.
+// Call before newStore: a store takes its counter from the global provider when it opens.
 func recordMetrics(t *testing.T) *sdkmetric.ManualReader {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
@@ -458,8 +344,6 @@ func recordMetrics(t *testing.T) *sdkmetric.ManualReader {
 	return reader
 }
 
-// appendCounts returns horopter.event.appends' count for each attribute set, keyed by the
-// set's encoding: "key=value" pairs in key order, joined by commas.
 func appendCounts(t *testing.T, reader *sdkmetric.ManualReader) map[string]int64 {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
@@ -480,10 +364,7 @@ func appendCounts(t *testing.T, reader *sdkmetric.ManualReader) map[string]int64
 	return counts
 }
 
-// The attribute sets horopter.event.appends records, written out by hand: every key the
-// counter may carry, and nothing that identifies a caller or an entity. An assertion against
-// these fails if a key is added — a tenant, say — which is what makes them the cardinality
-// guard as well.
+// Written by hand: an added key, say a tenant, fails the match.
 const (
 	appendCreated = "horopter.append.dedupe_path=none,horopter.append.outcome=created," +
 		"horopter.fold.out_of_order=false"
@@ -518,9 +399,6 @@ func TestAppendCountsCreatedAndDeduplicatedEvents(t *testing.T) {
 		appendCounts(t, reader))
 }
 
-// TestAppendCountsOutOfOrderEvents measures how often an append triggers the inline
-// per-ref re-fold. Ids are minted fresh and ordered, as TestAppendRecordsAnOutOfOrderFold
-// explains, because this suite never truncates its database.
 func TestAppendCountsOutOfOrderEvents(t *testing.T) {
 	reader := recordMetrics(t)
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
@@ -552,9 +430,7 @@ func TestAppendCountsAnInvalidEvent(t *testing.T) {
 	assert.Equal(t, map[string]int64{appendFailedInvalid: 1}, appendCounts(t, reader))
 }
 
-// TestAppendCountsATransientFailure closes the pool, which is a real outage rather than a
-// faked error: Begin fails the way it fails when Postgres is gone. pgxpool.Close is guarded
-// by a sync.Once, so newStore's own cleanup close is still safe.
+// pgxpool.Close is idempotent, so newStore's own cleanup close stays safe.
 func TestAppendCountsATransientFailure(t *testing.T) {
 	reader := recordMetrics(t)
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
@@ -597,12 +473,7 @@ func TestAppendRecordsAnOutOfOrderFold(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
 
-	// Append a high id first, then a lower one on the same ref: commit order and id
-	// order now disagree, which is the rebuild-divergence condition.
-	// Mint two fresh ids and order them, rather than hardcoding literals: event.id is
-	// the PRIMARY KEY and this suite never truncates its database, so a literal id
-	// passes once and then violates event_pkey forever. That violation is not on
-	// uq_event_idem, so recoverConcurrentDuplicate does not absorb it.
+	// A high id first, then a lower one; literal ids would violate event_pkey on a rerun.
 	a, b := eventID(t, "x"), eventID(t, "y")
 	if a > b {
 		a, b = b, a
@@ -619,20 +490,7 @@ func TestAppendRecordsAnOutOfOrderFold(t *testing.T) {
 		"the second append carries a lower id than the change's watermark")
 }
 
-// TestAppendRecordsTheReFoldedStatusNotTheIncrementalOne pins that
-// refoldOutOfOrderAppend's span attribute comes from the re-folded change, not from the
-// incremental fold applyToProjection computed and rejected — regressing that read-back to
-// read folded.Status instead of refolded.Status is exactly the bug the code comment on
-// refoldOutOfOrderAppend exists to prevent.
-//
-// TestAppendRecordsAnOutOfOrderFold's started/completed fixture cannot catch that
-// regression: a non-terminal event never moves Status once a change is closed, under
-// either fold order, so the incremental and re-folded answers agree there regardless of
-// which one the code reads. This needs the two-terminal fixture
-// TestAnOutOfOrderAppendConvergesTheRefToIDOrder uses — completed carries the lower id and
-// is appended second, failed the higher id and is appended first — so the incremental
-// answer (completed folds last in arrival order) and the re-folded answer (failed folds
-// last in id order) genuinely differ.
+// Needs two terminals: a non-terminal event never moves a closed change's status.
 func TestAppendRecordsTheReFoldedStatusNotTheIncrementalOne(t *testing.T) {
 	rec, restore := recordSpans(t)
 	defer restore()
@@ -680,8 +538,6 @@ func TestAppendRecordsTheErrorKindOnAFailure(t *testing.T) {
 		"a rejected event must still say what type it claimed to be")
 }
 
-// newCappedStore opens a store that refuses events whose attributes are larger than
-// maxAttributeBytes. Call recordMetrics first when counting appends, as with newStore.
 func newCappedStore(t *testing.T, maxAttributeBytes int) *postgres.Store {
 	t.Helper()
 	s, err := postgres.Open(context.Background(), dsn(t),
@@ -691,12 +547,9 @@ func newCappedStore(t *testing.T, maxAttributeBytes int) *postgres.Store {
 	return s
 }
 
-// mkEventAttributeBytes is the size of mkEvent's attributes, {"service.version":"2.5.0"}:
 // 1+17+1+7+1 bytes of JSON, counted by hand.
 const mkEventAttributeBytes = 27
 
-// TestAppendRefusesAnEventOverTheAttributeCap checks the refusal is an invalid append in every
-// place an invalid append shows: the error, the stored log, the counter and the span.
 func TestAppendRefusesAnEventOverTheAttributeCap(t *testing.T) {
 	reader := recordMetrics(t)
 	rec, restore := recordSpans(t)
@@ -742,8 +595,7 @@ func TestAppendAppliesNoAttributeCapByDefault(t *testing.T) {
 	assert.True(t, created, "a store opened without WithMaxEventAttributeBytes caps nothing")
 }
 
-// TestOpenNoMigrateAppliesTheAttributeCap covers the constructor horopter-ingress actually
-// uses. newStore runs first because OpenNoMigrate needs the schema to exist.
+// newStore runs first: OpenNoMigrate needs the schema.
 func TestOpenNoMigrateAppliesTheAttributeCap(t *testing.T) {
 	ctx, tn := context.Background(), tenant(t)
 	newStore(t)
@@ -758,10 +610,7 @@ func TestOpenNoMigrateAppliesTheAttributeCap(t *testing.T) {
 	require.ErrorIs(t, err, core.ErrInvalidEvent)
 }
 
-// TestTwoKeylessEventsInOneTenantAreBothStored pins that an empty idempotency key is bound
-// as NULL. uq_event_idem is partial on idempotency_key IS NOT NULL, so binding "" would make
-// the second keyless event in a tenant collide with the first and come back as its duplicate:
-// a producer that sends no key would lose every event after its first, answered as success.
+// uq_event_idem is partial on IS NOT NULL, so an empty key must bind as NULL.
 func TestTwoKeylessEventsInOneTenantAreBothStored(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
@@ -778,12 +627,7 @@ func TestTwoKeylessEventsInOneTenantAreBothStored(t *testing.T) {
 	assert.Equal(t, 2, n)
 }
 
-// TestAnEventIDCollisionIsNotTakenForAConcurrentDuplicate pins isUniqueViolation's
-// constraint check. Only a violation of uq_event_idem means a concurrent retry carrying the
-// same idempotency key; any other unique violation — here the event's primary key — must
-// surface as itself. Without the check it is routed to recoverConcurrentDuplicate, which
-// looks for the new key, finds nothing, and reports a race to retry instead of the real
-// fault; and the next unique constraint added to event would be routed the same way.
+// Only uq_event_idem means a concurrent retry; any other unique violation surfaces as itself.
 func TestAnEventIDCollisionIsNotTakenForAConcurrentDuplicate(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
@@ -798,8 +642,7 @@ func TestAnEventIDCollisionIsNotTakenForAConcurrentDuplicate(t *testing.T) {
 	assert.Equal(t, "event_pkey", pgErr.ConstraintName)
 }
 
-// TestAppendKeepsEarlierSubjects pins that the locked read feeding Fold carries the subject
-// map: without it, each append would fold onto an empty map and keep only its own subject.
+// Without the subject map, each append would keep only its own subject.
 func TestAppendKeepsEarlierSubjects(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)

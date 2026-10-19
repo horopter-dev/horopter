@@ -13,8 +13,6 @@ import (
 	"horopter.dev/horopter/internal/store/postgres"
 )
 
-// openWithPoolSize opens a store whose pool holds n connections, so a test can exhaust it by
-// holding them.
 func openWithPoolSize(t *testing.T, n int) *postgres.Store {
 	t.Helper()
 	u, err := url.Parse(dsn(t))
@@ -92,9 +90,7 @@ func TestAFailedAcquisitionIsReportedWithItsWait(t *testing.T) {
 	assert.ErrorIs(t, errs[0], context.DeadlineExceeded)
 }
 
-// TestPoolTracerKeepsOtelpgxSpans checks the wrapper delegates: otelpgx's acquire and
-// statement spans must survive it. recordSpans runs before the store opens, because otelpgx
-// takes the tracer provider when the pool is built.
+// recordSpans first: otelpgx takes the tracer provider when the pool is built.
 func TestPoolTracerKeepsOtelpgxSpans(t *testing.T) {
 	rec, restore := recordSpans(t)
 	defer restore()
