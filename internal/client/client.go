@@ -1,6 +1,4 @@
-// Package client reads Horopter's egress API: the changes a window and filters select, and
-// one change with its events. It follows the next link egress returns until a result is
-// complete, so its callers see rows, not pages.
+// Package client reads Horopter's egress API, following its next links, and posts to ingress.
 package client
 
 import (
@@ -23,8 +21,7 @@ type Client struct {
 	http *http.Client
 }
 
-// New returns a Client for the Horopter service at baseURL — egress to read, ingress to post —
-// authenticating with key, which must suit that side.
+// New returns a Client for the Horopter service at baseURL, authenticating with key.
 func New(baseURL, key string) (*Client, error) {
 	if baseURL == "" {
 		return nil, errors.New("no URL given")
@@ -39,12 +36,10 @@ func New(baseURL, key string) (*Client, error) {
 	return &Client{base: base, key: key, http: &http.Client{Timeout: httpTimeout}}, nil
 }
 
-// httpTimeout bounds one request end to end, so a server that accepts and never answers cannot
-// hold a read forever. A variable so a test can shorten it.
+// httpTimeout bounds one request end to end; a variable so a test can shorten it.
 var httpTimeout = time.Minute
 
-// ChangeQuery selects changes overlapping From..To. Limit caps the total across pages; zero
-// reads them all.
+// ChangeQuery selects changes overlapping From..To; a zero Limit reads them all.
 type ChangeQuery struct {
 	From, To                             time.Time
 	Subject, Type, Status, Locus, Source string
@@ -88,14 +83,11 @@ func (e *HTTPError) Error() string {
 	return fmt.Sprintf("Horopter answered %d: %s", e.Status, e.Message)
 }
 
-// Changes yields every change q selects, following next until it is absent or q.Limit rows
-// have been yielded.
+// Changes yields every change q selects, up to q.Limit rows.
 func (c *Client) Changes(ctx context.Context, q ChangeQuery) iter.Seq2[Change, error] {
 	return func(yield func(Change, error) bool) {
 		n := 0
-		// A change's start can move later while a caller pages — a started event arriving
-		// after an annotation — carrying it past the cursor onto a later page as well. Each
-		// ref is yielded once.
+		// A started event arriving after an annotation can move a change onto a later page.
 		seen := map[string]bool{}
 		for row, err := range rows(ctx, c, "/v1/changes?"+changeParams(q).Encode(), "changes") {
 			if err != nil {
@@ -211,8 +203,7 @@ func (c *Client) page(ctx context.Context, path, field string) ([]json.RawMessag
 	return decodePage(resp, field)
 }
 
-// fetch sends one authenticated GET for path, resolved under the client's base URL, and turns
-// any answer but 200 into an HTTPError carrying egress's message.
+// fetch sends one authenticated GET for path and turns any answer but 200 into an HTTPError.
 func (c *Client) fetch(ctx context.Context, path string) (*http.Response, error) {
 	ref, err := url.Parse(path)
 	if err != nil {
