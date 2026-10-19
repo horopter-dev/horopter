@@ -16,9 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// serve runs req through Requests(mux) with slog's default sent to a buffer, and returns
-// every record written. No test in this package calls t.Parallel, which is what makes
-// swapping the process-wide default safe.
+// serve swaps slog's default, which is safe only because no test here calls t.Parallel.
 func serve(
 	t *testing.T, mux http.Handler, req *http.Request, opts ...RequestOption,
 ) []map[string]any {
@@ -233,8 +231,7 @@ func TestTheQueryIsNeverLoggedWithoutTheOption(t *testing.T) {
 	assert.NotContains(t, records[0], "query")
 }
 
-// TestAnInvalidByteDoesNotEmptyALongField: validPrefix used to trim until the whole prefix
-// was valid UTF-8, so one bad byte near the start of a long field cut it to nothing.
+// validPrefix once trimmed until the whole prefix was valid, emptying the field.
 func TestAnInvalidByteDoesNotEmptyALongField(t *testing.T) {
 	value := "a\xff" + strings.Repeat("b", 4<<10)
 	m := muxWith("POST /v1/events", func(_ http.ResponseWriter, r *http.Request) {

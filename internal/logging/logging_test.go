@@ -15,8 +15,6 @@ import (
 )
 
 // record logs through a handler over buf and returns the single JSON object it wrote.
-// Every test here asserts on emitted JSON, so a change that stops emitting a field fails
-// the test that names the field.
 func record(t *testing.T, log func(l *slog.Logger)) map[string]any {
 	t.Helper()
 	var buf bytes.Buffer
@@ -109,9 +107,7 @@ func TestAGroupKeepsTheIDs(t *testing.T) {
 	group, ok := out["read"].(map[string]any)
 	require.True(t, ok, "expected a \"read\" group, got %v", out)
 	assert.Equal(t, "/v1/changes", group["route"])
-	// The ids nest inside the open group: a record's attributes always land in the group
-	// the handler is in. No production call site uses WithGroup; this pins the behaviour
-	// rather than endorsing it.
+	// No production call site uses WithGroup: this pins the behaviour rather than endorsing it.
 	assert.Equal(t, traceID, group["trace_id"],
 		"WithGroup must re-wrap, or correlation is lost for every logger built with it")
 }
@@ -136,10 +132,7 @@ func TestSetupReturnsTheLevelError(t *testing.T) {
 	assert.Same(t, previous, slog.Default(), "a failed Setup must not replace the default")
 }
 
-// TestSetupInstallsTheTraceCorrelatingHandler proves Setup wires the trace-correlating
-// wrapper, not a bare slog.NewJSONHandler. A mutation that swaps in the bare handler leaves
-// every other test in this file, and go vet, silent: this is the only test that would catch
-// it, so it stands in for Setup's only production path.
+// The only test that catches Setup installing a bare slog.NewJSONHandler.
 func TestSetupInstallsTheTraceCorrelatingHandler(t *testing.T) {
 	previousStderr := os.Stderr
 	r, w, err := os.Pipe()

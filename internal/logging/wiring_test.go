@@ -10,14 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestEveryBinaryInstallsTheHandlerBeforeTelemetry pins the startup order. telemetry.Setup
-// passes slog.Default().Handler() to OpenTelemetry's internal logger, so a binary that calls
-// it first gives OTel the text handler and keeps it for the life of the process — with
-// nothing failing and no line out of place except OTel's own.
-//
-// cmd/horopter-migrate and horoctl's compiled-in migrate verb both call
-// internal/migrate.Run rather than defining their own run(), so Run is where this
-// ordering is enforced for both of them — one entry, not one per caller.
+// Both migrate entry points call internal/migrate.Run, so Run is checked for both.
 func TestEveryBinaryInstallsTheHandlerBeforeTelemetry(t *testing.T) {
 	for _, c := range []struct{ path, fn string }{
 		{"../../cmd/horopter-ingress/main.go", "run"},
