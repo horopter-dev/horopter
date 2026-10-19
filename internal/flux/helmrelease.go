@@ -8,28 +8,20 @@ import (
 	"horopter.dev/horopter/internal/client"
 )
 
-// ReleaseMemory is what the client remembers of one HelmRelease between updates: the attempt
-// whose start it posted and whose end it has not seen, and the newest revision it closed as
-// orphaned. Both are lost on a restart, and a cold list re-derives Open from status.
+// ReleaseMemory is the open attempt and newest orphaned revision; a cold list re-derives Open.
 type ReleaseMemory struct {
 	Open     *OpenAttempt
 	Orphaned int
 }
 
-// OpenAttempt is an install or upgrade whose start was posted: the Helm revision predicted for
-// it, its action, and the time its start was posted at, which tells a later start apart.
+// OpenAttempt is an install or upgrade whose start was posted, with its predicted revision.
 type OpenAttempt struct {
 	Version int
 	Action  string
 	Since   time.Time
 }
 
-// MapHelmRelease brackets each Helm install and upgrade as a release change, ref
-// HelmRelease/<ns>/<name>/<uid>/v<revision>. It starts at helm-controller's pre-action patch,
-// "Running '<action>' action", and ends when the revision reaches history; a rollback that
-// remediates it is a further outcome on the same ref. prev is nil on a cold list, which
-// records the newest attempt from history alone, its start approximated as its end less the
-// action's duration.
+// MapHelmRelease brackets each Helm install and upgrade as a release change; prev is nil cold.
 func MapHelmRelease(cluster string, mem ReleaseMemory, prev *HelmRelease, cur HelmRelease,
 ) ([]client.NewEvent, ReleaseMemory) {
 	r := release{cluster: cluster, hr: cur}
@@ -62,8 +54,7 @@ func (r release) event(version int, typ, lifecycle, keySuffix string, at time.Ti
 	}
 }
 
-// pending records helm-controller unlocking a release a dead controller left pending, as a
-// point, and closes the attempt that was open, whose revision may never reach history.
+// pending records a PendingRelease unlock as a point and closes the open attempt as failed.
 func (r release) pending(mem ReleaseMemory, prev *HelmRelease, out []client.NewEvent,
 ) ([]client.NewEvent, ReleaseMemory) {
 	rel, ok := condition(r.hr.Status.Conditions, "Released")
@@ -99,10 +90,7 @@ func (r release) orphanClosed(open OpenAttempt, at time.Time) client.NewEvent {
 // running matches helm-controller's Reconciling message immediately before a Helm action.
 var running = regexp.MustCompile(`^Running '(install|upgrade)' action`)
 
-// start opens a release change at helm-controller's pre-action patch for an install or
-// upgrade. A start while another is open closes that one as orphaned: its controller died.
-// helm-controller writes the conditions a call before lastAttempted*, so the start carries none
-// of them; attempted posts them once they land.
+// start carries no lastAttempted*: helm-controller writes them a call after the conditions.
 func (r release) start(mem ReleaseMemory, prev *HelmRelease, out []client.NewEvent,
 ) ([]client.NewEvent, ReleaseMemory) {
 	action, since, ok := r.running()
@@ -123,8 +111,7 @@ func (r release) start(mem ReleaseMemory, prev *HelmRelease, out []client.NewEve
 	return r.attempted(*mem.Open, prev, out), mem
 }
 
-// attempted posts the open attempt's chart version, values and generation when they differ
-// from prev's, or on a cold list.
+// attempted posts the open attempt's lastAttempted* fields when they differ from prev's.
 func (r release) attempted(open OpenAttempt, prev *HelmRelease, out []client.NewEvent,
 ) []client.NewEvent {
 	trigger := r.trigger(prev)
@@ -144,11 +131,7 @@ func (r release) attempted(open OpenAttempt, prev *HelmRelease, out []client.New
 	return append(out, ev)
 }
 
-// running reports the install or upgrade helm-controller is about to run, and when. The
-// Reconciling condition keeps its transition time across a retry, so the start is the later of
-// it and Ready's, which every release action turns Unknown. A message no newer than
-// history[0]'s end is stale: helm-controller patches the finished action's history before it
-// clears Reconciling.
+// running ignores a message no newer than history[0]: it is patched before Reconciling clears.
 func (r release) running() (string, time.Time, bool) {
 	rec, ok := condition(r.hr.Status.Conditions, "Reconciling")
 	if !ok || rec.Status != "True" || rec.Reason != "Progressing" {
@@ -174,8 +157,7 @@ func (r release) startedAt(rec Condition) time.Time {
 	return rec.LastTransitionTime
 }
 
-// predict is the Helm revision the action will write: the latest plus one, or 1 for an
-// install that does not replace, and never one already closed as orphaned.
+// predict is the Helm revision the action will write, never one already closed as orphaned.
 func (r release) predict(action string, orphaned int) int {
 	latest := 0
 	if h := r.hr.Status.History; len(h) > 0 {
@@ -201,8 +183,7 @@ func (r release) chart() string {
 	return ""
 }
 
-// trigger says why helm-controller ran an action: the spec, the chart or the values changed.
-// It needs the previous state, so an attempt seen first on a cold list has none.
+// trigger says whether the spec, the chart or the values changed since prev.
 func (r release) trigger(prev *HelmRelease) string {
 	if prev == nil {
 		return ""

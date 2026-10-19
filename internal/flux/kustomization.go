@@ -4,11 +4,7 @@ import (
 	"horopter.dev/horopter/internal/client"
 )
 
-// MapKustomization records cur's Ready condition as the outcome of the commit it names, when it
-// differs from prev's. Ready=True ReconciliationSucceeded completes the change at
-// lastAppliedRevision; Ready=False fails it at lastAttemptedRevision and is also a point,
-// unless the Kustomization is only waiting (DependencyNotReady, Progressing). Each
-// Kustomization's first outcome at a revision ends the change, and later runs repeat its key.
+// MapKustomization records a changed Ready condition as the outcome of the commit it names.
 func MapKustomization(cluster string, prev *Kustomization, cur Kustomization,
 ) []client.NewEvent {
 	ready, ok := condition(cur.Status.Conditions, "Ready")
