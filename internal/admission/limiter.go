@@ -1,6 +1,4 @@
-// Package admission decides whether egress has the capacity to serve a read now. It holds the
-// two gates a read passes — a concurrency limit and a memory pool — and nothing else: no
-// telemetry, logging, clock or database, which egress wires around it.
+// Package admission holds egress's two read gates; egress wires telemetry and the rest.
 package admission
 
 import (
@@ -8,14 +6,7 @@ import (
 	"sync"
 )
 
-// Limiter is an additive-increase, multiplicative-decrease concurrency limit. A read that
-// finishes healthy raises the limit by one, up to a ceiling; a read that finishes overloaded
-// halves it, down to a floor.
-//
-// Every read that queued behind one congestion episode reports it when it finishes, so halving
-// on each report would collapse the limit to its floor from a single episode. A permit therefore
-// records how many decreases had happened when it was issued, and an overloaded report from a
-// permit issued before the latest decrease changes nothing.
+// Limiter is an AIMD concurrency limit that halves once per congestion episode.
 type Limiter struct {
 	mu        sync.Mutex
 	floor     int
@@ -23,8 +14,7 @@ type Limiter struct {
 	limit     int
 	inFlight  int
 	decreases uint64
-	// freed is closed, and replaced, whenever a permit may have become free, waking every
-	// waiting Acquire to check again.
+	// freed is closed and replaced whenever a permit may have become free, waking Acquire.
 	freed chan struct{}
 }
 
@@ -34,14 +24,12 @@ type Permit struct {
 	decreases uint64
 }
 
-// NewLimiter returns a Limiter whose limit starts at initial. It requires
-// 1 <= floor <= initial <= ceiling.
+// NewLimiter returns a Limiter at initial; it requires 1 <= floor <= initial <= ceiling.
 func NewLimiter(floor, initial, ceiling int) *Limiter {
 	return &Limiter{floor: floor, ceiling: ceiling, limit: initial, freed: make(chan struct{})}
 }
 
-// Acquire returns a permit once fewer reads are in flight than the limit allows, or ctx.Err()
-// if ctx ends first.
+// Acquire returns a permit once fewer reads are in flight than the limit, or ctx.Err().
 func (l *Limiter) Acquire(ctx context.Context) (Permit, error) {
 	for {
 		l.mu.Lock()
@@ -62,8 +50,7 @@ func (l *Limiter) Acquire(ctx context.Context) (Permit, error) {
 	}
 }
 
-// Release ends the permit's read and adjusts the limit by whether the read was overloaded. It
-// returns the limit before and after, so the caller can report a decrease.
+// Release ends the permit's read, adjusts the limit, and returns it before and after.
 func (p Permit) Release(overloaded bool) (before, after int) {
 	l := p.limiter
 	l.mu.Lock()

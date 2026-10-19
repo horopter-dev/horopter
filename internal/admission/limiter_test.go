@@ -37,9 +37,7 @@ func TestLimiterAdmitsUpToTheLimit(t *testing.T) {
 	assert.Equal(t, 2, l.InFlight())
 }
 
-// TestLimiterAdmitsAWaiterWhenAPermitIsReleased sleeps to let the waiter start waiting. Had it
-// not started, it would be admitted at once and the test would still pass, so the sleep can
-// only weaken what the test proves, never make it fail spuriously.
+// The sleep can only weaken what the test proves, never make it fail spuriously.
 func TestLimiterAdmitsAWaiterWhenAPermitIsReleased(t *testing.T) {
 	l := admission.NewLimiter(1, 1, 1)
 	held := acquire(t, l)
@@ -85,8 +83,6 @@ func TestLimiterHalvesTheLimitOnAnOverloadedRelease(t *testing.T) {
 	assert.Equal(t, 2, l.Limit())
 }
 
-// TestLimiterHalvesOnceForReadsAdmittedBeforeTheSameDecrease is the rule that keeps one
-// congestion episode from collapsing the limit: every read queued behind it reports it.
 func TestLimiterHalvesOnceForReadsAdmittedBeforeTheSameDecrease(t *testing.T) {
 	l := admission.NewLimiter(1, 8, 16)
 	first, second := acquire(t, l), acquire(t, l)
