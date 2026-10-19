@@ -20,8 +20,7 @@ import (
 	"horopter.dev/horopter/internal/flux"
 )
 
-// resource is one kind the client watches, cluster-wide. eventsAbout, when set, narrows a
-// watch of core Events to those about that Flux kind.
+// resource is one kind the client watches; eventsAbout narrows core Events to one Flux kind.
 type resource struct {
 	gvr         schema.GroupVersionResource
 	listKind    string
@@ -57,18 +56,13 @@ var (
 	}
 )
 
-// titleWait is how long a new artifact's start waits for the NewArtifact Event that carries
-// its commit subject, and titleRetry how often it looks again. Variables so a test can
-// shorten them.
+// titleWait bounds the wait for a NewArtifact Event's commit subject; variables for tests.
 var (
 	titleWait  = time.Minute
 	titleRetry = 5 * time.Second
 )
 
-// watcher derives events from each watched object and hands them to the poster. Each
-// informer calls its handler from one goroutine, so the HelmRelease memory is touched by one
-// goroutine only; GitRepositories go through their own queue, which the NewArtifact Events
-// they wait for also feed.
+// watcher needs no lock on releases: only the HelmRelease informer's goroutine touches it.
 type watcher struct {
 	cluster    string
 	poster     *poster
@@ -185,8 +179,7 @@ func observeAs[T any](old, cur any, f func(prev *T, obj T)) {
 	if old != nil {
 		p, err := decode[T](old)
 		if err != nil {
-			// A nil prev reads as a first sight: everything derivable is posted again, which
-			// the server's dedup absorbs.
+			// A nil prev re-posts everything derivable, which the server's dedup absorbs.
 			slog.Warn("could not read a watched object's previous state; re-deriving it",
 				"error", err)
 		} else {
@@ -227,10 +220,7 @@ func (w *watcher) runGitQueue(ctx context.Context) {
 	}
 }
 
-// startCommit posts the start of the commit a GitRepository's artifact is at, titled by its
-// NewArtifact Event. A young artifact whose Event has not arrived waits for it, up to
-// titleWait; after that, or for an artifact already old at a cold start, the title is the
-// short revision.
+// startCommit posts a commit's start, titled by its NewArtifact Event or its short revision.
 func (w *watcher) startCommit(key string) {
 	repo, ok := w.cachedRepo(key)
 	if !ok || repo.Status.Artifact == nil {

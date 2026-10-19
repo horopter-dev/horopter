@@ -1,8 +1,4 @@
-// Command horopter-flux records what Flux does as Horopter changes. It watches
-// GitRepositories, Kustomizations, HelmReleases and their Events read-only, derives every
-// change from their state, and posts to ingress with a producer key. It keeps no state of its
-// own: on start it re-derives everything, and deterministic idempotency keys make the
-// re-posting harmless.
+// Command horopter-flux records what Flux does as Horopter changes, keeping no state of its own.
 package main
 
 import (
