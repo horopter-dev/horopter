@@ -11,8 +11,6 @@ import (
 	"slices"
 )
 
-// cursorToken is what a cursor carries: the last returned row's key, and a fingerprint of the
-// query that produced it. Clients treat the encoded token as opaque.
 type cursorToken struct {
 	K []string `json:"k"`
 	Q string   `json:"q"`
@@ -20,8 +18,7 @@ type cursorToken struct {
 
 var errBadCursor = errors.New("cursor is not a token egress issued; start again without it")
 
-// queryFingerprint identifies a read's question: every parameter but cursor and limit, sorted.
-// limit only sizes a page, so a client may change it between pages without changing the question.
+// limit only sizes a page, so a client may change it between pages.
 func queryFingerprint(values url.Values) string {
 	keys := make([]string, 0, len(values))
 	for k := range values {
@@ -50,8 +47,7 @@ func encodeCursor(key []string, values url.Values) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
-// decodeCursor returns the key token carries, refusing one issued for a different question:
-// stitching pages of two queries together would answer neither.
+// Refuses a token issued for another query: stitching two queries' pages answers neither.
 func decodeCursor(token string, values url.Values) ([]string, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {
@@ -68,8 +64,6 @@ func decodeCursor(token string, values url.Values) ([]string, error) {
 	return c.K, nil
 }
 
-// nextURL is r's own path and parameters with cursor set to token: the next page's request,
-// ready to send as it is.
 func nextURL(r *http.Request, token string) string {
 	values := r.URL.Query()
 	values.Set("cursor", token)

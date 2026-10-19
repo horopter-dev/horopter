@@ -1,13 +1,4 @@
-// Package ingress is the write-side daemon: it receives events, validates them, and
-// appends them to the log, folding each into the projection in the same transaction.
-//
-// It contains no query code by design: no code here calls QueryChanges or ListEvents,
-// and Routes exposes no path that reaches them. That is a discipline this package's
-// code observes, not a privilege boundary — Server holds a full *postgres.Store, which
-// exposes those same read methods, so a compromise of the ingress process itself still
-// has a read-capable Store sitting in memory. What splitting into two binaries buys is
-// that a bug specific to the read path is only reachable through egress's routes, and a
-// bug specific to the write path only through ingress's.
+// Package ingress is the write-side daemon; it holds a full Store but never calls a read method.
 package ingress
 
 import (
@@ -31,12 +22,7 @@ import (
 	"horopter.dev/horopter/internal/store/postgres"
 )
 
-// MaxBodyBytes caps a request body. A fully populated event — every field set, a generous
-// attribute map — is a few kilobytes, and a CloudEvents envelope adds a little more, so
-// 1 MiB is three orders of magnitude of headroom for an unusually large attribute payload.
-// It is also nowhere near enough to be a memory lever: both body readers here consume the
-// whole body before anything is validated, so without a cap a single unauthenticated-
-// adjacent request decides how much the process allocates.
+// MaxBodyBytes caps a request body: both readers consume the whole body before validating it.
 const MaxBodyBytes = 1 << 20
 
 // Server is the ingress HTTP surface.
@@ -45,17 +31,11 @@ type Server struct {
 	clock   func() time.Time
 	entropy io.Reader
 	authn   *auth.Authenticator
-	// allowLocusPrefixedRef lifts the guard in resolveRef. False is the safe default and
-	// the zero value, so a Server built without the option keeps the guard.
+	// allowLocusPrefixedRef lifts resolveRef's guard; the zero value keeps it.
 	allowLocusPrefixedRef bool
 }
 
-// New returns an ingress Server. clock and entropy are injected so handlers stay
-// deterministic under test.
-//
-// A nil authenticator is refused here rather than left to callers to check: every write
-// route is gated on it, so a Server built without one would either panic on the first
-// request or, worse, need every caller to remember the guard itself.
+// New returns an ingress Server, refusing a nil authenticator: every write route needs one.
 func New(
 	s *postgres.Store, clock func() time.Time, entropy io.Reader, authn *auth.Authenticator,
 	opts ...Option,
@@ -73,8 +53,7 @@ func New(
 	return srv, nil
 }
 
-// WithAllowLocusPrefixedRef lifts the guard against a correlation_ref whose first segment is
-// the credential's own locus. See AllowLocusPrefixedRefFromEnv for why it defaults to off.
+// WithAllowLocusPrefixedRef lifts the guard against a ref starting with the credential's locus.
 func WithAllowLocusPrefixedRef(allow bool) Option {
 	return func(s *Server) { s.allowLocusPrefixedRef = allow }
 }
@@ -82,9 +61,7 @@ func WithAllowLocusPrefixedRef(allow bool) Option {
 // Option configures a Server at construction.
 type Option func(*Server)
 
-// Routes returns the handler for every ingress endpoint. Probes are unauthenticated;
-// everything else requires a credential granting the append capability, or for /v1/admin/
-// routes the admin capability.
+// Routes returns the handler for every ingress endpoint; only the probes are unauthenticated.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/events", s.authn.Require(auth.CapAppend)(http.HandlerFunc(s.postEvent)))
@@ -94,33 +71,16 @@ func (s *Server) Routes() http.Handler {
 		s.authn.Require(auth.CapAdmin)(http.HandlerFunc(s.postRefold)))
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
-	// otelhttp gives every route a server span carrying the http.* semantic
-	// conventions. It wraps the mux rather than each handler so a route added later is
-	// covered without anyone remembering. With no provider installed it is a no-op.
-	//
-	// The operation argument is empty because it has no effect here. Without a
-	// WithSpanNameFormatter option, otelhttp's default formatter ignores the operation
-	// entirely and names the span from the request's method and route; passing the
-	// binary name only made it look load-bearing. The binary name already reaches
-	// backends as the service.name resource attribute.
-	// Inside otelhttp so the span is in the context the line is logged with; around the
-	// mux so the matched route is known when it is written.
+	// Requests sits inside otelhttp to log with its span; otelhttp ignores the empty operation.
 	return otelhttp.NewHandler(logging.Requests(mux), "")
 }
 
-// healthz reports process liveness only. It must not touch the database: a failing
-// liveness probe restarts the pod, and restarting will not fix a database outage.
+// Must not touch the database: restarting the pod will not fix a database outage.
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// readyz reports whether this instance can serve traffic, which requires the database.
-// A failing readiness probe removes the pod from the load balancer without killing it.
-//
-// The probe answers without a credential, and pgx formats a failed connection with the
-// database user, database name, host and port, so the error goes to the server log and
-// the body says only that the database is unreachable — appendFailed's rule, applied to
-// the one route on this daemon that anyone can call.
+// pgx's error names the DB user, name, host and port, so it is logged, not relayed.
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.Pool().Ping(r.Context()); err != nil {
 		slog.ErrorContext(r.Context(), "readiness probe failed", "error", err)
@@ -131,10 +91,7 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 }
 
 type eventRequest struct {
-	// Tenant and Source are json.RawMessage, not string, so a present-but-null value is
-	// distinguishable from an absent key: unmarshaling null into *string or string both
-	// leave the zero value, indistinguishable from omission, and the rule is reject a
-	// caller who sends the key at all, whatever its value — not just a non-empty one.
+	// RawMessage, not string: a present-but-null key must be refused like any other value.
 	Tenant         json.RawMessage `json:"tenant"`
 	Source         json.RawMessage `json:"source"`
 	Type           string          `json:"type"`
@@ -148,20 +105,11 @@ type eventRequest struct {
 	Lifecycle      string          `json:"lifecycle"`
 }
 
-// recordTenant puts the resolved tenant on the request's span. The tenant is the
-// primary dimension every other question is sliced by, so it goes on the span that
-// exists for every request rather than only on the ones that reach the store.
 func recordTenant(ctx context.Context, tenantID string) {
 	trace.SpanFromContext(ctx).SetAttributes(attribute.String("horopter.tenant", tenantID))
 }
 
-// subjectAllowed reports whether subject is covered by pattern, an empty pattern meaning
-// the credential is unrestricted.
-//
-// An empty subject never satisfies a non-empty pattern, checked before path.Match rather
-// than left to it: path.Match's "*" matches an empty name too, so without this guard an
-// absent subject could satisfy a narrowing pattern by that accident rather than because a
-// producer actually posted one.
+// An empty subject never matches a pattern, though path.Match's "*" would match it.
 func subjectAllowed(pattern, subject string) bool {
 	if pattern == "" {
 		return true
@@ -171,8 +119,7 @@ func subjectAllowed(pattern, subject string) bool {
 	}
 	ok, err := path.Match(pattern, subject)
 	if err != nil {
-		// A malformed pattern is an issuing defect, not this request's fault, and the
-		// safe default is the same refusal a genuine mismatch gets.
+		// A malformed pattern is an issuing defect; refuse it like a mismatch.
 		slog.Error("credential subject_pattern is not a valid pattern",
 			"pattern", pattern, "error", err)
 		return false
@@ -180,22 +127,7 @@ func subjectAllowed(pattern, subject string) bool {
 	return ok
 }
 
-// resolveRef validates the producer's ref as given, composes it with the credential's
-// locus, and caps the composed form — the form that is actually stored, so the length
-// cap applies to what is stored rather than to what the producer sent. An empty ref
-// yields the zero core.Ref: a point event has no correlation ref to namespace.
-//
-// This is the anti-corruption boundary between the wire and the domain. The composition
-// itself belongs to core.NewRef; what stays here are the two rules about what a PRODUCER
-// may send, which are auth's business rather than the type's — the ordering guard below
-// and the byte cap.
-//
-// ValidateRef must run on ref BEFORE it is composed with locus, not after. Composing
-// first can move a leading or trailing space away from the string's edge: " deploy-1"
-// fails the whitespace check, but "github/ deploy-1" would not, since the space sits in
-// the middle once prefixed. That check exists for exactly this producer mistake — an
-// untrimmed ref posts a start under one ref and its completion under another, and
-// nothing errors — so disabling it for the composed form defeats the reason it exists.
+// Validate before composing with locus: "github/ deploy-1" would hide the leading space.
 func resolveRef(locus core.Locus, ref string, allowLocusPrefix bool) (core.Ref, error) {
 	if ref == "" {
 		return core.Ref{}, nil
@@ -226,7 +158,6 @@ func resolveRef(locus core.Locus, ref string, allowLocusPrefix bool) (core.Ref, 
 	return composed, nil
 }
 
-// subjectForbidden answers a subject the credential's subject_pattern does not cover.
 func subjectForbidden(w http.ResponseWriter, pattern, subject string) {
 	writeError(w, http.StatusForbidden, fmt.Sprintf(
 		"subject %q is outside this credential's scope %q", subject, pattern))
@@ -295,8 +226,7 @@ func (s *Server) append(w http.ResponseWriter, r *http.Request, ev core.Event) {
 		appendFailed(w, r, ev, err)
 		return
 	}
-	// The stored event, not ev: a replayed idempotency key returns the original, whose ref,
-	// subject and type are the ones the caller and every reader see.
+	// The stored event, not ev: a replayed idempotency key returns the original.
 	logging.Annotate(r.Context(),
 		slog.String("ref", core.RefFor(stored).String()),
 		slog.String("subject", stored.Subject),
@@ -311,8 +241,7 @@ func (s *Server) append(w http.ResponseWriter, r *http.Request, ev core.Event) {
 	})
 }
 
-// annotateEvent puts the event's searchable identifiers on the request's log line. Never
-// its attributes: they are operator-owned, and may hold anything.
+// Never attributes: they are operator-owned and may hold anything.
 func annotateEvent(ctx context.Context, ev core.Event) {
 	attrs := []slog.Attr{slog.String("subject", ev.Subject), slog.String("type", ev.Type)}
 	if ev.IdempotencyKey != "" {
@@ -321,31 +250,10 @@ func annotateEvent(ctx context.Context, ev core.Event) {
 	logging.Annotate(ctx, attrs...)
 }
 
-// amendHandle returns the value a producer echoes into the NEXT event's correlation_ref to
-// amend this change.
-//
-// It is RefFor composed with ProducerRef, which are inverses, and that is the whole point:
-// for a point the result is the event's own id, for a correlated event it is what the
-// producer sent, and for a producer ref containing "/" it is the whole thing, since only
-// the first cut is taken. A producer never has to know which case they are in — and if the
-// ref encoding ever changes, both halves move together.
+// RefFor composed with its inverse ProducerRef: the value a producer echoes to amend.
 func amendHandle(ev core.Event) string { return core.RefFor(ev).ProducerRef() }
 
-// appendFailed answers a failed append, and the distinction it draws is the whole point
-// of core.ErrInvalidEvent. Producers treat 4xx as "do not retry", so answering a
-// connection failure, a commit failure or a lock timeout with 400 — as this handler used
-// to do for every error alike — permanently loses every event posted during a database
-// blip, with nothing in any log showing a hole exists. That is the worst failure a system
-// of record can have.
-//
-// 400 is returned only for a validation failure, and its body carries the error text
-// because that text describes the caller's own input back to them. Everything else is
-// transient from the caller's point of view and gets 503: not 500, because 503 is what
-// tells the producer to retry, which is what turns a lost event into a delayed one.
-//
-// The 503 body is generic on purpose. The underlying text names tables, constraint names
-// and connection strings, and ingress's callers are not operators; the full detail goes to
-// the server log instead, where an operator can correlate it with the request.
+// Only validation failures are 400: producers never retry a 4xx, so the rest are 503.
 func appendFailed(w http.ResponseWriter, r *http.Request, ev core.Event, err error) {
 	if errors.Is(err, core.ErrInvalidEvent) {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -358,12 +266,7 @@ func appendFailed(w http.ResponseWriter, r *http.Request, ev core.Event, err err
 			"this request may be retried")
 }
 
-// writeBodyError answers a request body that could not be read.
-//
-// An over-sized body is 413, not 400: the body may be perfectly well formed and merely too
-// large, and http.MaxBytesReader surfaces the cap as a read error, so reporting it as
-// malformed JSON would send the caller hunting for a syntax error that is not there.
-// Anything else is the caller's own malformed input, reported with malformedMsg.
+// 413, not 400: the body may be well formed and merely too large.
 func writeBodyError(w http.ResponseWriter, err error, malformedMsg string) {
 	var tooLarge *http.MaxBytesError
 	if errors.As(err, &tooLarge) {

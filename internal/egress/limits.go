@@ -25,9 +25,7 @@ const (
 	// minReadMemoryBytes is the smallest pool accepted, 1 MiB.
 	minReadMemoryBytes = 1 << 20
 
-	// maxAdmissionWait bounds AdmissionWait. A read can wait at both gates, so this keeps the
-	// two waits to 20s of horopter-egress's 30s WriteTimeout, leaving time for the read to run
-	// and for a shed read's 503 to be written.
+	// maxAdmissionWait keeps both gates' waits within 20s of the 30s WriteTimeout.
 	maxAdmissionWait = 10 * time.Second
 )
 
@@ -40,10 +38,7 @@ func DefaultLimits() Limits {
 	}
 }
 
-// LimitsFromEnv returns DefaultLimits with HOROPTER_EGRESS_READ_MEMORY_BYTES,
-// HOROPTER_EGRESS_ADMISSION_WAIT and HOROPTER_EGRESS_DB_WAIT_THRESHOLD applied where set. An
-// invalid value is an error naming the variable and the value, so horopter-egress refuses to
-// start rather than run with a limit nobody chose.
+// LimitsFromEnv applies the HOROPTER_EGRESS_* variables over DefaultLimits; bad values error.
 func LimitsFromEnv() (Limits, error) {
 	defaults := DefaultLimits()
 	memory, err := readMemoryBytesFromEnv(defaults.ReadMemoryBytes)
@@ -61,8 +56,6 @@ func LimitsFromEnv() (Limits, error) {
 	return Limits{ReadMemoryBytes: memory, AdmissionWait: wait, DBWaitThreshold: threshold}, nil
 }
 
-// readMemoryBytesFromEnv reads HOROPTER_EGRESS_READ_MEMORY_BYTES, returning fallback, the
-// 256 MiB default, when it is unset or empty.
 func readMemoryBytesFromEnv(fallback int64) (int64, error) {
 	raw := os.Getenv(readMemoryBytesVar)
 	if raw == "" {
@@ -82,8 +75,6 @@ func readMemoryBytesFromEnv(fallback int64) (int64, error) {
 	return n, nil
 }
 
-// durationFromEnv reads name as a Go duration, returning fallback when it is unset or empty. A
-// value must be above zero and, when ceiling is non-zero, at most ceiling.
 func durationFromEnv(name string, fallback, ceiling time.Duration) (time.Duration, error) {
 	raw := os.Getenv(name)
 	if raw == "" {
