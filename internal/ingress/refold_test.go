@@ -17,8 +17,6 @@ import (
 	"horopter.dev/horopter/internal/store/postgres"
 )
 
-// seedRoleKeyIn issues a key of role in an existing tenant, with locus "test" and no subject
-// pattern — the shape `horoctl admin keys issue --role <role> --tenant <id>` produces.
 func seedRoleKeyIn(t *testing.T, s *postgres.Store, tenantID core.TenantID, role string) string {
 	t.Helper()
 	key, prefix, hash, err := auth.NewKey(rand.Reader)
@@ -39,8 +37,6 @@ func seedRoleKeyIn(t *testing.T, s *postgres.Store, tenantID core.TenantID, role
 	return key
 }
 
-// refoldFixture is an ingress fixture with one change, github/d1, in the producer's tenant,
-// and a tenant_admin key for that tenant.
 type refoldFixture struct {
 	ingressFixture
 	adminKey string
@@ -118,8 +114,6 @@ func TestAGlobalKeyMustNameAnExistingTenant(t *testing.T) {
 	assert.Equal(t, http.StatusOK, named.Code, named.Body.String())
 }
 
-// TestRefoldWantsTheStoredRefForm: a producer ref has no locus, so it is refused as malformed
-// with the form named — not answered 404, which would suggest the change does not exist.
 func TestRefoldWantsTheStoredRefForm(t *testing.T) {
 	f := newRefoldFixture(t)
 	for _, body := range []string{`{"ref":"d1"}`, `{"ref":""}`, `{}`, `not json`} {
@@ -170,7 +164,6 @@ func TestRefoldLogsTheRefAndWhatItAltered(t *testing.T) {
 	assert.Equal(t, []any{"title"}, line["refold_altered"])
 }
 
-// TestRefoldAnswerDecodes pins the answer's field names for clients.
 func TestRefoldAnswerDecodes(t *testing.T) {
 	f := newRefoldFixture(t)
 	rec := refold(t, f.srv, f.adminKey, `{"ref":"github/d1"}`)
@@ -184,8 +177,6 @@ func TestRefoldAnswerDecodes(t *testing.T) {
 	assert.Equal(t, 1, got.Events)
 }
 
-// TestAFailedRefoldStillLogsItsRef: the request line is an admin action's audit record, so a
-// re-fold that ended in 404 must still say which change it targeted.
 func TestAFailedRefoldStillLogsItsRef(t *testing.T) {
 	f := newRefoldFixture(t)
 	records := captureLogs(t)
@@ -200,9 +191,6 @@ func TestAFailedRefoldStillLogsItsRef(t *testing.T) {
 	assert.True(t, found, "the 404's request line must carry the ref: %v", records())
 }
 
-// TestAFailingStoreAnswers503ForARefold: a database blip during a re-fold is transient, and
-// 503 is what tells a caller — horo refold among them — to retry. A 500 is not retried, and
-// its body no longer says the request may be.
 func TestAFailingStoreAnswers503ForARefold(t *testing.T) {
 	f := newRefoldFixture(t)
 	warm := refold(t, f.srv, f.adminKey, `{"ref":"github/d1"}`)

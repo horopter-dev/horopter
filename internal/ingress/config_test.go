@@ -13,9 +13,7 @@ const maxAttributeBytesVar = "HOROPTER_INGRESS_MAX_EVENT_ATTRIBUTE_BYTES"
 
 const allowLocusPrefixedRefVar = "HOROPTER_INGRESS_ALLOW_LOCUS_PREFIXED_REF"
 
-// TestAllowLocusPrefixedRefFromEnv pins the DEFAULT as much as the parsing. Unset must mean
-// guard on: a mutation flipping that default is invisible to every handler test, because
-// those build the Server through an option rather than the environment.
+// Unset must mean guard on; handler tests set it by option, so only this sees the default.
 func TestAllowLocusPrefixedRefFromEnv(t *testing.T) {
 	for _, tc := range []struct {
 		value string
