@@ -33,6 +33,44 @@ with a retryable `503` until it finishes. It is not batched and reports no progr
 the tenant's writes are quiet, and prefer re-folding one change when you can name it:
 [Rebuild a Tenant's Projection](https://docs.horopter.dev/how-to/rebuild-a-tenants-projection/).
 
+## Migrating Trusts the Ledger
+
+`horopter-migrate` and `horoctl migrate` apply every migration file the `applied_migration` table
+does not list, and the files are not safe to apply twice. A database whose schema is ahead of
+that table cannot migrate: dropping or emptying the table, or restoring a dump that leaves it
+out, fails with
+
+```text
+apply migration "0002_constrain_status_and_generate_end_effective.sql": ERROR: constraint "change_status_vocabulary" for relation "change" already exists (SQLSTATE 42710)
+```
+
+and nothing is applied. A backup taken before the table existed, at schema version 1, is not
+affected: it migrates as any version 1 database does.
+
+Record the files the schema already carries, then migrate. `schema_version` holds the number of
+the last one; the file names are in
+[`internal/store/postgres/migrations`](https://github.com/horopter-dev/horopter/tree/main/internal/store/postgres/migrations).
+In `psql`, insert one row for every file numbered up to that version:
+
+```sql
+SELECT version FROM schema_version;
+
+BEGIN;
+CREATE TABLE IF NOT EXISTS applied_migration (
+    filename   TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO applied_migration (filename) VALUES
+    ('0001_init.sql'),
+    ('0002_constrain_status_and_generate_end_effective.sql'),
+    ('0003_split_change_start_into_assertion_and_inference.sql')
+ON CONFLICT (filename) DO NOTHING;
+COMMIT;
+```
+
+The example stops at version 3. `horopter-migrate` then applies only the files after the last
+row.
+
 ## The Last Terminal Event Wins
 
 A change's status is the outcome of the last event that ended it, by event id. When two
