@@ -35,15 +35,7 @@ func TestOpenAppliesMigrations(t *testing.T) {
 	}
 }
 
-// isolatedSchemaDSN creates a uniquely named, empty schema on the target database and
-// returns a DSN whose search_path points at it, then drops the schema in t.Cleanup.
-//
-// TestOpenAppliesMigrations runs first (Go runs tests in declaration order) and leaves
-// the public schema fully migrated, so racing Open calls against public would make every
-// CREATE ... IF NOT EXISTS a no-op existence check with nothing left to collide over —
-// the advisory lock could be deleted and the race would still pass. Racing against a
-// schema of our own that has never held these tables is what makes the concurrent
-// CREATE TABLE / CREATE INDEX statements a genuine catalog race.
+// A never-migrated schema of its own, so the concurrent DDL genuinely races.
 func isolatedSchemaDSN(t *testing.T, base string) string {
 	t.Helper()
 	ctx := context.Background()
@@ -70,16 +62,11 @@ func isolatedSchemaDSN(t *testing.T, base string) string {
 
 func TestMigrationsAreIdempotentAndConcurrencySafe(t *testing.T) {
 	ctx := context.Background()
-	// dsn(t) must run on the test's own goroutine: t.Skip calls runtime.Goexit,
-	// which only ends the calling goroutine rather than the test, so calling it
-	// from inside the workers below would hang the <-errs loop forever instead
-	// of skipping when HOROPTER_TEST_DSN is unset.
+	// On the test goroutine: t.Skip from a worker would hang the loop.
 	base := dsn(t)
 	d := isolatedSchemaDSN(t, base)
 
-	// Ten simultaneous starts against a schema that exists but has never been
-	// migrated, as N pods rolling out together against a freshly provisioned
-	// database would produce. Without the advisory lock these race the same DDL.
+	// Ten starts against an unmigrated schema, like pods rolling out together.
 	errs := make(chan error, 10)
 	for i := 0; i < 10; i++ {
 		go func() {
@@ -97,16 +84,7 @@ func TestMigrationsAreIdempotentAndConcurrencySafe(t *testing.T) {
 	}
 }
 
-// TestMigrationLedgerAppliesEachFileOnce is the guard that lets a non-idempotent
-// migration exist at all. Without the applied_migration ledger every file re-executes on
-// every run, which is harmless only while every migration is written with IF NOT EXISTS;
-// the first backfill UPDATE or schema transformation would error on the second run or,
-// worse, silently re-apply — data corruption in a system of record.
-//
-// The second Open SUCCEEDING is itself the proof, not a formality: 0002 adds a CHECK
-// constraint by name, which Postgres refuses to add twice. The subtest below runs that
-// statement again by hand to show the failure the ledger is preventing, so this test
-// cannot pass vacuously if the migrations ever all become idempotent again.
+// 0002's named CHECK cannot be added twice, so a second Open succeeding proves the ledger.
 func TestMigrationLedgerAppliesEachFileOnce(t *testing.T) {
 	ctx := context.Background()
 	d := isolatedSchemaDSN(t, dsn(t))
@@ -147,10 +125,7 @@ func TestMigrationLedgerAppliesEachFileOnce(t *testing.T) {
 		"a recorded migration must not re-execute, and its ledger row must not be rewritten")
 
 	t.Run("0002 is genuinely not idempotent", func(t *testing.T) {
-		// The CHECK body is deliberately arbitrary: ADD CONSTRAINT fails on the duplicate
-		// NAME whatever it asserts, so restating 0002's vocabulary here bought nothing and
-		// made this a third hand-copied copy of it — one that no test held against
-		// core.Statuses.
+		// Arbitrary body: ADD CONSTRAINT fails on the duplicate name alone.
 		_, err := second.Pool().Exec(ctx, `
 			ALTER TABLE change ADD CONSTRAINT change_status_vocabulary CHECK (true)`)
 		require.Error(t, err,
@@ -158,10 +133,6 @@ func TestMigrationLedgerAppliesEachFileOnce(t *testing.T) {
 	})
 }
 
-// TestSchemaVersionIsDerivedFromTheHighestMigration pins the version to the migrations
-// actually present. It used to be a literal INSERT inside 0001_init.sql, so adding a
-// migration without editing that literal left the database claiming a version its schema
-// no longer matched and nothing noticed.
 func TestSchemaVersionIsDerivedFromTheHighestMigration(t *testing.T) {
 	ctx := context.Background()
 	s, err := postgres.Open(ctx, isolatedSchemaDSN(t, dsn(t)))
@@ -180,14 +151,8 @@ func TestSchemaVersionIsDerivedFromTheHighestMigration(t *testing.T) {
 		"the recorded version must be the numeric prefix of the highest applied migration")
 }
 
-// otelpgxScope is the instrumentation scope name both otelpgx.RecordStats and
-// otelpgx.NewTracer's metrics register under.
 const otelpgxScope = "github.com/exaring/otelpgx"
 
-// otelpgxAttributeSets returns the attribute set of every data point of every metric in the
-// otelpgx scope, split into the pgxpool.* pool-statistic metrics (from RecordStats) and every
-// other otelpgx metric (the tracer's own db.client.operation.duration and .errors). otelpgx
-// records these as int64 sums, an int64 gauge and a float64 histogram.
 func otelpgxAttributeSets(
 	t *testing.T, reader *sdkmetric.ManualReader,
 ) (pool, other []attribute.Set) {
@@ -210,8 +175,6 @@ func otelpgxAttributeSets(
 	return pool, other
 }
 
-// metricAttributeSets returns the attribute set of every data point in one metric's
-// aggregation, covering the three shapes otelpgx's own metrics take.
 func metricAttributeSets(data metricdata.Aggregation) []attribute.Set {
 	switch data := data.(type) {
 	case metricdata.Sum[int64]:
@@ -243,8 +206,6 @@ func histogramAttributes[N int64 | float64](
 	return sets
 }
 
-// attributeKeys returns set's keys, sorted, so two key sets can be compared regardless of
-// the order their attributes were recorded in.
 func attributeKeys(set attribute.Set) []string {
 	keys := make([]string, 0, set.Len())
 	for _, kv := range set.ToSlice() {
@@ -254,12 +215,7 @@ func attributeKeys(set attribute.Set) []string {
 	return keys
 }
 
-// TestStoreRecordsPoolStatisticsUnderAFixedPoolName pins otelpgx's metrics against
-// publishing the database's identity on the unauthenticated /metrics listener: the fixed
-// pool name override on its pgxpool.* statistics, and the exact attribute key set on every
-// other otelpgx metric (its per-operation duration and error counters). A dependency bump
-// that added an attribute such as server.address, server.port or db.namespace to either
-// family would otherwise publish it with the suite green.
+// A bump adding server.address or db.namespace must fail: /metrics is unauthenticated.
 func TestStoreRecordsPoolStatisticsUnderAFixedPoolName(t *testing.T) {
 	reader := recordMetrics(t)
 	newStore(t) // opening runs migrations, which is what otelpgx's operation metrics need
@@ -280,15 +236,7 @@ func TestStoreRecordsPoolStatisticsUnderAFixedPoolName(t *testing.T) {
 	}
 }
 
-// TestMigrateReportsTheFilesItApplied covers the fact horopter-migrate needs to tell an
-// operator what it did. The ledger alone cannot answer it: after the run, a file applied
-// just now and a file applied a year ago are both simply present, so a binary that reads
-// the ledger afterwards cannot say which of the rows it was responsible for.
-//
-// The expectation is the ledger's own contents rather than a hardcoded list of filenames,
-// so adding a migration does not require editing this test to keep it passing — what is
-// asserted is the invariant (a fresh schema reports every file it ran) and not the number
-// of files that happen to exist today.
+// Expects the ledger's own contents, so a new migration needs no edit here.
 func TestMigrateReportsTheFilesItApplied(t *testing.T) {
 	ctx := context.Background()
 

@@ -34,9 +34,7 @@ func TestOverlapPredicate(t *testing.T) {
 	seed("spanning", base.Add(-time.Hour), at(2*time.Hour))
 	seed("openearly", base.Add(-5*time.Hour), nil)
 	seed("subsecond", base.Add(30*time.Minute+500*time.Millisecond), at(31*time.Minute))
-	// Boundary cases: everything above sits an hour or more clear of the window edges,
-	// so an inclusive predicate regressing to strict < / > would pass unnoticed. These two
-	// sit exactly on each edge.
+	// Two boundary rows sit exactly on the window edges, so a strict < or > fails.
 	seed("onstartboundary", winTo, nil) // start_at == To exactly; open, so end_effective is far future
 	seed("onendboundary", base.Add(-2*time.Hour), at(0))
 	// at(0) == winFrom exactly, so end_effective == From exactly.
@@ -76,10 +74,7 @@ func TestQueryChangesFiltersBySubjectTypeAndStatus(t *testing.T) {
 	_, _, err = s.AppendEvent(ctx,
 		mkEvent(tn, eventID(t, "failed"), "k2", "d1", "deployment.failed", at.Add(time.Minute)))
 	require.NoError(t, err)
-	// d2 stays in_progress, type deployment.started — it exists so the Status and Type
-	// filters below have a row to exclude, not just one row that is trivially the only
-	// candidate. Without d2, require.Len(t, got, 1) below would pass identically with the
-	// filter's SQL clause deleted entirely.
+	// d2 gives the Status and Type filters a row to exclude.
 	_, _, err = s.AppendEvent(ctx,
 		mkEvent(tn, eventID(t, "d2-started"), "k3", "d2", "deployment.started", at))
 	require.NoError(t, err)
@@ -105,10 +100,7 @@ func TestQueryChangesFiltersBySubjectTypeAndStatus(t *testing.T) {
 	assert.Empty(t, none)
 }
 
-// TestQueryChangesCombinesFiltersAndLimit exercises Subject, Type, and Status active
-// together, and the same three combined with Limit — the positional parameter numbering
-// ($4, $5, $6, $7) is only ever built incrementally by QueryChanges, so this is the
-// highest-risk case for an off-by-one that a single-filter test cannot expose.
+// Parameter numbering is built incrementally, so combine every filter with Limit.
 func TestQueryChangesCombinesFiltersAndLimit(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -122,9 +114,7 @@ func TestQueryChangesCombinesFiltersAndLimit(t *testing.T) {
 				start.Add(time.Minute)))
 		require.NoError(t, err)
 	}
-	// multi-a and multi-b share type "deployment.completed" and status "completed", with
-	// distinct start times so ORDER BY start_at ASC is deterministic. multi-c differs in
-	// both type and status, so it must drop out whenever either filter is applied.
+	// multi-c differs in type and status, so either filter drops it.
 	seedCompleted("multi-a", at)
 	seedCompleted("multi-b", at.Add(10*time.Minute))
 	_, _, err := s.AppendEvent(ctx,
@@ -170,11 +160,7 @@ func TestQueryChangesIsTenantScoped(t *testing.T) {
 	assert.Empty(t, got, "queries must never cross tenants")
 }
 
-// TestChangeStatusVocabularyIsEnforced proves the CHECK migration 0002 adds is real. An
-// empty status made a change both unqueryable — QueryChanges reads an empty Status as
-// "no filter" — and, with end_at NULL, an open interval matching every overlap query
-// until the year 9999. The constraint is what stops that class of row ever being written
-// again, whatever a future code path forgets.
+// An empty status matched every overlap query until 9999; the CHECK stops it.
 func TestChangeStatusVocabularyIsEnforced(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -192,11 +178,7 @@ func TestChangeStatusVocabularyIsEnforced(t *testing.T) {
 		})
 	}
 
-	// Every value in core.Statuses, not one sample of it. This half of the test used to
-	// insert 'in_progress' alone while asserting it proved the constraint "must still
-	// admit every status internal/core can produce" — a claim one hardcoded literal
-	// cannot support. Adding a seventh Status without a migration compiled, passed here,
-	// and failed at runtime on the first insert.
+	// Every core.Statuses value: a new Status without a migration must fail here.
 	for _, st := range core.Statuses {
 		t.Run("admits "+string(st), func(t *testing.T) {
 			var valid int
@@ -213,12 +195,7 @@ func TestChangeStatusVocabularyIsEnforced(t *testing.T) {
 	}
 }
 
-// TestEndEffectiveIsGeneratedFromEndAt pins the one remaining copy of the open-change
-// sentinel. end_effective is the overlap index's key; it used to be computed in Go and
-// written alongside end_at, so the two could drift and the index would answer overlap
-// queries from a value no longer implied by the data. Postgres owns it now, and this
-// asserts its generated value against core.OpenSentinel so the SQL literal in 0002 and
-// the Go constant cannot diverge unnoticed.
+// Pins the SQL sentinel in 0002 to core.OpenSentinel.
 func TestEndEffectiveIsGeneratedFromEndAt(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -244,15 +221,7 @@ func TestEndEffectiveIsGeneratedFromEndAt(t *testing.T) {
 		"closing a change must move end_effective to end_at without Go writing it")
 }
 
-// TestListEventsFindsAPointChangesEvents covers the ref of a change with no correlation
-// ref. core.RefFor makes such a change's ref its locus and its own event id, so filtering
-// the event log on correlation_ref alone returned nothing for every point change the read
-// side serves.
-//
-// It queries core.RefFor(stored) rather than the bare event id deliberately. Asserting on
-// the id is what let this test keep passing when 0006 moved the ref: the value a caller
-// actually holds comes from a change row or from the append response, both of which are
-// RefFor's output, and that is the only value worth pinning.
+// Queries core.RefFor(stored), the value a caller holds, not the bare event id.
 func TestListEventsFindsAPointChangesEvents(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -279,45 +248,19 @@ func TestListEventsFindsAPointChangesEvents(t *testing.T) {
 	assert.Equal(t, "ci/dep-9", correlated[0].CorrelationRef.String())
 }
 
-// TestListEventsIdArmIgnoresCorrelatedEvents pins that listing a ref returns only the
-// events belonging to it, and not a second change's event whose own id equals the ref's
-// id half.
-//
-// What it pins is this qualifier in ListEvents' id arm:
-//
-//	correlation_ref = ''
-//
-// It is written in a code block because gofmt rewrites two apostrophes into a closing
-// smart quote in running doc-comment text, which is how this comment came to spell a SQL
-// empty-string literal as a character SQL has no use for.
-//
-// Without the qualifier the id arm is "locus = <locus> AND id = <id>", which also matches
-// an event whose own id happens to equal the ref's id half — and since a correlated
-// event's id is an arbitrary ULID while a ref is producer-supplied, a producer using event
-// ids as correlation refs makes exactly that collision. The two events below belong to
-// different changes and the audit log for one must not show the other's.
-//
-// This guard is only as reachable as the id arm makes it, and it has been unreachable
-// before: between 0006 and the ref split, the id arm compared the WHOLE ref
-// against e.id, no event id contains a '/', and the decoy below was excluded by "id <>
-// ref" alone — so the qualifier could have been deleted with this test staying green.
-// Check it by mutation rather than by its colour: deleting the qualifier from
-// eventSelection must make this test FAIL.
+// Pins the id arm's empty-correlation_ref qualifier: deleting it must fail this test.
 func TestListEventsIdArmIgnoresCorrelatedEvents(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 
-	// sharedRef is both a correlation ref (for memberID below) and another event's id.
-	// It must be unique to this run: event.id is a global primary key across every tenant
-	// and every past execution.
+	// Unique to this run: event.id is a global primary key.
 	sharedRef := eventID(t, "shared-ref")
 	memberID := eventID(t, "member")
 
 	_, _, err := s.AppendEvent(ctx,
 		mkEvent(tn, memberID, "k1", sharedRef, "deployment.started", at))
 	require.NoError(t, err)
-	// This event's own id IS sharedRef, but it carries a correlation ref of its own, so
-	// it belongs to that other change and not to sharedRef's.
+	// Its own id is sharedRef, but its correlation ref puts it in another change.
 	_, _, err = s.AppendEvent(ctx,
 		mkEvent(tn, sharedRef, "k2", eventID(t, "other-ref"), "deployment.started", at))
 	require.NoError(t, err)
@@ -330,11 +273,7 @@ func TestListEventsIdArmIgnoresCorrelatedEvents(t *testing.T) {
 	assert.Equal(t, memberID, got[0].ID)
 }
 
-// TestListEventsIgnoresARefWithNoLocus pins what eventSelection does with a ref that does
-// not parse. After 0006 no ref is bare, so a bare one names nothing and must match nothing
-// — including the point event whose id it happens to equal. core.ParseRef refuses it and
-// the empty locus bound in its place matches no row, because event_locus_shape forbids
-// one. Answering 200 with an empty list, rather than erroring, is what this pins.
+// A bare ref matches nothing and answers empty, not an error.
 func TestListEventsIgnoresARefWithNoLocus(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -348,10 +287,6 @@ func TestListEventsIgnoresARefWithNoLocus(t *testing.T) {
 	assert.Empty(t, evs, "a bare event id is not a ref after 0006 and must match nothing")
 }
 
-// TestListEventsIgnoresARefWithAnEmptyLocus pins the read half of the rule
-// change_ref_has_locus enforces on the write half: '/x' carries a slash but no locus, and
-// an empty locus is not a locus. event_locus_shape means no row can hold one, so the
-// predicate matches nothing — but only as long as the locus arm is compared, not assumed.
 func TestListEventsIgnoresARefWithAnEmptyLocus(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -365,27 +300,7 @@ func TestListEventsIgnoresARefWithAnEmptyLocus(t *testing.T) {
 	assert.Empty(t, evs, "an empty locus is not a locus, so /<id> names nothing")
 }
 
-// TestACorrelatedRefMayCollideWithAPointRef pins the limit the design accepts rather than
-// guards, recorded under "Named limits" in the spec. Before 0006 the two shapes could not
-// collide: a correlated ref was <locus>/<ref> and a point ref was a bare ULID. Both are now
-// <locus>/<something>, so a producer that posts a correlation_ref equal to a point event's
-// own id, in the same tenant and locus, writes into that point's change row.
-//
-// It is consistent rather than corrupting — events are immutable and stored separately, so
-// a rebuild reproduces the same merge — and reaching it takes a deliberate choice by a
-// credential that can already append to the tenant. Guarding it would mean refusing every
-// ULID-shaped correlation ref, which refuses producers whose build or trace ids are ULIDs.
-//
-// The merge is asserted where it is observable: the shared ref lists BOTH events, each
-// reaching the result through a different arm of eventSelection's predicate — the point
-// through the id arm, the correlated event through correlation_ref — and the change row's
-// last_event_id names the correlated event, so it demonstrably folded into the point's row
-// rather than merely sharing a name with it.
-//
-// Counting change rows for the ref cannot show any of that. change is PRIMARY KEY (tenant,
-// ref), so the count can only be 0 or 1, and the precondition below already establishes
-// that the point alone creates that row: a count of 1 is entailed before the correlated
-// event is appended, and would read the same if the collision never happened.
+// An accepted limit: a correlated ref equal to a point's id merges into its change.
 func TestACorrelatedRefMayCollideWithAPointRef(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -394,9 +309,7 @@ func TestACorrelatedRefMayCollideWithAPointRef(t *testing.T) {
 	point, _, err := s.AppendEvent(ctx, mkEvent(tn, pointID, "k1", "", "config.changed", at))
 	require.NoError(t, err)
 
-	// The producer posts the point's own id as its correlation ref. mkEvent composes the
-	// locus onto it exactly as ingress's resolveRef would, so this is stored as
-	// "ci/<pointID>" — the same string RefFor gives the point.
+	// Stored as ci/<pointID>, the same string RefFor gives the point.
 	corrID := eventID(t, "corr")
 	_, _, err = s.AppendEvent(ctx,
 		mkEvent(tn, corrID, "k2", pointID, "deployment.started", at))
@@ -423,9 +336,6 @@ func TestACorrelatedRefMayCollideWithAPointRef(t *testing.T) {
 			"accepted limit, not a bug")
 }
 
-// TestQueryChangesFindsAPointChangeByItsPrefixedRef covers the OTHER read route. Nothing in
-// this change touches changeSelection, which matches c.ref directly, so a point change's
-// migrated ref must reach it unchanged — and no test would say otherwise if it stopped.
 func TestQueryChangesFindsAPointChangeByItsPrefixedRef(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -442,14 +352,7 @@ func TestQueryChangesFindsAPointChangeByItsPrefixedRef(t *testing.T) {
 	assert.Equal(t, "ci/"+pointID, changes[0].Ref.String())
 }
 
-// TestStartAtIsGeneratedFromTheTwoStartFacts is TestEndEffectiveIsGeneratedFromEndAt's
-// counterpart for migration 0003. start_at is no longer written by Go: Postgres derives
-// it from COALESCE(started_at, first_seen_at), so the precedence of the assertion over
-// the inference is structural rather than a branch a later edit can get wrong. This
-// asserts the derivation against a ref whose only events are non-start (started_at stays
-// NULL, so start_at must follow first_seen_at) and then against the same ref once a start
-// event asserts a LATER time — under a single start column that assertion would have been
-// min'd away or would have destroyed the earlier evidence.
+// start_at = COALESCE(started_at, first_seen_at), generated by Postgres.
 func TestStartAtIsGeneratedFromTheTwoStartFacts(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -492,15 +395,7 @@ func TestStartAtIsGeneratedFromTheTwoStartFacts(t *testing.T) {
 			"the earliest event seen")
 }
 
-// TestFailedQueryChangesStillRecordsItsAttributes is the failure half of the read path's
-// instrumentation. The attributes that say what was asked for — tenant, limit and window
-// — are all known before the query runs, so recording them only after it succeeded left
-// every failed read describing nothing at all, which is the one case anyone reads a span
-// for. A cancelled context is the cheapest deterministic way to make the pool refuse.
-//
-// rows and truncated are asserted as their zero values rather than skipped: they come
-// from the named results, and asserting them pins that the deferred block reads the
-// results rather than stale locals.
+// rows and truncated are asserted as zero: the deferred block must read the named results.
 func TestFailedQueryChangesStillRecordsItsAttributes(t *testing.T) {
 	rec, restore := recordSpans(t)
 	defer restore()
@@ -529,8 +424,6 @@ func TestFailedQueryChangesStillRecordsItsAttributes(t *testing.T) {
 		spanAttrValues(rec, "QueryChanges", "horopter.query.truncated"))
 }
 
-// TestFailedListEventsStillRecordsItsAttributes is the same guard on the other read
-// method, which has its own copy of the deferred block.
 func TestFailedListEventsStillRecordsItsAttributes(t *testing.T) {
 	rec, restore := recordSpans(t)
 	defer restore()
@@ -547,14 +440,7 @@ func TestFailedListEventsStillRecordsItsAttributes(t *testing.T) {
 	assert.Equal(t, []string{"0"}, spanAttrValues(rec, "ListEvents", "horopter.query.rows"))
 }
 
-// TestQueryConstructorsRefuseTheZeroTenant is the runtime half of the tenant gate the spec
-// promises: "the zero value is caught by one guard inside the constructor".
-//
-// The compile-time half — TenantID's unexported field — makes an unscoped query
-// unwritable as a struct literal, but the zero value is still constructible, and a query
-// carrying one selects the empty tenant and returns an empty result set indistinguishable
-// from a legitimate one. Nothing reaches this today because egress's admit resolves every
-// read's tenant first; a route registered without it would compile.
+// The zero TenantID is constructible; only the constructor refuses it.
 func TestQueryConstructorsRefuseTheZeroTenant(t *testing.T) {
 	at := time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
 
@@ -565,10 +451,7 @@ func TestQueryConstructorsRefuseTheZeroTenant(t *testing.T) {
 	require.ErrorIs(t, err, postgres.ErrUnscopedQuery)
 }
 
-// core.ParseRef is deliberately stricter than change_ref_has_locus, which admits a ref whose
-// producer half is empty. That asymmetry is only safe because stored values are read through
-// core.RefFromRow, which does not validate. A scan that used ParseRef would make this row
-// unreadable.
+// Readable only because stored refs go through core.RefFromRow, which does not validate.
 func TestAStoredRefTheParserWouldRejectIsStillReadable(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -588,13 +471,7 @@ func TestAStoredRefTheParserWouldRejectIsStillReadable(t *testing.T) {
 	assert.Equal(t, "ci/", got[0].Ref.String(), "and must round-trip unchanged")
 }
 
-// TestNewChangeQueryRefusesAnUnfilterableAttributeKey is the discriminating assertion for
-// the allowlist. Asserting that an ALLOWLISTED key filters correctly passes whether or not
-// the allowlist is enforced at all; only a rejected key proves it exists.
-//
-// A caller filtering on an unindexed key and receiving every row has been told the wrong
-// answer, which is why this is a refusal rather than a silently dropped clause — the same
-// conclusion Area A reached for --subject-pattern.
+// Only a refused key proves the allowlist exists.
 func TestNewChangeQueryRefusesAnUnfilterableAttributeKey(t *testing.T) {
 	at := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
 
@@ -609,8 +486,6 @@ func TestNewChangeQueryRefusesAnUnfilterableAttributeKey(t *testing.T) {
 		"and must list what IS filterable, or the caller has to guess")
 }
 
-// TestNewChangeQueryAcceptsAnAllowlistedAttributeKey is the other half: the allowlist must
-// not refuse everything.
 func TestNewChangeQueryAcceptsAnAllowlistedAttributeKey(t *testing.T) {
 	at := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
 
@@ -622,9 +497,7 @@ func TestNewChangeQueryAcceptsAnAllowlistedAttributeKey(t *testing.T) {
 		postgres.AttributesOf(q))
 }
 
-// TestQueryChangesFiltersByLocus pins the generated column through the only surface it is
-// observable from. The locus is never rendered, so if split_part is wrong, or the column is
-// missing, or the filter names the wrong column, this query is what says so.
+// Locus is never rendered; this query is its only check.
 func TestQueryChangesFiltersByLocus(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -641,10 +514,7 @@ func TestQueryChangesFiltersByLocus(t *testing.T) {
 	assert.Equal(t, "gha/dep-gha", got[0].Ref.String())
 }
 
-// TestQueryChangesFiltersBySource pins the column end to end: an event's source reaches the
-// change through the fold, comes back out as a member of Sources, and the filter matches by
-// containment rather than equality — which is what lets a change with two sources be found
-// under either.
+// Containment, not equality: a change with two sources is found under either.
 func TestQueryChangesFiltersBySource(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -661,10 +531,7 @@ func TestQueryChangesFiltersBySource(t *testing.T) {
 	assert.Equal(t, "ci/dep-gh", got[0].Ref.String())
 	assert.Equal(t, []string{"github"}, got[0].Sources, "and the value must come back on the change")
 
-	// A change both systems reported is found under either, which is the whole reason
-	// sources is a set: under last-wins it was findable only under whichever reported last.
-	// argo and flux are new names, not reused from the fixtures above, so the two source
-	// filters below cannot accidentally also match dep-gh or dep-bk.
+	// argo and flux are new names, so the filters cannot also match the fixtures above.
 	argoEvent := mkEvent(tn, eventID(t, "dep-both-1"), "k-dep-both-1", "dep-both",
 		"deployment.started", at)
 	argoEvent.Source = "argo"
@@ -688,10 +555,7 @@ func TestQueryChangesFiltersBySource(t *testing.T) {
 	}
 }
 
-// TestQueryChangesFiltersByAttribute covers the allowlisted key, and with it the two SQL
-// behaviours the spec leans on without naming: a change that lacks the key entirely is
-// excluded (attributes ->> 'k' is NULL, and NULL = 'prod' is NULL rather than false), and a
-// non-string JSON value is compared as the text ->> renders it.
+// A missing key is excluded (NULL = 'prod'); non-string values compare as ->> text.
 func TestQueryChangesFiltersByAttribute(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -727,10 +591,7 @@ func TestQueryChangesFiltersByAttribute(t *testing.T) {
 	assert.Equal(t, "ci/dep-num", num[0].Ref.String())
 }
 
-// TestQueryChangesTreatsAnEmptyAttributeValueAsNoFilter settles the one genuine ambiguity in
-// the design: ?attr.deployment.environment.name= could mean "where the value is the empty
-// string" or "no filter". It means no filter, because subject, type and status all already
-// mean that, and a caller who omits a value has not asked a narrower question.
+// An empty value means no filter, as it does for subject, type and status.
 func TestQueryChangesTreatsAnEmptyAttributeValueAsNoFilter(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -746,14 +607,9 @@ func TestQueryChangesTreatsAnEmptyAttributeValueAsNoFilter(t *testing.T) {
 	assert.Len(t, got, 2, "an empty value must not filter, and must not filter for \"\"")
 }
 
-// seeded is one event to append, named rather than positional: locus, source and ref are
-// three adjacent strings, and a transposition between them is exactly what issueFlags made
-// a compile error elsewhere in this tree.
 type seeded struct{ locus, source, ref string }
 
-// appendUnder appends one event under a chosen locus and source, which mkEvent hardcodes
-// both to "ci". The correlation ref is composed through core.NewRef so the fixture depends
-// on the one statement of the encoding, as production does.
+// The ref goes through core.NewRef, the one statement of the encoding.
 func appendUnder(t *testing.T, s *postgres.Store, tn string, sd seeded, at time.Time) {
 	t.Helper()
 	ev := mkEvent(tn, eventID(t, sd.ref), "k-"+sd.ref, sd.ref, "deployment.started", at)
@@ -766,12 +622,7 @@ func appendUnder(t *testing.T, s *postgres.Store, tn string, sd seeded, at time.
 	require.NoError(t, err)
 }
 
-// TestChangesSharingAStartAreOrderedByRef pins the order's tiebreak. Changes sharing a start
-// are common — a deploy fanned out to several services in one second — and egress's keyset
-// paging resumes after (start_at, ref), so a read must return them in ref order. Without
-// "ref ASC", in the query and in the order a read re-sorts by, ties come back in the order
-// Postgres stores them: appended c, a, b, they come back c, a, b, and a page boundary
-// between them would skip or repeat one.
+// Keyset paging resumes after (start_at, ref), so ties must come back in ref order.
 func TestChangesSharingAStartAreOrderedByRef(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
@@ -855,9 +706,7 @@ func TestQueryChangesScopeFollowsAnEarlierEnd(t *testing.T) {
 	assert.Empty(t, got, "an older outcome moved the end before the subject; scope follows it")
 }
 
-// TestQueryChangesWithAStarHeavyPatternIsCheap guards the regex Postgres compiles: 1,023 stars
-// before a literal once took Postgres 21.7s to compile. The bound is loose on purpose; it
-// catches a regression to seconds, not a slow machine.
+// 1,023 stars once took Postgres 21.7s to compile; the bound is loose on purpose.
 func TestQueryChangesWithAStarHeavyPatternIsCheap(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 10, 6, 13, 0, 0, 0, time.UTC)
@@ -871,9 +720,7 @@ func TestQueryChangesWithAStarHeavyPatternIsCheap(t *testing.T) {
 	assert.Less(t, time.Since(start), 3*time.Second)
 }
 
-// TestQueryChangesMatchesMetacharacterSubjectsInPostgres pins what the fuzzer cannot: the
-// fuzzer checks the translation with Go's regexp, and the store runs it through Postgres's
-// ~. Each subject is matched by a pattern of itself and not by a near miss.
+// The fuzzer checks Go's regexp; this checks Postgres's ~.
 func TestQueryChangesMatchesMetacharacterSubjectsInPostgres(t *testing.T) {
 	ctx, s := context.Background(), newStore(t)
 	at := time.Date(2026, 10, 6, 15, 0, 0, 0, time.UTC)

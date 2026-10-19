@@ -17,17 +17,10 @@ import (
 	"horopter.dev/horopter/internal/store/postgres"
 )
 
-// migration0004Cutoff is the filename freshDatabase stops before, so a test can seed
-// old-shape rows and then let Migrate apply exactly 0004 on top of them.
+// Seeds old-shape rows, then lets Migrate apply exactly 0004.
 const migration0004Cutoff = "0004_identity.sql"
 
-// freshDatabase creates a database nothing else has ever written to, applies every
-// migration up to (not including) 0004, and drops the database in t.Cleanup. It returns a
-// pool over it and the DSN that reaches it, which is what a test needing a whole
-// postgres.Store rather than raw SQL opens.
-//
-// testdb.Pool's shared development database accumulates rows across every test run, so a
-// backfill assertion against it would pass whether or not the backfill actually worked.
+// A database of its own: the shared dev database would satisfy any backfill assertion.
 func freshDatabase(t *testing.T) (*pgxpool.Pool, string) {
 	t.Helper()
 	ctx := context.Background()
@@ -65,16 +58,7 @@ func mustExec(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) {
 	require.NoError(t, err)
 }
 
-// seedRows inserts n independent events and m changes under the same old-shape tenant,
-// each with its own ref so TestMigration0004PreservesRowCounts can seed more than one of
-// each without colliding on change's (tenant, ref) primary key.
-//
-// Change i takes event i's correlation_ref as its own, which is what a change row IS — the
-// projection of the events sharing that ref. A ref belonging to no event was never a state
-// the system could reach, and since 0006 it is one the schema refuses: change_ref_has_locus
-// requires every ref to carry a locus, and only a ref a migration recognises as correlated
-// (0004) or as a point (0006) is given one. Seeding more changes than events therefore
-// fails loudly in the migration rather than silently counting rows that mean nothing.
+// Change i takes event i's ref; a ref belonging to no event fails the migration loudly.
 func seedRows(t *testing.T, pool *pgxpool.Pool, events, changes int) {
 	t.Helper()
 	for i := range events {
@@ -149,12 +133,7 @@ func TestMigration0004PreservesRowCounts(t *testing.T) {
 	assert.Equal(t, before, counts(t, pool), "the backfill must not lose or duplicate rows")
 }
 
-// TestMigration0004RejectsAMalformedLocus pins the second of the locus rule's two
-// enforcement points. horoctl's auth.ValidateLocus is the first and gives the readable
-// error; this CHECK is what a direct INSERT meets, and the tool's validation passing says
-// nothing about whether the constraint does. Every clause ValidateLocus applies is listed,
-// because a CHECK covering only the slash let " github" — the whitespace case resolveRef
-// exists to protect against — in through psql.
+// Every ValidateLocus clause: a slash-only CHECK let " github" in through psql.
 func TestMigration0004RejectsAMalformedLocus(t *testing.T) {
 	ctx := context.Background()
 	pool, _ := freshDatabase(t)
@@ -180,10 +159,6 @@ func TestMigration0004RejectsAMalformedLocus(t *testing.T) {
 	}
 }
 
-// TestMigration0006RejectsAMalformedLocusOnAnEvent pins the backstop half of the locus
-// rule, as TestMigration0004RejectsAMalformedLocus does for the credential. core.Event's
-// Validate is the authority and runs first; this is what stops a direct INSERT, by some
-// later path that skips it, storing a locus that would make <locus>/<ref> unsplittable.
 func TestMigration0006RejectsAMalformedLocusOnAnEvent(t *testing.T) {
 	ctx := context.Background()
 	pool, _ := freshDatabase(t)
@@ -211,8 +186,7 @@ func TestMigration0004AcceptsALocusWithAnInteriorNewline(t *testing.T) {
 	_, err := postgres.Migrate(ctx, pool)
 	require.NoError(t, err)
 
-	// Pins the CHECK to auth.ValidateLocus's rule rather than to a stricter one: only the
-	// edges are whitespace-checked, so an interior newline stays legal in both.
+	// Only the edges are whitespace-checked, as in auth.ValidateLocus.
 	mustExec(t, pool, `INSERT INTO principal (id, display_name) VALUES ('p1', 'p1')`)
 	mustExec(t, pool, `INSERT INTO credential
 		(id, principal_id, type, key_prefix, key_hash, role, source, locus)
@@ -220,9 +194,6 @@ func TestMigration0004AcceptsALocusWithAnInteriorNewline(t *testing.T) {
 		"git\nhub")
 }
 
-// legacySeed is the two change shapes the migrations must treat differently, seeded in the
-// pre-0004 shape. The change rows are exactly what folding these events produces, so the only
-// thing a rebuild can disagree with them about is what 0004 and 0006 did to the refs.
 type legacySeed struct {
 	correlatedRef  string
 	pointEventID   string
@@ -231,19 +202,7 @@ type legacySeed struct {
 
 var legacyAt = time.Date(2026, 9, 14, 10, 0, 0, 0, time.UTC)
 
-// seedLegacyProjection writes one correlated change and one point change under the old
-// tenant string, each with the event log that implies it.
-//
-// Both shapes are seeded deliberately, and each is prefixed from a different source. A
-// correlated change's ref comes from event.correlation_ref, which 0004 prefixes alongside it,
-// so prefixing change.ref alone is invisible until a rebuild. A point change's correlation_ref
-// stays empty forever, so there is nothing alongside to prefix: 0006 prefixes its ref from the
-// locus it backfilled onto the event, which is the same value core.RefFor composes a point ref
-// from. Both end up <locus>/<something>.
-//
-// A fixture carrying only correlated events cannot tell any of that apart. It passes with 0004's
-// bug present, and with either of 0006's two failure modes — an unbackfilled event.locus, and a
-// foldEventLog that does not select it.
+// Seeds both shapes: 0004 prefixes correlated refs, 0006 prefixes point refs.
 func seedLegacyProjection(t *testing.T, pool *pgxpool.Pool) legacySeed {
 	t.Helper()
 	seed := legacySeed{
@@ -278,8 +237,7 @@ func seedLegacyProjection(t *testing.T, pool *pgxpool.Pool) legacySeed {
 	return seed
 }
 
-// projectionRows renders every change row as JSON, keyed by ref, so a comparison covers every
-// column — generated ones included — rather than the handful a test remembered to name.
+// As JSON, so the comparison covers every column, generated ones included.
 func projectionRows(t *testing.T, pool *pgxpool.Pool) map[string]string {
 	t.Helper()
 	rows, err := pool.Query(context.Background(),
@@ -297,12 +255,7 @@ func projectionRows(t *testing.T, pool *pgxpool.Pool) map[string]string {
 	return out
 }
 
-// projectionRowsForTenant is projectionRows scoped to one tenant. projectionRows' other
-// callers each own a private freshDatabase; TestMigration0008PreservesAnAssertionAcrossARebuild
-// runs against the shared dev database instead, where an unscoped read can catch a row an
-// unrelated, concurrently running package's test wrote between the "before" and "after"
-// snapshots — go test ./... runs packages in parallel, and every package's tests share this
-// one Postgres instance.
+// Scoped: packages run in parallel against one shared Postgres.
 func projectionRowsForTenant(t *testing.T, pool *pgxpool.Pool, tenantID string) map[string]string {
 	t.Helper()
 	rows, err := pool.Query(context.Background(),
@@ -320,24 +273,7 @@ func projectionRowsForTenant(t *testing.T, pool *pgxpool.Pool, tenantID string) 
 	return out
 }
 
-// TestMigrationsLeaveTheProjectionRebuildable is the invariant the whole design rests on
-// and the one nothing asserted until 0004 broke it: change is a derived view of the
-// immutable event log, so it must be discardable and replayable at any time — including
-// straight after a migration that rewrites refs.
-//
-// 0004 rewrote change.ref to 'legacy/<ref>' and left event.correlation_ref alone, so
-// RebuildProjection deleted every change row and re-inserted it under the UNPREFIXED ref,
-// silently undoing the migration. 0006 can fail the same way twice over: by not backfilling
-// event.locus, and by not selecting it in foldEventLog.
-//
-// This fixture does not cover every row class, though a green run here invites that belief.
-// An uncorrelated terminal-type event stored before 0008 (a standalone "incident.resolved",
-// say) folded to StatusOccurred under the old point-vs-region rule; classify's reorder now
-// folds the same row to StatusCompleted, because a standalone event's type suffix is
-// consulted before its correlation ref. 0008 does not backfill change.status for that row
-// class — re-deriving StatusForType's suffix vocabulary in SQL would duplicate it, for a
-// handful of rows in databases that predate this release — so change and event disagree for
-// that row class until an operator runs a rebuild.
+// Pre-0008 standalone terminal events stay stale until a rebuild; this fixture lacks them.
 func TestMigrationsLeaveTheProjectionRebuildable(t *testing.T) {
 	ctx := context.Background()
 	pool, freshDSN := freshDatabase(t)
@@ -368,24 +304,7 @@ func TestMigrationsLeaveTheProjectionRebuildable(t *testing.T) {
 			"same rows, same contents — or change has stopped being a function of event")
 }
 
-// TestMigration0007BackfillsTheUnionOfAReferencesSources pins the backfill to the same rule
-// core.Fold applies, which is what makes a rebuild straight after the migration a no-op.
-//
-// Two events on one ref with different sources is exactly the fixture a union backfill
-// needs: seedLegacyProjection has one event per change, so it would pass under a backfill
-// that took any ONE event's source. It does not, on its own, kill the
-// `e.correlation_ref = c.ref` mutant — under that mutation a point change's
-// correlation_ref stays empty, matching no ref, so its sources stay at the column's empty
-// default while a rebuild fills it in, whereas a correlated change can come out right by
-// luck (`UPDATE ... FROM` with several matching rows picks one arbitrarily). That mutant is
-// what seedLegacyProjection's point-change fixture kills, in
-// TestMigrationsLeaveTheProjectionRebuildable — the two fixtures are not redundant.
-//
-// The third source, "GitHub", is what tells COLLATE "C" apart from this database's default
-// collation: en_US.utf8 sorts "GitHub" after "buildkite", but byte order — what
-// core.Fold's slices.Sort uses, and what the migration must match — sorts capital letters
-// before lowercase ones, putting it first. A fixture of all-lowercase sources cannot
-// distinguish the two orderings.
+// "GitHub" tells COLLATE "C" byte order from en_US sorting.
 func TestMigration0007BackfillsTheUnionOfAReferencesSources(t *testing.T) {
 	ctx := context.Background()
 	pool, _ := freshDatabase(t)
@@ -433,18 +352,13 @@ func TestMigration0007BackfillsTheUnionOfAReferencesSources(t *testing.T) {
 			"'legacy/dep-1', so the first segment is 'legacy'")
 }
 
-// TestMigration0008PreservesAnAssertionAcrossARebuild is the invariant for the lifecycle
-// column, and it fails for a reason no unit test can reach: foldEventLog names only the
-// columns Fold reads, so a lifecycle omitted there folds correctly live and vanishes on
-// replay. That is 0006's second failure mode, and this is the shape that catches it.
+// foldEventLog names only the columns Fold reads, so a missed column vanishes on replay.
 func TestMigration0008PreservesAnAssertionAcrossARebuild(t *testing.T) {
 	ctx := context.Background()
 	s, tn := newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 
-	// An explicit assertion on a type whose suffix says the OPPOSITE. If the column is
-	// lost, the convention takes over and the change folds as a point — so this fixture
-	// discriminates the column from the fallback, which a .started type could not.
+	// The type's suffix says the opposite, so a lost column shows as a point.
 	ev := mkEvent(tn, eventID(t, "assert"), "k-assert", "", "config.changed", at)
 	ev.Lifecycle = core.LifecycleStarted
 	_, _, err := s.AppendEvent(ctx, ev)
@@ -458,10 +372,6 @@ func TestMigration0008PreservesAnAssertionAcrossARebuild(t *testing.T) {
 			"falls back to the type suffix and the change becomes a point")
 }
 
-// TestLifecycleVocabularyIsEnforced pins core.Lifecycles to migration 0008's CHECK, in the
-// shape TestChangeStatusVocabularyIsEnforced uses for Status — which exists because a
-// seventh Status was added without a migration, compiled, passed, and failed at runtime on
-// the first insert.
 func TestLifecycleVocabularyIsEnforced(t *testing.T) {
 	ctx, s, tn := context.Background(), newStore(t), tenant(t)
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
@@ -478,8 +388,7 @@ func TestLifecycleVocabularyIsEnforced(t *testing.T) {
 		})
 	}
 
-	// The other direction, through raw SQL: Validate would refuse this before the store
-	// saw it, so only a direct insert reaches the constraint.
+	// Validate would refuse this first, so only raw SQL reaches the constraint.
 	_, err := s.Pool().Exec(ctx, `INSERT INTO event
 		(id, tenant, schema_version, source, type, subject, occurred_at, received_at,
 		 correlation_ref, origin, locus, lifecycle)
@@ -489,9 +398,7 @@ func TestLifecycleVocabularyIsEnforced(t *testing.T) {
 	assert.Contains(t, err.Error(), "event_lifecycle_vocabulary")
 }
 
-// TestMigration0010BackfillsEachSubjectsEarliestTime pins the backfill to core.Fold's rule:
-// each subject maps to the minimum occurred_at of its events, in microseconds. A subject seen
-// twice is what tells a minimum from a last-wins or an arbitrary pick.
+// A subject seen twice tells a minimum from last-wins.
 func TestMigration0010BackfillsEachSubjectsEarliestTime(t *testing.T) {
 	ctx := context.Background()
 	pool, _ := freshDatabase(t)
@@ -525,9 +432,6 @@ func TestMigration0010BackfillsEachSubjectsEarliestTime(t *testing.T) {
 	}, got)
 }
 
-// TestMigration0011TitlesAChangeByItsEarliestTitledStart pins the backfill to core.Fold's title
-// rule: a change with a titled start event takes that start's title and time, and a change
-// without one keeps its title and gets no start time.
 func TestMigration0011TitlesAChangeByItsEarliestTitledStart(t *testing.T) {
 	ctx := context.Background()
 	pool, _ := freshDatabase(t)
