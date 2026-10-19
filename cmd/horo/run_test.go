@@ -122,10 +122,7 @@ func TestStrictDoesNotRunTheCommandWhenTheStartFails(t *testing.T) {
 	assert.Contains(t, errOut, "the command was not run", "a CI log must say the deploy did not run")
 }
 
-// TestStrictClosesAStartThatMayHaveBeenStored: a start that timed out, or that ingress failed
-// to answer, may have been stored anyway, so --strict, refusing to run the command, closes the
-// change as cancelled rather than leave it open, and prints the close command if that is not
-// confirmed.
+// A start that timed out or met a 5xx may have been stored anyway.
 func TestStrictClosesAStartThatMayHaveBeenStored(t *testing.T) {
 	shortWindows(t)
 	runRefused := func(t *testing.T, f *fakeIngress) (int, string, map[string]any) {
@@ -179,8 +176,7 @@ func TestStrictClosesAStartThatMayHaveBeenStored(t *testing.T) {
 	}
 }
 
-// TestStrictLeavesNothingToCloseWhenIngressRefusedTheStart: a refusal is an answer, so the
-// start was not stored and there is no change to close.
+// A refusal is an answer: the start was not stored.
 func TestStrictLeavesNothingToCloseWhenIngressRefusedTheStart(t *testing.T) {
 	shortWindows(t)
 	f := &fakeIngress{status: http.StatusUnauthorized}
@@ -193,8 +189,7 @@ func TestStrictLeavesNothingToCloseWhenIngressRefusedTheStart(t *testing.T) {
 	assert.NotContains(t, errOut, "horo event ")
 }
 
-// TestAMissingKeyStillRunsTheCommand: an unset CI secret is Horopter being unreachable, not a
-// reason to fail the deploy; only --strict refuses.
+// An unset CI secret is Horopter being unreachable, not a reason to fail the deploy.
 func TestAMissingKeyStillRunsTheCommand(t *testing.T) {
 	env := func(k string) string {
 		return map[string]string{"HOROPTER_INGRESS_URL": "http://127.0.0.1:1"}[k]
@@ -214,8 +209,7 @@ func TestAMissingKeyStillRunsTheCommand(t *testing.T) {
 	assert.NoFileExists(t, strictMarker)
 }
 
-// TestAFailedEndPrintsACommandThatClosesTheChange runs the printed recovery command as horo
-// event against the same fake: it must reach the same change, with the same subject.
+// The printed command, run as horo event against the same fake, must reach the same change.
 func TestAFailedEndPrintsACommandThatClosesTheChange(t *testing.T) {
 	shortWindows(t)
 	f := &fakeIngress{}
@@ -244,8 +238,7 @@ func TestAFailedEndPrintsACommandThatClosesTheChange(t *testing.T) {
 	assert.Equal(t, "deployment.completed", closing["type"])
 }
 
-// TestRunNeedsACommandAfterTheDashes: without --, a flag written after the command would be
-// handed to the command silently, so the separator is required.
+// Without --, a flag after the command would silently reach the command.
 func TestRunNeedsACommandAfterTheDashes(t *testing.T) {
 	for _, args := range [][]string{{"--"}, {}, {"./deploy.sh"}, {"./deploy.sh", "--strict"}} {
 		code, _, errOut := runCmd(t, (&fakeIngress{}).server(t), args...)
@@ -257,9 +250,7 @@ func TestRunNeedsACommandAfterTheDashes(t *testing.T) {
 	assert.Contains(t, errOut, "--")
 }
 
-// TestRunForwardsSignalsToTheChild sends each signal to this test process, which horo run has
-// registered for; the child traps it and exits 0, so the outcome is completed. The SIGINT case
-// also proves the end post survives run's context being cancelled by the interrupt.
+// The SIGINT case also proves the end post survives run's context being cancelled.
 func TestRunForwardsSignalsToTheChild(t *testing.T) {
 	saved := sharesTerminal
 	sharesTerminal = func() bool { return false }
@@ -296,9 +287,7 @@ func TestRunForwardsSignalsToTheChild(t *testing.T) {
 	}
 }
 
-// TestCtrlCDuringTheStartDoesNotRunTheCommand: an interrupt or a SIGTERM while the start post
-// waits is someone aborting, not a reason to run the command unrecorded; and horo must survive
-// it to close the change.
+// An interrupt during the start post aborts, and horo must survive it to close the change.
 func TestCtrlCDuringTheStartDoesNotRunTheCommand(t *testing.T) {
 	shortWindows(t)
 	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM} {
@@ -340,8 +329,7 @@ func TestCtrlCDuringTheStartDoesNotRunTheCommand(t *testing.T) {
 	}
 }
 
-// TestASecondInterruptSkipsTheCancellationPost: against a Horopter that never answers, the
-// first Ctrl-C starts the cancellation post and the second ends horo at once.
+// Against a silent Horopter, the second Ctrl-C ends the cancellation post at once.
 func TestASecondInterruptSkipsTheCancellationPost(t *testing.T) {
 	s, a := startWindow, abortWindow
 	startWindow, abortWindow = 300*time.Millisecond, 30*time.Second
@@ -376,9 +364,7 @@ func TestASecondInterruptSkipsTheCancellationPost(t *testing.T) {
 	}
 }
 
-// TestAnInterruptDuringTheEndPostPrintsTheCloseCommand: the command has finished and Horopter
-// does not answer; an interrupt stops the wait rather than being swallowed for endWindow. The
-// outcome stands in the report, with the end unconfirmed.
+// An interrupt stops the end post's wait rather than being swallowed for endWindow.
 func TestAnInterruptDuringTheEndPostPrintsTheCloseCommand(t *testing.T) {
 	e := endWindow
 	endWindow = 30 * time.Second
@@ -422,8 +408,7 @@ func TestAnInterruptDuringTheEndPostPrintsTheCloseCommand(t *testing.T) {
 	assert.Contains(t, got["reason"], "interrupted while waiting for Horopter")
 }
 
-// TestASilentHoropterDelaysTheCommandByTheStartWindowOnly: a server that accepts and never
-// answers is the case the 10-second promise is about; the end's longer window must not apply.
+// The end's longer window must not apply before the command starts.
 func TestASilentHoropterDelaysTheCommandByTheStartWindowOnly(t *testing.T) {
 	s, e := startWindow, endWindow
 	startWindow, endWindow = 300*time.Millisecond, 3*time.Second
@@ -441,8 +426,7 @@ func TestASilentHoropterDelaysTheCommandByTheStartWindowOnly(t *testing.T) {
 	assert.Less(t, time.Since(begin), 2*time.Second)
 }
 
-// TestDevNullIsNotATerminal: /dev/null is a character device, which a mode check mistakes for
-// a terminal; a path that cannot be opened is no terminal either (CI has no /dev/tty).
+// /dev/null is a character device, which a mode check mistakes for a terminal.
 func TestDevNullIsNotATerminal(t *testing.T) {
 	assert.False(t, inForeground(os.DevNull))
 	assert.False(t, inForeground(filepath.Join(t.TempDir(), "missing")))
@@ -472,8 +456,7 @@ func (e *endFailingIngress) server(t *testing.T, innerURL string) string {
 	return srv.URL
 }
 
-// startFailingIngress answers a start post with status, or never when status is 0, so horo
-// cannot tell whether it was stored, and forwards every other post to an inner server.
+// startFailingIngress answers a start with status, or never when 0, and forwards other posts.
 type startFailingIngress struct{ status int }
 
 func (s startFailingIngress) server(t *testing.T, innerURL string) string {
@@ -558,9 +541,7 @@ func (w *words) end() {
 	}
 }
 
-// TestShellQuoteSurvivesARealShell: the close command is the one way to close a change whose end
-// was lost, so every value must paste as exactly one word — a tab, or the trailing newline a CI
-// variable often carries, included.
+// A tab, or the trailing newline a CI variable often carries, must still paste as one word.
 func TestShellQuoteSurvivesARealShell(t *testing.T) {
 	for _, s := range []string{
 		"plain", "", "acme prod", "it's", "a\tb", "trailing\n", "=cmd", "$HOME", "*", `a"b`,
@@ -574,8 +555,7 @@ func TestShellQuoteSurvivesARealShell(t *testing.T) {
 	assert.True(t, strings.HasPrefix(shellQuote("=cmd"), "'"), "zsh expands a leading =")
 }
 
-// TestRunHelpShowsABareType: run adds the lifecycle word itself, so the example event help gives
-// (deployment.started) would record deployment.started.started.
+// The event help's example, deployment.started, would record deployment.started.started.
 func TestRunHelpShowsABareType(t *testing.T) {
 	code, _, errOut := record(t, "http://x", "run", "-h")
 	assert.Equal(t, 2, code)
@@ -583,8 +563,7 @@ func TestRunHelpShowsABareType(t *testing.T) {
 	assert.NotContains(t, errOut, "deployment.started")
 }
 
-// TestStrictFailsWhenTheEndIsNotConfirmed: under --strict a pipeline insists on the record, so
-// a command that succeeded but whose end could not be confirmed must fail the step.
+// Under --strict a pipeline insists on the record.
 func TestStrictFailsWhenTheEndIsNotConfirmed(t *testing.T) {
 	shortWindows(t)
 	f := &fakeIngress{}
@@ -611,9 +590,7 @@ func TestRunSendsTitleActorAndAttributesOnBothPosts(t *testing.T) {
 		"the end carries --attr as well as its outcome")
 }
 
-// TestAnAbortsCancellationUsesTheEndKey: the cancellation post and the close command printed
-// when it cannot be confirmed must share one idempotency key, the end's, or pasting the close
-// command after a cancellation that was stored adds a second end.
+// Pasting the close command after a stored cancellation must replay, not add a second end.
 func TestAnAbortsCancellationUsesTheEndKey(t *testing.T) {
 	shortWindows(t)
 	keys := make(chan string, 4)
@@ -640,9 +617,7 @@ func TestAnAbortsCancellationUsesTheEndKey(t *testing.T) {
 	assert.Contains(t, errOut, "--idempotency-key "+want, "the close command carries the same key")
 }
 
-// TestTheRecordingWindowsAreTheDocumentedOnes pins the promises docs/reference/horo.md and the
-// decision record make: a silent Horopter delays a command by at most 10 seconds, the end is
-// retried for 30, and a cancellation for 3.
+// The promises docs/reference/horo.md and the decision record make.
 func TestTheRecordingWindowsAreTheDocumentedOnes(t *testing.T) {
 	assert.Equal(t, 10*time.Second, startWindow)
 	assert.Equal(t, 30*time.Second, endWindow)

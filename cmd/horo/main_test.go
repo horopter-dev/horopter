@@ -131,9 +131,7 @@ func TestAnUnknownCommandIsAUsageError(t *testing.T) {
 	assert.Contains(t, errOut, "changes")
 }
 
-// TestTableOutputNeutralisesControlCharacters: titles and subjects are producer-supplied, and a
-// terminal executes escape sequences printed to it. The table replaces control characters; json
-// and jsonl carry egress's object unchanged.
+// A terminal executes escape sequences in producer text; json and jsonl stay unchanged.
 func TestTableOutputNeutralisesControlCharacters(t *testing.T) {
 	hostile := `{"ref":"ci/x","subject":"acme/prod","type":"t.started",` +
 		`"title":"a\u001b]52;c;cGF3bmVk\u0007b\nc\td","status":"in_progress",` +
@@ -148,8 +146,7 @@ func TestTableOutputNeutralisesControlCharacters(t *testing.T) {
 	assert.JSONEq(t, hostile, strings.TrimSpace(out), "jsonl is egress's object, unchanged")
 }
 
-// TestUsageNeverPrintsTheKey: flag's usage output prints a flag's default, the key comes from
-// the environment, and CI logs stderr — so a mistyped flag would publish the key.
+// Usage prints flag defaults and CI logs stderr, so a mistyped flag would publish the key.
 func TestUsageNeverPrintsTheKey(t *testing.T) {
 	env := map[string]string{
 		"HOROPTER_EGRESS_URL": "http://x", "HOROPTER_EGRESS_KEY": "horo_SECRET",
@@ -166,8 +163,7 @@ const changeB = `{"ref":"ci/dep-2","subject":"acme/prod","type":"deployment.star
 	`"title":"Deploy web","status":"in_progress","start":"2026-09-14T11:00:00Z",` +
 	`"first_seen_at":"2026-09-14T11:00:00Z"}`
 
-// queryingEgress answers every changes request with no rows and records the query it was
-// sent, for the tests that pin what horo asks for rather than what it prints.
+// queryingEgress answers every changes request with no rows and records the query.
 func queryingEgress(t *testing.T) (string, *url.Values) {
 	t.Helper()
 	var got url.Values
@@ -179,8 +175,7 @@ func queryingEgress(t *testing.T) (string, *url.Values) {
 	return srv.URL, &got
 }
 
-// TestSinceSelectsTheWindowEndingNow: --since looks back from now, so its window ends now and
-// starts since earlier. Pointing it forward asks every default horo changes for the future.
+// Pointing the window forward would ask every default horo changes for the future.
 func TestSinceSelectsTheWindowEndingNow(t *testing.T) {
 	u, got := queryingEgress(t)
 	before := time.Now()
@@ -212,8 +207,6 @@ func TestJSONOutputIsValidForSeveralRows(t *testing.T) {
 	assert.Len(t, rows, 2)
 }
 
-// TestShowTableNeutralisesControlCharactersInEvents: an event's title is producer-supplied
-// too, and horo show prints it to a terminal.
 func TestShowTableNeutralisesControlCharactersInEvents(t *testing.T) {
 	ev := `{"id":"01J9","type":"t.started","title":"a\u001b]52;c;cGF3bmVk\u0007b",` +
 		`"occurred_at":"2026-09-14T10:00:00Z"}`
@@ -223,9 +216,7 @@ func TestShowTableNeutralisesControlCharactersInEvents(t *testing.T) {
 	assert.NotContains(t, out, "\x07")
 }
 
-// TestTableOutputNeutralisesC1AndDEL: U+009B is a one-character CSI on terminals that act on
-// 8-bit controls, and DEL is a control character too; both must be neutralised, not only the
-// C0 range below U+0020.
+// U+009B is a one-character CSI on terminals that act on 8-bit controls.
 func TestTableOutputNeutralisesC1AndDEL(t *testing.T) {
 	hostile := `{"ref":"ci/x","subject":"acme/prod","type":"t.started",` +
 		`"title":"a\u009b31mb\u007fc","status":"in_progress",` +
@@ -236,8 +227,7 @@ func TestTableOutputNeutralisesC1AndDEL(t *testing.T) {
 	assert.NotContains(t, out, "\u007f")
 }
 
-// TestShowWritesTheChangeThenItsEvents pins show's two machine shapes: jsonl is the change's
-// line and then one line per event, json is one object holding both.
+// jsonl is the change's line then one per event; json is one object holding both.
 func TestShowWritesTheChangeThenItsEvents(t *testing.T) {
 	ev := `{"id":"01J9","type":"deployment.started","occurred_at":"2026-09-14T10:00:00Z"}`
 	code, out, _ := horo(t, egress(t, changeA, ev), false, "show", "ci/dep-1")

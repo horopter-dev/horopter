@@ -96,9 +96,7 @@ func writeShowTable(
 	return tw.Flush()
 }
 
-// clean replaces control characters in producer-supplied text before it reaches a terminal,
-// which would otherwise act on escape sequences in a title and break the table on a newline.
-// JSON output is left as egress sent it.
+// clean replaces control characters, which a terminal would act on; JSON is left as sent.
 func clean(s string) string {
 	return strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
@@ -148,8 +146,7 @@ func writeLines(w io.Writer, rows iter.Seq2[json.RawMessage, error]) error {
 	return nil
 }
 
-// writeArray writes rows as one JSON array, element by element, so a long result is not held
-// in memory.
+// writeArray streams rows as one JSON array.
 func writeArray(w io.Writer, rows iter.Seq2[json.RawMessage, error]) error {
 	if _, err := io.WriteString(w, "["); err != nil {
 		return err

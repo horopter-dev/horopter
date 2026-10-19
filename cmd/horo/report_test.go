@@ -57,8 +57,7 @@ func TestTheReportWhenHoropterIsDown(t *testing.T) {
 	assert.Contains(t, got["reason"], "could not record the start")
 }
 
-// TestTheVariableAsksForTheReportWithoutAKey: HORO_RUN_REPORT is how a CI wrapper asks for
-// the report, and the run with no key is the one it most needs to hear about.
+// The run with no key is the one a CI wrapper most needs to hear about.
 func TestTheVariableAsksForTheReportWithoutAKey(t *testing.T) {
 	for _, tc := range []struct {
 		strict  bool
@@ -117,9 +116,7 @@ func TestTheReportIsWrittenWhenTheEndPostFails(t *testing.T) {
 	}
 }
 
-// interruptedStart runs horo run against a Horopter that holds the start post until the test
-// ends and answers the cancellation with cancelStatus, interrupting horo during the start. It
-// returns horo's exit code and its report.
+// interruptedStart interrupts horo during a held start post; cancelStatus answers the cancel.
 func interruptedStart(t *testing.T, cancelStatus int) (int, map[string]any) {
 	t.Helper()
 	shortWindows(t)
@@ -154,9 +151,7 @@ func interruptedStart(t *testing.T, cancelStatus int) (int, map[string]any) {
 	}
 }
 
-// TestTheReportOfAnInterruptedStart: the command never ran, but the change may have been
-// opened, and horo closes it as cancelled; a confirmed cancellation carries the stored ref, and
-// an unconfirmed one says the change may still be open.
+// A confirmed cancellation carries the stored ref; an unconfirmed one says it may be open.
 func TestTheReportOfAnInterruptedStart(t *testing.T) {
 	t.Run("cancellation confirmed", func(t *testing.T) {
 		code, got := interruptedStart(t, http.StatusCreated)
@@ -179,8 +174,7 @@ func TestTheReportOfAnInterruptedStart(t *testing.T) {
 	})
 }
 
-// TestTheReportCarriesEachOutcome: the outcome is how the command ended, whether or not
-// Horopter could be reached to record it.
+// The outcome is how the command ended, whether or not Horopter recorded it.
 func TestTheReportCarriesEachOutcome(t *testing.T) {
 	shortWindows(t)
 	for _, tc := range []struct {
@@ -210,8 +204,7 @@ func TestTheReportCarriesEachOutcome(t *testing.T) {
 	}
 }
 
-// TestTheReportOfAStrictRefusalHasNoOutcome: ingress refused the start, so no change was opened
-// and none was closed.
+// Ingress refused the start, so no change was opened and none was closed.
 func TestTheReportOfAStrictRefusalHasNoOutcome(t *testing.T) {
 	shortWindows(t)
 	path := reportFile(t)
@@ -225,8 +218,7 @@ func TestTheReportOfAStrictRefusalHasNoOutcome(t *testing.T) {
 	assert.Contains(t, got["reason"], "could not record the start")
 }
 
-// TestAReportThatCannotBeWrittenLeavesTheExitCodeAlone: recording never blocks the work, and
-// the report is part of recording.
+// Recording never blocks the work, and the report is part of recording.
 func TestAReportThatCannotBeWrittenLeavesTheExitCodeAlone(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing", "report.json")
 	code, _, errOut := runCmd(t, (&fakeIngress{}).server(t), "--report", path,

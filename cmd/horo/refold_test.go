@@ -12,8 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeRefold answers every re-fold with status and body, recording each request's body and
-// Authorization header.
+// fakeRefold answers every re-fold with status and body, recording bodies and Authorization.
 type fakeRefold struct {
 	mu     sync.Mutex
 	bodies []map[string]string
@@ -84,8 +83,7 @@ func TestARefusedRefoldNamesTheAdminKey(t *testing.T) {
 	}
 }
 
-// TestRefoldNeverUsesTheProducerKey: a producer key in HOROPTER_INGRESS_KEY must not be sent
-// to an admin route; without HOROPTER_ADMIN_KEY nothing is sent at all.
+// Without HOROPTER_ADMIN_KEY nothing is sent at all.
 func TestRefoldNeverUsesTheProducerKey(t *testing.T) {
 	f := &fakeRefold{answer: `{}`}
 	env := map[string]string{"HOROPTER_INGRESS_URL": f.server(t), "HOROPTER_INGRESS_KEY": "pk"}
@@ -110,9 +108,7 @@ func TestRefoldNeedsExactlyOneRef(t *testing.T) {
 	}
 }
 
-// TestARouteMissingFromIngressIsNotARefNotFound: an ingress built before the route existed, or
-// a URL pointing at egress, answers the mux's own 404. Exit 3 means "the ref has no events",
-// so that must exit 1, or a script reads a misconfiguration as a missing change.
+// An ingress without the route, or egress, answers the mux's 404, which is no missing ref.
 func TestARouteMissingFromIngressIsNotARefNotFound(t *testing.T) {
 	f := &fakeRefold{status: http.StatusNotFound, answer: "404 page not found\n"}
 	code, _, errOut := runRefoldWith(t, adminEnv(f.server(t)), "ci/d1")

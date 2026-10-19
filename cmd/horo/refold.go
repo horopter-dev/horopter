@@ -17,14 +17,10 @@ import (
 const adminHint = "--key / HOROPTER_ADMIN_KEY must be a key with the admin capability " +
 	"(tenant_admin or superuser)"
 
-// refNotFound opens ingress's answer when the log holds no events for the ref. Only that 404
-// exits 3: a mux's 404 from an ingress without the route, or from egress by mistake, and an
-// unknown tenant, are errors, not a missing change.
+// refNotFound opens the only 404 that exits 3; a mux or unknown-tenant 404 is an error.
 const refNotFound = "no events for ref"
 
-// runRefold re-folds one change. Its key has its own variable, HOROPTER_ADMIN_KEY, so a
-// producer key is never sent to an admin route and an admin key never sits where horo run
-// would pick it up.
+// runRefold re-folds one change, with a key variable of its own so no other key is sent.
 func runRefold(
 	ctx context.Context, args []string, env func(string) string, stdout, stderr io.Writer,
 ) int {
@@ -71,8 +67,6 @@ func refoldTarget(url, key string) error {
 	return nil
 }
 
-// refoldFailed reports a failed re-fold: a ref with no events exits 3, as for horo show, and
-// a refused key names the variable and capability a re-fold needs.
 func refoldFailed(stderr io.Writer, err error) int {
 	var he *client.HTTPError
 	if errors.As(err, &he) && he.Status == http.StatusNotFound &&

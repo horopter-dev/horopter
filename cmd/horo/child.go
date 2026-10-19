@@ -12,8 +12,7 @@ import (
 	"horopter.dev/horopter/internal/core"
 )
 
-// outcome is how a wrapped command ended: its lifecycle, horo's exit code, and the
-// attributes the end event carries.
+// outcome is how a wrapped command ended, with the end event's attributes.
 type outcome struct {
 	lifecycle core.Lifecycle
 	exitCode  int
@@ -25,13 +24,10 @@ var signalNames = map[syscall.Signal]string{
 	syscall.SIGHUP: "SIGHUP", syscall.SIGQUIT: "SIGQUIT",
 }
 
-// sharesTerminal reports whether a Ctrl-C at a terminal reaches horo's process group, and so
-// the child's, directly. A variable so a test can pretend it does not.
+// sharesTerminal reports whether a terminal's Ctrl-C reaches the child directly.
 var sharesTerminal = func() bool { return inForeground("/dev/tty") }
 
-// forwarded are the signals horo passes on. On a terminal, Ctrl-C, Ctrl-\ and a hangup already
-// reached the child's process group: forwarding them again would deliver a second one, which
-// tools such as Terraform treat as "stop immediately". SIGTERM never comes from a terminal.
+// forwarded are the signals horo passes on: on a terminal, the others reached the child already.
 func forwarded(terminal bool) []os.Signal {
 	if terminal {
 		return []os.Signal{syscall.SIGTERM}
@@ -39,9 +35,7 @@ func forwarded(terminal bool) []os.Signal {
 	return []os.Signal{syscall.SIGTERM, os.Interrupt, syscall.SIGHUP, syscall.SIGQUIT}
 }
 
-// inherited records which signals were ignored when horo started — nohup leaves SIGHUP ignored,
-// a script's background job SIGINT. It is read at package initialisation, before any Notify,
-// which would un-ignore them.
+// inherited are the signals ignored at start-up, read before any Notify un-ignores them.
 var inherited = func() map[os.Signal]bool {
 	ignored := map[os.Signal]bool{}
 	for _, s := range []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT} {
@@ -50,11 +44,7 @@ var inherited = func() map[os.Signal]bool {
 	return ignored
 }()
 
-// notify is signal.Notify for those of sigs horo did not inherit as ignored. Catching an ignored
-// signal un-ignores it, and exec then gives the wrapped command the default action, ending the
-// protection nohup set up. With none left it registers nothing: Notify with no signals means all.
-// No call reaches that today: Go reports only SIGINT and SIGHUP as inherited-ignored, and every
-// call includes SIGTERM. The guard is for the call that some day passes SIGINT alone.
+// notify is signal.Notify without inherited-ignored signals; Notify with none catches all.
 func notify(c chan<- os.Signal, sigs ...os.Signal) {
 	var keep []os.Signal
 	for _, s := range sigs {
@@ -67,8 +57,7 @@ func notify(c chan<- os.Signal, sigs ...os.Signal) {
 	}
 }
 
-// runChild runs argv with stdin, stdout and stderr passed through, forwarding the given signals
-// to it, and reports how it ended.
+// runChild runs argv with stdio passed through, forwarding forward, and reports how it ended.
 func runChild(argv []string, stdout, stderr io.Writer, forward []os.Signal) outcome {
 	//nolint:gosec // G204: running the command its user names is what horo run is for.
 	cmd := exec.Command(argv[0], argv[1:]...)

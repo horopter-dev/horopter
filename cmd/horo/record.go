@@ -49,8 +49,7 @@ func (r *recording) check() error {
 	return nil
 }
 
-// target reports a missing destination, naming this side's flags and variables. horo event
-// treats it as a usage error; horo run as Horopter being unreachable.
+// target reports a missing URL or key: a usage error for event, unreachable for run.
 func (r *recording) target() error {
 	switch {
 	case r.url == "":
@@ -73,9 +72,7 @@ func (r *recording) attributes() map[string]any {
 	return out
 }
 
-// newInvocationID identifies one horo invocation. Idempotency keys are built from it, not from
-// the ref: ingress's uniqueness is (tenant, idempotency_key) with no locus, so a key built from
-// a ref two producers both chose would make the second one's event a duplicate.
+// newInvocationID keys idempotency instead of the ref: uq_event_idem has no locus.
 func newInvocationID() string {
 	return core.NewULID(time.Now(), rand.Reader)
 }
