@@ -5,8 +5,7 @@ import (
 	"fmt"
 )
 
-// runAdmin dispatches admin's sub-verbs: keys, tenant and bootstrap. None of them is ever
-// delegated to PATH — admin itself is compiled in, and so is everything under it.
+// runAdmin dispatches admin's sub-verbs, all compiled in.
 func runAdmin(args []string) error {
 	if len(args) < 1 {
 		return errors.New("usage: horoctl admin <keys|tenant|bootstrap>")

@@ -22,9 +22,7 @@ func runAdminTenant(args []string) error {
 	}
 }
 
-// runTenantCreate mints an opaque tenant id and prints it alone on stdout, mirroring keys
-// issue's stdout/stderr split: the id is what a caller pipes into --tenant elsewhere, and
-// it is opaque precisely so nothing downstream can mistake the display name for it.
+// runTenantCreate prints the new tenant's opaque id alone on stdout, for --tenant elsewhere.
 func runTenantCreate(args []string) error {
 	fs := flag.NewFlagSet("admin tenant create", flag.ContinueOnError)
 	dsn := dsnFlag(fs)

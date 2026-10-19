@@ -13,28 +13,15 @@ import (
 	"horopter.dev/horopter/internal/auth"
 )
 
-// bootstrapContext carries the fields every credential bootstrap issues shares, keeping
-// ensureCredential within the five-positional-parameter limit.
 type bootstrapContext struct {
 	tenantID, source, locus string
 }
 
-// bootstrapRequest carries the operator's flags into bootstrapTenantAndKeys as one value,
-// keeping it within the five-positional-parameter limit.
 type bootstrapRequest struct {
 	displayName, source, locus, producerKey, readerKey string
 }
 
-// runAdminBootstrap is the dev-stack convenience verb: it creates the tenant if absent and
-// issues a producer and a reader credential if their prefixes are absent. It is one verb
-// rather than two chained commands because the compose image is distroless/static and has
-// no shell to chain with, and because a fresh database has no tenant for `keys issue` to
-// target — 0004's backfill derives tenants from existing rows and finds none.
-//
-// It never issues a superuser. Only producer and reader are reachable here, both fixed:
-// of the four seeded roles only superuser grants both append and read, and it also grants
-// issue, which would put a non-expiring credential able to mint other credentials into
-// .env — exactly what a management-plane credential must never be.
+// runAdminBootstrap ensures a dev tenant and its producer and reader credentials exist.
 func runAdminBootstrap(args []string) error {
 	fs := flag.NewFlagSet("admin bootstrap", flag.ContinueOnError)
 	dsn := dsnFlag(fs)
@@ -78,20 +65,7 @@ func validateBootstrapFlags(displayName, producerKey, readerKey string) error {
 	return nil
 }
 
-// bootstrapTenantAndKeys resolves the tenant and ensures both credentials exist, all
-// inside one transaction, reporting completion only once it commits. Grouped into its
-// own function, past flag parsing, so runAdminBootstrap stays a single readable sequence
-// of validate-then-connect-then-act.
-//
-// The transaction is what gives resolveTenant's advisory lock (see below) something to
-// serialize: taking the lock as the FIRST statement of the transaction that also issues
-// both credentials, rather than in a transaction of its own that commits and releases
-// the lock before credential work starts, is what closes the second half of the race —
-// two concurrent runs racing loadCredential-then-INSERT in ensureCredential for the same
-// key prefix once they had both (wrongly) resolved different tenants. Mirrors how
-// internal/store/postgres/migrate.go's Migrate takes its lock as the first statement of
-// the one transaction that does every migration's work, not in a transaction scoped to
-// the lock alone.
+// bootstrapTenantAndKeys uses one transaction, so resolveTenant's lock covers both credentials.
 func bootstrapTenantAndKeys(ctx context.Context, pool *pgxpool.Pool, req bootstrapRequest) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -114,9 +88,7 @@ func bootstrapTenantAndKeys(ctx context.Context, pool *pgxpool.Pool, req bootstr
 		}
 	}
 
-	// Reported only past this point, matching Migrate's own rule: everything above ran
-	// inside the transaction, so a commit that fails applied nothing, and a caller told
-	// otherwise would log a tenant and two credentials the database rolled back.
+	// Report only after the commit: a failed commit applied nothing.
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit bootstrap transaction: %w", err)
 	}
@@ -124,29 +96,7 @@ func bootstrapTenantAndKeys(ctx context.Context, pool *pgxpool.Pool, req bootstr
 	return nil
 }
 
-// resolveTenant takes the advisory lock that serializes this bootstrap run against any
-// other targeting the same displayName, then finds the tenant already bootstrapped under
-// it or creates one. Matching by display name is bootstrap's own convenience for a
-// fixed, well-known dev tenant; it is not the general resolution mechanism keys issue's
-// --tenant deliberately refuses to offer, because display names are mutable and not
-// unique by design.
-//
-// display_name carries no UNIQUE constraint, so without this lock two concurrent
-// bootstrap runs sharing one — a retried CI job, an operator re-running while a prior
-// run is in flight, a Kubernetes Job with parallelism > 1 — can both see no matching row
-// and both INSERT, leaving two tenants under one display name; whichever then binds its
-// fixed producer/reader key prefix to the "wrong" tenant_id collides with
-// credential.key_prefix's UNIQUE constraint. pg_advisory_xact_lock, scoped to this
-// displayName the way internal/store/postgres/rebuild.go's lockRebuildWrite scopes its
-// lock to a tenant, serializes them: the second run blocks until the first commits, then
-// its own SELECT finds the row the first created.
-//
-// The lock is taken here, first, but held by the caller's transaction —
-// bootstrapTenantAndKeys — for the whole bootstrap, not just this function's own
-// SELECT-or-INSERT: pg_advisory_xact_lock is transaction-scoped, not call-scoped, so it
-// stays held, and the second run stays blocked, through both ensureCredential calls that
-// follow — exactly as internal/store/postgres/migrate.go's Migrate holds its own lock
-// for every migration file, not only the ledger check.
+// resolveTenant locks first because display_name is not UNIQUE and concurrent runs race.
 func resolveTenant(ctx context.Context, tx pgx.Tx, displayName string) (string, error) {
 	if _, err := tx.Exec(ctx,
 		`SELECT pg_advisory_xact_lock(hashtext($1))`, displayName); err != nil {
@@ -155,8 +105,6 @@ func resolveTenant(ctx context.Context, tx pgx.Tx, displayName string) (string, 
 	return findOrCreateTenant(ctx, tx, displayName)
 }
 
-// findOrCreateTenant is resolveTenant's find-or-create step, run inside the caller's
-// locked transaction.
 func findOrCreateTenant(ctx context.Context, tx pgx.Tx, displayName string) (string, error) {
 	var id string
 	err := tx.QueryRow(ctx,
@@ -180,9 +128,7 @@ func findOrCreateTenant(ctx context.Context, tx pgx.Tx, displayName string) (str
 	return id, nil
 }
 
-// bootstrapBinding is everything bootstrap owns about one credential: what the daemons
-// authenticate it as, and the secret they authenticate it by. Revocation is deliberately not
-// in it — see ensureCredential.
+// bootstrapBinding is what bootstrap owns of a credential; revocation is not part of it.
 type bootstrapBinding struct {
 	tenantID, role, source, locus, hash string
 }
@@ -193,19 +139,7 @@ type storedCredential struct {
 	revoked bool
 }
 
-// ensureCredential makes the credential behind explicitKey exist, bound to this bootstrap's
-// tenant, role, source and locus, and carrying explicitKey's own secret.
-//
-// It RECONCILES an existing row rather than skipping it. "A credential with this prefix
-// exists" is not the fact bootstrap needs — "the stack authenticates as this tenant with this
-// key" is — and the two come apart whenever a development database carries residue: a key
-// bound to an earlier tenant or role stays bound to it, both daemons authenticate against the
-// stale row, and bootstrap reports success. Because bootstrap runs on every container start,
-// skipping makes that permanent rather than transient.
-//
-// The one mismatch it will not reconcile is a revoked row. Revocation is an operator's
-// deliberate act and bootstrap does not own it; clearing it on the next container start would
-// undo that decision with nothing said. That fails loudly instead, naming the prefix.
+// ensureCredential reconciles an existing credential to this bootstrap but never un-revokes one.
 func ensureCredential(
 	ctx context.Context, db dbExecer, bctx bootstrapContext, role, explicitKey string,
 ) error {
@@ -258,8 +192,7 @@ func loadCredential(
 	return c, true, nil
 }
 
-// reconcileCredential rewrites the stored row to want when it differs, naming on stderr which
-// fields moved so the correction is visible rather than silent.
+// reconcileCredential rewrites the stored row to want, naming on stderr what moved.
 func reconcileCredential(
 	ctx context.Context, db dbExecer, prefix string, got, want bootstrapBinding,
 ) error {
@@ -277,8 +210,7 @@ func reconcileCredential(
 	return nil
 }
 
-// describeDrift names the fields that differ. The secret is reported as replaced and never
-// printed, so a reconciliation line is safe in a container log.
+// describeDrift never prints the secret, so its output is safe in a container log.
 func describeDrift(got, want bootstrapBinding) string {
 	var moved []string
 	for _, f := range []struct{ name, from, to string }{

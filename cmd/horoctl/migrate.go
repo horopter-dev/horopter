@@ -9,9 +9,7 @@ import (
 	"horopter.dev/horopter/internal/migrate"
 )
 
-// runMigrate is horoctl's compiled-in migrate verb. It calls the same internal/migrate.Run
-// entry point cmd/horopter-migrate's thin main does, so the two never disagree on what a
-// migration does — see main.go's package comment for why this verb is never delegated.
+// runMigrate shares internal/migrate.Run with cmd/horopter-migrate.
 func runMigrate(args []string) error {
 	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
 	dsn := fs.String("dsn", os.Getenv("DATABASE_URL"), "PostgreSQL connection string")

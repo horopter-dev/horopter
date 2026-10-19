@@ -31,17 +31,12 @@ func runAdminKeys(args []string) error {
 	}
 }
 
-// issueParams is what issueCredential needs to write one credential row, grouped into a
-// struct to stay within the five-positional-parameter limit.
 type issueParams struct {
 	tenant, role, source, locus, subjectPattern string
 	prefix, hash                                string
 }
 
-// runKeysIssue validates the locus itself, so an operator gets ValidateLocus's readable
-// error rather than the credential_locus_shape constraint violation the insert below
-// would otherwise surface — the two enforcement points are deliberate, and both are
-// tested.
+// runKeysIssue mints a credential and prints its key once, on stdout.
 func runKeysIssue(args []string) error {
 	fs := flag.NewFlagSet("admin keys issue", flag.ContinueOnError)
 	dsn := dsnFlag(fs)
@@ -91,19 +86,12 @@ func runKeysIssue(args []string) error {
 
 	fmt.Fprintf(os.Stderr, "issued credential prefix=%s role=%s tenant=%s locus=%s\n",
 		prefix, *role, tenantLabel(*tenant), effectiveLocus)
-	// The key is printed exactly once, here, on stdout and nowhere else: it is
-	// unrecoverable after this line, so KEY=$(horoctl admin keys issue ...) must be the
-	// only place it appears.
+	// The only place the key appears: it cannot be recovered after this line.
 	fmt.Println(fullKey)
 	return nil
 }
 
-// issueFlags carries the three issue-time flags together so callers name each one. They
-// were three bare string parameters, which made every call site a place a transposition
-// could hide: role, source and locus are interchangeable to the compiler and not to the
-// code, since a swapped role becomes the locus and a swapped source changes which value
-// the locus defaults from. bootstrap.go already passes its flags this way as
-// bootstrapRequest; this is the same answer applied to the file that lacked it.
+// issueFlags names role, source and locus so a call site cannot transpose them.
 type issueFlags struct{ role, source, locus string }
 
 func validateIssueFlags(f issueFlags) error {
@@ -116,14 +104,7 @@ func validateIssueFlags(f issueFlags) error {
 	return nil
 }
 
-// resolveAndValidateIssue runs the issue-time checks that need no database: the required
-// flags and the locus, for which ValidateLocus gives a readable error rather than the
-// credential_locus_shape constraint violation the insert would surface. Split out of
-// runKeysIssue to keep that function's own branching within the complexity limit.
-//
-// It returns a core.Locus rather than a string because by this point the value has been
-// through auth.ValidateLocus, and the type is what says so — a caller cannot mistake it
-// for an unchecked flag value.
+// resolveAndValidateIssue runs the issue-time checks that need no database.
 func resolveAndValidateIssue(f issueFlags) (core.Locus, error) {
 	if err := validateIssueFlags(f); err != nil {
 		return core.Locus{}, err
@@ -132,8 +113,7 @@ func resolveAndValidateIssue(f issueFlags) (core.Locus, error) {
 	if err := auth.ValidateLocus(effective); err != nil {
 		return core.Locus{}, err
 	}
-	// ValidateLocus is the stricter of the two: it enforces core.NewLocus's rules and
-	// three more, so this cannot fail where that succeeded.
+	// Cannot fail: ValidateLocus enforces core.NewLocus's rules and more.
 	locus, err := core.NewLocus(effective)
 	if err != nil {
 		return core.Locus{}, err
@@ -141,14 +121,7 @@ func resolveAndValidateIssue(f issueFlags) (core.Locus, error) {
 	return locus, nil
 }
 
-// checkRoleAllowsSubjectPattern refuses a subject pattern on any role whose capabilities reach
-// beyond append. Append is the only capability a pattern narrows anything real about — a
-// producer really does post about fewer subjects when restricted. A read is not narrowed by
-// subject at all (Finding 1: every read route ignored it silently), and a rebuild an admin
-// grant triggers is whole-tenant by construction; both fall out of one general rule rather
-// than two special cases, so this check does not need rediscovering the next time a
-// capability is added. The role is read whatever the pattern, so an unknown role also fails
-// here rather than as a foreign-key violation after a key is minted.
+// checkRoleAllowsSubjectPattern refuses a subject pattern on a role granting more than append.
 func checkRoleAllowsSubjectPattern(
 	ctx context.Context, pool *pgxpool.Pool, role, subjectPattern string,
 ) error {
@@ -165,9 +138,7 @@ func checkRoleAllowsSubjectPattern(
 	return nil
 }
 
-// deriveKey returns the full key to print, its lookup prefix and its stored hash. An
-// explicit value takes the --key development path, with its own warning; otherwise a
-// fresh key is generated.
+// deriveKey returns the key to print, its prefix and its hash, generating one if explicit is empty.
 func deriveKey(explicit string) (key, prefix, hash string, err error) {
 	if explicit == "" {
 		return auth.NewKey(rand.Reader)
@@ -182,14 +153,7 @@ func deriveKey(explicit string) (key, prefix, hash string, err error) {
 	return explicit, prefix, auth.HashSecret(secret), nil
 }
 
-// issueCredentialTx wraps issueCredential in one transaction, checking the named tenant
-// exists first. Without the check, a --tenant naming no row let the principal INSERT commit
-// and only the credential INSERT fail on its foreign key, leaving an orphaned principal: a
-// retry with the corrected --tenant and the same --key then failed on principal_pkey,
-// reporting nothing about the real mistake. Without the transaction, that same partial write
-// would survive even a correctly reported failure. Matches d89ebbb's fix for bootstrap's own
-// unguarded writes; named apart from issueCredential, which bootstrap's ensureCredential also
-// calls, already inside its own transaction, against a plain dbExecer with no Begin of its own.
+// issueCredentialTx issues in one transaction, so a bad --tenant leaves no orphaned principal.
 func issueCredentialTx(ctx context.Context, pool *pgxpool.Pool, p issueParams) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -211,9 +175,6 @@ func issueCredentialTx(ctx context.Context, pool *pgxpool.Pool, p issueParams) e
 	return nil
 }
 
-// checkTenantExists reports a clear, actionable error for a --tenant naming no row, rather
-// than letting credential.tenant_id's foreign key surface it after the principal row already
-// committed.
 func checkTenantExists(ctx context.Context, tx pgx.Tx, tenant string) error {
 	var exists bool
 	if err := tx.QueryRow(ctx,
@@ -226,12 +187,7 @@ func checkTenantExists(ctx context.Context, tx pgx.Tx, tenant string) error {
 	return nil
 }
 
-// issueCredential writes the principal and credential rows for one issued key against db,
-// leaving atomicity to the caller: issueCredentialTx wraps a standalone issue in one
-// transaction, and bootstrap's ensureCredential runs it inside its own. A principal is
-// created per credential rather than reused: horoctl has no way to name an existing one, and
-// decision 4's several-credentials-per-principal model is served just as well by principals
-// that start with one credential each as it would be by a shared one.
+// issueCredential writes one principal and one credential; the caller owns the transaction.
 func issueCredential(ctx context.Context, db dbExecer, p issueParams) error {
 	principalID := "prn_" + p.prefix
 	credentialID := "cred_" + p.prefix
