@@ -9,8 +9,9 @@ Issues filed on this repository's GitHub arrive in `HOR` through Linear's GitHub
 them `needs-triage`. Once the repository is public, a synced issue's comments are public too;
 keep internal discussion on unsynced HOR issues.
 
-Use the Linear MCP server (`plugin:linear:linear`). If its tools answer as unauthenticated, run
-its `authenticate` tool and ask Robin to open the URL it returns.
+Use the `linear-horopter` MCP server (`mcp__linear-horopter__*`). A Linear server connected to
+another workspace answers `HOR-N` as not found. If it needs authentication, ask Robin to run
+`/mcp` and authenticate `linear-horopter`.
 
 ## Conventions
 
