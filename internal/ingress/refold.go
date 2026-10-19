@@ -19,8 +19,7 @@ type refoldRequest struct {
 	Tenant string `json:"tenant"`
 }
 
-// postRefold re-folds one change from its log. It takes the locks an append takes, so
-// ingest to every other ref carries on while it runs.
+// Takes the locks an append takes, so ingest to other refs carries on.
 func (s *Server) postRefold(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, MaxBodyBytes)
 	var req refoldRequest
@@ -35,8 +34,7 @@ func (s *Server) postRefold(w http.ResponseWriter, r *http.Request) {
 			"; give the stored form, as horo show prints it")
 		return
 	}
-	// Annotated before anything can fail, so every outcome's request line names the change
-	// an admin action targeted.
+	// Annotated first, so every outcome's request line names the target change.
 	logging.Annotate(r.Context(), slog.String("ref", ref.String()))
 	tenantID, status, msg := s.refoldTenant(r, req.Tenant)
 	if status != 0 {
@@ -63,9 +61,7 @@ func (s *Server) postRefold(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// refoldTenant resolves the tenant a re-fold acts on, by egress's rule: a tenant-scoped key
-// acts in its own tenant and may not name another; a global key must name one that exists.
-// status is zero when the tenant resolved.
+// Egress's tenant rule; status is zero when the tenant resolved.
 func (s *Server) refoldTenant(
 	r *http.Request, named string,
 ) (tenantID string, status int, msg string) {

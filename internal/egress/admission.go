@@ -30,29 +30,13 @@ const (
 	gateMemory      = "memory"
 )
 
-// readExpansionFactor is how many bytes of heap a read may allocate per byte of row text it was
-// estimated at. TestReadAllocationsStayWithinExpansionFactor measures the ratio on the costliest
-// data shapes through every rendering, and fails if any ratio exceeds this. It is set to the
-// smallest whole number at least 10% above the largest ratio that test measured. Allocation, not
-// peak heap, is measured: a read cannot add more to the live heap than it allocates, and
-// allocation is repeatable where peak heap depends on when the collector ran.
+// Measured by TestReadAllocationsStayWithinExpansionFactor; set 10% above its largest ratio.
 const readExpansionFactor = 46
 
-// afterAdmissionHook is nil in production. Tests set it to hold an admitted read in flight so
-// the next read finds the concurrency limit full.
+// Nil in production; tests set it to hold an admitted read in flight.
 var afterAdmissionHook func()
 
-// readState is what admission learned about one read, recorded on the read's server span when
-// the read finishes.
-//
-// requestedTenant is the raw "?tenant=" value, read before the concurrency gate — free, no
-// database access, whatever the read's fate — so shed and tooLarge always have something to
-// log even though shed runs before a permit exists to resolve anything under. tenant is the
-// resolved, validated core.TenantID, set only once a permit is held and tenantFor has approved
-// it; a handler's own query uses this, never requestedTenant, which is unvalidated caller
-// input. The connection-wait observer fills in longestConnectionWait and acquisitionFailed; it
-// runs on the read's own goroutine, as pgxpool acquires connections on the caller's.
-// admitMemory fills in estimated, estimatedBytes, reserved, reservedBytes and byteCut.
+// tenant is set only once a permit is held; requestedTenant is unvalidated caller input.
 type readState struct {
 	requestedTenant       string
 	tenant                core.TenantID
@@ -67,13 +51,8 @@ type readState struct {
 	byteCut               bool
 }
 
-// readStateKey is the context key admit attaches a read's *readState under, so admitMemory and a
-// handler's own query can reach it without threading it through every signature.
 type readStateKey struct{}
 
-// tenantFromContext returns the tenant admit resolved and validated for this request. A
-// context that never passed through admit — none exists once Routes is built, but a
-// defensive read is cheaper than a nil-pointer panic — reports the zero TenantID.
 func tenantFromContext(ctx context.Context) core.TenantID {
 	state, _ := ctx.Value(readStateKey{}).(*readState)
 	if state == nil {
@@ -82,11 +61,7 @@ func tenantFromContext(ctx context.Context) core.TenantID {
 	return state.tenant
 }
 
-// requestedTenantFromContext returns the raw "?tenant=" value admit read before the
-// concurrency gate, for a failed read's log line. It is not the resolved, validated tenant a
-// handler's own query used — that is tenantFromContext — but it is what the caller asked for,
-// which is what an operator wants from a failure line, and it is available even when
-// resolution itself is what failed.
+// Raw and unvalidated, but available even when resolution itself failed.
 func requestedTenantFromContext(ctx context.Context) string {
 	state, _ := ctx.Value(readStateKey{}).(*readState)
 	if state == nil {
@@ -95,22 +70,7 @@ func requestedTenantFromContext(ctx context.Context) string {
 	return state.requestedTenant
 }
 
-// admit gates a read on the concurrency limit, then resolves and validates its tenant.
-//
-// Resolution runs AFTER the permit, not before. For a global credential it is a database
-// round trip (TenantExists), and the concurrency limiter is what bounds how many of those
-// reach Postgres at once, the same as it bounds every other database access a read makes. An
-// earlier revision resolved before Acquire so shed would never repeat the lookup; that moved
-// the round trip earlier without gating it, so it ran once per request rather than once per
-// admitted one — an unbounded concurrent burst of global-credential requests reached Postgres
-// before admission ever applied. Resolving after Acquire restores that bound and, as a
-// consequence, keeps a read shed at the limiter from reaching the lookup at all: shed runs
-// exactly when Acquire fails, which is exactly when resolution has not run yet.
-//
-// A read that gets no permit within Limits.AdmissionWait is shed with 503; an admitted read
-// holds its permit until its response has been written. It also attaches the read's state and
-// connection-wait observer to the context the handler runs with, which the handler's own
-// memory gate (admitMemory) and its own query (tenantFromContext) use.
+// Resolves the tenant after the permit: a global credential's lookup hits the database.
 func (s *Server) admit(read http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		state := &readState{
@@ -148,10 +108,7 @@ func (s *Server) admit(read http.HandlerFunc) http.Handler {
 	})
 }
 
-// connectionWaitObserver returns the observer admit attaches to an admitted read's context. A
-// failed acquisition counts against the database only while the request's own context is live:
-// a client that disconnects ends that context, which says nothing about the database. However
-// the acquisition ended, its wait still counts.
+// A failed acquisition counts only while the request context is live; its wait always counts.
 func (st *readState) connectionWaitObserver(
 	requestCtx context.Context,
 ) postgres.ConnectionWaitObserver {
@@ -163,15 +120,10 @@ func (st *readState) connectionWaitObserver(
 	}
 }
 
-// overloaded reports whether the read found the database pool congested: its longest wait for a
-// connection exceeded threshold, or an acquisition failed.
 func (st *readState) overloaded(threshold time.Duration) bool {
 	return st.longestConnectionWait > threshold || st.acquisitionFailed
 }
 
-// release ends an admitted read: it gives back the read's memory reservation, if any, then
-// returns its concurrency permit, reporting whether the read found the pool congested, and logs
-// the limit if that halved it.
 func (s *Server) release(ctx context.Context, permit admission.Permit, state *readState) {
 	if state.reserved {
 		s.memory.Release(state.reservedBytes)
@@ -195,10 +147,7 @@ func limitHalvedMessage(before, after int, state *readState) string {
 		"connection wait", before, after, state.longestConnectionWait.Milliseconds())
 }
 
-// shed answers a read refused at gate with 503 and Retry-After, and logs it at WARN with the
-// gate's figures. Every shed read is logged: shedding is driven by database capacity, far below
-// the rate at which the handler can write a log line, and a volumetric flood is expected to be
-// stopped in front of Horopter.
+// Every shed read is logged: shedding happens far below the rate a log line can be written.
 func (s *Server) shed(
 	w http.ResponseWriter, r *http.Request, state *readState, gate string, figures ...any,
 ) {
@@ -213,14 +162,11 @@ func (s *Server) shed(
 		"egress is at capacity; retry after the interval in Retry-After")
 }
 
-// retryAfterSeconds is the Retry-After a shed read is given: the admission wait rounded up to
-// whole seconds, and at least one.
 func retryAfterSeconds(wait time.Duration) int {
 	return max(1, int((wait+time.Second-1)/time.Second))
 }
 
-// record sets what admission decided on the read's server span. A read shed at the concurrency
-// gate acquired no connection, so it carries no connection wait.
+// A read shed at the concurrency gate acquired no connection, so it carries no wait.
 func (st *readState) record(ctx context.Context) {
 	attrs := []attribute.KeyValue{
 		attribute.String("horopter.admission.outcome", st.outcome),
@@ -241,13 +187,7 @@ func (st *readState) record(ctx context.Context) {
 	trace.SpanFromContext(ctx).SetAttributes(attrs...)
 }
 
-// admitMemory decides whether a read estimated at est can be served, and reserves its memory
-// until the read is released. It returns the row-text budget to cut the read's query at, zero
-// for none, and false when it has already answered the request.
-//
-// A read whose first row alone needs more than the pool can never be served, and is refused with
-// 422. A read needing more than the whole pool reserves all of it and is cut to what the pool
-// holds, so it returns the oldest rows that fit, marked truncated, rather than failing.
+// A first row larger than the pool is refused 422; a larger read is cut to what fits.
 func (s *Server) admitMemory(
 	w http.ResponseWriter, r *http.Request, est postgres.ReadEstimate,
 ) (budget int64, admitted bool) {
@@ -283,8 +223,7 @@ func (s *Server) admitMemory(
 	return 0, true
 }
 
-// tooLarge answers a read whose first row alone needs more memory than the pool holds. The body
-// names the limit, which is configuration, and nothing from the store.
+// The body names the limit, which is configuration, and nothing from the store.
 func (s *Server) tooLarge(
 	w http.ResponseWriter, r *http.Request, state *readState, est postgres.ReadEstimate,
 ) {
