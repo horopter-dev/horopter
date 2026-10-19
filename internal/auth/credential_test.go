@@ -30,9 +30,7 @@ func TestSplitKeyRejectsMalformed(t *testing.T) {
 	}
 }
 
-// TestSplitKeyRejectsAPrefixNewKeyCouldNotHaveIssued closes an unauthenticated
-// memory-exhaustion vector: the prefix becomes a cache key, so a caller who can choose
-// its length chooses how many bytes each cached entry costs.
+// The prefix is a cache key, so a caller choosing its length would choose each entry's cost.
 func TestSplitKeyRejectsAPrefixNewKeyCouldNotHaveIssued(t *testing.T) {
 	for name, in := range map[string]string{
 		"too short":       "horo_abc_secret",
@@ -60,9 +58,6 @@ func TestSplitKeyAcceptsWhatNewKeyIssues(t *testing.T) {
 	assert.Len(t, secret, 64)
 }
 
-// TestHashSecretMatchesWhatNewKeyStores pins HashSecret to NewKey's own hash, which is
-// what lets horoctl's --key path (an operator-supplied secret NewKey never generated)
-// store a hash VerifySecret will later accept, without reimplementing the algorithm.
 func TestHashSecretMatchesWhatNewKeyStores(t *testing.T) {
 	key, _, hash, err := auth.NewKey(rand.Reader)
 	require.NoError(t, err)
@@ -72,8 +67,6 @@ func TestHashSecretMatchesWhatNewKeyStores(t *testing.T) {
 	assert.Equal(t, hash, auth.HashSecret(secret), "same secret must hash identically")
 }
 
-// TestHashSecretVerifies is the round trip HashSecret exists for: a secret this package
-// never generated must still verify against the hash HashSecret produces for it.
 func TestHashSecretVerifies(t *testing.T) {
 	secret := "an-operator-chosen-development-secret"
 	hash := auth.HashSecret(secret)

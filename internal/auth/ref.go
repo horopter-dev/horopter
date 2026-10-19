@@ -30,11 +30,7 @@ func validateIdentifier(kind, value string, maxBytes int) error {
 // ValidateRef reports whether ref is an acceptable producer-chosen change identifier.
 func ValidateRef(ref string) error { return validateIdentifier("ref", ref, MaxRefBytes) }
 
-// ValidateLocus reports whether locus is an acceptable admin-chosen ref-namespace prefix.
-//
-// The two structural rules — non-empty, no "/" — are core.NewLocus's, because they are what
-// makes <locus>/<ref> reversible and core owns that encoding. The three below are policy
-// about what an operator may mint, which core has no business knowing.
+// ValidateLocus adds operator policy to core.NewLocus's structural rules for a credential's locus.
 func ValidateLocus(locus string) error {
 	if _, err := core.NewLocus(locus); err != nil {
 		return err

@@ -13,8 +13,6 @@ import (
 	"horopter.dev/horopter/internal/testdb"
 )
 
-// credentialSpec is one credential to seed. A global credential is one whose tenant_id
-// is NULL, which is the distinction the Store exists to read correctly.
 type credentialSpec struct {
 	role           string
 	global         bool
@@ -22,8 +20,6 @@ type credentialSpec struct {
 	expiresAt      *time.Time
 }
 
-// seeded is what a seeded credential's test needs back: the row's identifiers and the
-// prefix a lookup presents.
 type seeded struct {
 	credentialID string
 	principalID  string
@@ -49,9 +45,7 @@ func execDB(t *testing.T, sql string, args ...any) {
 	require.NoError(t, err)
 }
 
-// seedCredential inserts a principal, a tenant unless the credential is global, and the
-// credential itself, registering the cleanup that removes all three. Identifiers derive
-// from the generated key prefix, so no two runs collide in the shared database.
+// Identifiers derive from the generated prefix, so runs never collide in the shared database.
 func seedCredential(t *testing.T, spec credentialSpec) seeded {
 	t.Helper()
 	_, prefix, hash, err := auth.NewKey(rand.Reader)
@@ -80,9 +74,7 @@ func seedCredential(t *testing.T, spec credentialSpec) seeded {
 	return row
 }
 
-// dropSeeded removes the rows in foreign-key order. A failure is logged rather than
-// failing the test, as testdb's own cleanups are: residue is what this removes, so
-// failing an otherwise passing test over it would trade a tidy database for a flaky suite.
+// Failures are logged, as testdb's cleanups do, so residue never fails a passing test.
 func dropSeeded(t *testing.T, row seeded) {
 	pool, err := testdb.Pool()
 	if err != nil {
@@ -186,19 +178,11 @@ func TestStoreReadsARevokedCredentialAsRevoked(t *testing.T) {
 	assert.WithinDuration(t, time.Now(), *cred.RevokedAt, time.Minute)
 }
 
-// TestTheDatabaseAlsoRefusesASubjectPatternOnAnAdminGrant pins the backstop the
-// middleware is the authority for: the CHECK in migration 0004 enumerates the roles it
-// knows, and a role added later would slip past it into the middleware's own refusal.
-// TestStoreRefusesARowItCannotReadAsAnUnknownCredential pins the fail-closed direction.
-// An empty non-NULL tenant_id would read as the global credential — every tenant — so
-// the row is refused; and it is refused as ErrNoCredential, because answering a store
-// error here would tell a caller their prefix exists while an unknown one gets 401.
+// Refused as ErrNoCredential: a store error would tell the caller the prefix exists.
 func TestStoreRefusesARowItCannotReadAsAnUnknownCredential(t *testing.T) {
 	store := credentialStore(t)
 
-	// tenant_id has a foreign key, so the empty tenant has to exist for a credential to
-	// hold the value this guard is about. Seeded before the credential so that the
-	// cleanups, which run last-registered first, drop the credential before the tenant.
+	// Seeded first so the last-registered-first cleanups drop the credential before it.
 	execDB(t, `INSERT INTO tenant (id, display_name) VALUES ('', 'the empty tenant')
 		ON CONFLICT (id) DO NOTHING`)
 	t.Cleanup(func() { execDB(t, `DELETE FROM tenant WHERE id = ''`) })
@@ -213,6 +197,7 @@ func TestStoreRefusesARowItCannotReadAsAnUnknownCredential(t *testing.T) {
 			"unknown prefix answers 401")
 }
 
+// The 0004 CHECK is only a backstop: it enumerates known roles, so a new one slips past it.
 func TestTheDatabaseAlsoRefusesASubjectPatternOnAnAdminGrant(t *testing.T) {
 	credentialStore(t)
 	row := seedCredential(t, credentialSpec{role: "reader"})

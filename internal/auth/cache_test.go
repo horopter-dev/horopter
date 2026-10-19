@@ -39,9 +39,6 @@ func TestNegativeCacheStopsRepeatedLookups(t *testing.T) {
 		"an unknown prefix must not reach the store once per request")
 }
 
-// TestAnOversizedPrefixNeverReachesTheStoreOrTheCache is the other half of the key-shape
-// fix: a prefix the service could not have issued is refused before it can be retained,
-// so a loop of them costs neither a query nor a cache entry.
 func TestAnOversizedPrefixNeverReachesTheStoreOrTheCache(t *testing.T) {
 	lookup := &fakeLookup{cred: validCredential()}
 	a := auth.New(lookup, time.Now, auth.DefaultOptions())
@@ -109,9 +106,6 @@ func TestATTLOfZeroDisablesCaching(t *testing.T) {
 	}
 }
 
-// TestTheCacheIsBoundedByItsGenerations pins the memory bound: a flood of distinct
-// unknown prefixes writes a negative entry each, so entries must be dropped rather than
-// held until their TTL expires.
 func TestTheCacheIsBoundedByItsGenerations(t *testing.T) {
 	lookup := &fakeLookup{}
 	a := auth.New(lookup, time.Now, auth.Options{NegativeTTL: time.Hour})
@@ -126,9 +120,6 @@ func TestTheCacheIsBoundedByItsGenerations(t *testing.T) {
 		"the first prefix of the flood must have been dropped, not retained for its TTL")
 }
 
-// TestAColdBurstOnOnePrefixCostsOneStoreCall is the pool-protection property: auth runs
-// outside admission and admission is sized from the same pool, so concurrent resolutions
-// of one cold prefix must collapse into a single query rather than take a connection each.
 func TestAColdBurstOnOnePrefixCostsOneStoreCall(t *testing.T) {
 	gate := make(chan struct{})
 	lookup := &fakeLookup{cred: validCredential(), gate: gate}
@@ -163,11 +154,7 @@ func TestAColdBurstOnOnePrefixCostsOneStoreCall(t *testing.T) {
 	}
 }
 
-// TestAWedgedStoreTimesOutAsInfrastructure covers the bound on the shared call. The
-// waiters must be released by the timeout rather than held for as long as the store is
-// wedged, and a timeout is the store's failure, not the credential's: classifying it as a
-// credential failure would answer 401 here and 503 for a store that refused the
-// connection, which is the oracle from the other direction.
+// A 401 for a timeout beside a 503 for a refused connection would be a prefix oracle.
 func TestAWedgedStoreTimesOutAsInfrastructure(t *testing.T) {
 	gate := make(chan struct{})
 	lookup := &fakeLookup{cred: validCredential(), gate: gate}
@@ -257,9 +244,7 @@ func TestConcurrentResolvesOfManyPrefixesAreSafe(t *testing.T) {
 func BenchmarkResolveCached(b *testing.B)   { benchmarkResolve(b, 30*time.Second) }
 func BenchmarkResolveUncached(b *testing.B) { benchmarkResolve(b, 0) }
 
-// benchmarkResolve measures the middleware, not the database: the lookup it misses into
-// is an in-memory fake, so the uncached figure understates the real cost of a miss by a
-// query and a round trip.
+// The lookup is an in-memory fake, so the uncached figure omits a query and a round trip.
 func benchmarkResolve(b *testing.B, ttl time.Duration) {
 	a := auth.New(&fakeLookup{cred: validCredential()}, time.Now,
 		auth.Options{PositiveTTL: ttl})

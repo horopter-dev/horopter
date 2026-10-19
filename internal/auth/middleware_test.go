@@ -17,9 +17,6 @@ import (
 	"horopter.dev/horopter/internal/core"
 )
 
-// validKey, knownPrefix and knownHash are one real key generated once for the whole
-// suite: the hash a credential stores can only be produced by NewKey, since the hashing
-// is unexported.
 var validKey, knownPrefix, knownHash = generateKey()
 
 func generateKey() (key, prefix, hash string) {
@@ -47,10 +44,7 @@ func (c *fakeClock) advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
-// fakeLookup answers for knownPrefix only, and counts what reached it so a test can tell
-// a cache hit from a lookup. A non-nil fails stands in for an unreachable store; a
-// non-nil gate holds each call until the test closes it, which is how a burst is made to
-// overlap rather than run one after another.
+// fakeLookup counts calls; fails simulates an outage, and gate holds calls so a burst overlaps.
 type fakeLookup struct {
 	mu    sync.Mutex
 	cred  auth.Credential
@@ -137,9 +131,7 @@ func okHandler() http.Handler {
 	})
 }
 
-// serve drives one request through Require. A case naming a bare key gets the Bearer
-// scheme added, so a case meant to exercise a wrong secret is not rejected earlier for
-// carrying no scheme at all.
+// serve adds Bearer to a bare key, so a wrong secret is not refused earlier for lacking it.
 func serve(
 	t *testing.T, a *auth.Authenticator, c auth.Capability, header string,
 ) *httptest.ResponseRecorder {
