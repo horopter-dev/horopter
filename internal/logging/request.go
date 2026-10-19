@@ -10,8 +10,7 @@ import (
 	"unicode/utf8"
 )
 
-// unlogged are the probe routes. Kubelet calls them every few seconds on both daemons, and
-// a failing readyz already logs its own error.
+// unlogged are the probe routes, which kubelet calls every few seconds.
 var unlogged = map[string]bool{"GET /healthz": true, "GET /readyz": true}
 
 type recordKey struct{}
@@ -21,12 +20,7 @@ type requestConfig struct{ query bool }
 // RequestOption configures Requests.
 type RequestOption func(*requestConfig)
 
-// Requests writes one line per request handled by next.
-//
-// It belongs inside otelhttp, so the span is in the context and traceHandler adds its ids,
-// and around the mux, so the matched pattern is known when next returns. ServeMux writes
-// the pattern into the request it is given, and that is the copy carrying the record, not
-// r: so the route is read from routed.
+// Requests logs one line per request; it wraps the mux, inside otelhttp.
 func Requests(next http.Handler, opts ...RequestOption) http.Handler {
 	var cfg requestConfig
 	for _, opt := range opts {
@@ -34,6 +28,7 @@ func Requests(next http.Handler, opts ...RequestOption) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := &requestRecord{}
+		// ServeMux sets Pattern on the request it is given, so the route is read from routed.
 		routed := r.WithContext(context.WithValue(r.Context(), recordKey{}, rec))
 		rw := &responseRecorder{ResponseWriter: w}
 		start := time.Now()
@@ -55,21 +50,16 @@ func Requests(next http.Handler, opts ...RequestOption) http.Handler {
 }
 
 const (
-	// maxField bounds every string on the line: Loki rejects an over-long line outright,
-	// which would lose exactly the unusual request someone goes looking for.
+	// maxField bounds every string on the line: Loki rejects an over-long line outright.
 	maxField = 1 << 10
-	// maxErrorBody bounds what is retained of an error response to parse "error" from. A
-	// message quotes only what the request carried, under ingress's 1 MiB body cap; the
-	// rest is headroom for JSON escaping.
+	// maxErrorBody fits a message quoting ingress's 1 MiB body cap, plus JSON escaping.
 	maxErrorBody = 2 << 20
 )
 
 // WithQuery logs the raw query string of a request whose credential resolved.
 func WithQuery() RequestOption { return func(c *requestConfig) { c.query = true } }
 
-// Annotate adds fields to the current request's line. Outside a request handled by
-// Requests it does nothing, so callers need not know whether they are being logged. A
-// later value for a key replaces an earlier one.
+// Annotate adds fields to the current request's line; outside Requests it does nothing.
 func Annotate(ctx context.Context, attrs ...slog.Attr) {
 	rec, ok := ctx.Value(recordKey{}).(*requestRecord)
 	if !ok {
@@ -168,9 +158,7 @@ func cut(attrs []slog.Attr) []slog.Attr {
 	return out
 }
 
-// validPrefix returns at most n bytes of s, backing off to a rune start so no character is
-// split. It looks only at the cut: an invalid byte earlier in s is left for slog, which
-// writes it as U+FFFD, rather than costing the whole field.
+// validPrefix returns at most n bytes of s, backing off to a rune start at the cut.
 func validPrefix(s string, n int) string {
 	for back := 0; back < utf8.UTFMax && n > 0 && !utf8.RuneStart(s[n]); back++ {
 		n--

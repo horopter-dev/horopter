@@ -30,8 +30,7 @@ func TestBytePoolReservationGivesUpAtItsDeadline(t *testing.T) {
 	assert.Equal(t, int64(60), p.Reserved(), "a reservation that gave up must hold nothing")
 }
 
-// TestBytePoolReleaseLetsAWaiterThrough sleeps for the reason
-// TestLimiterAdmitsAWaiterWhenAPermitIsReleased does.
+// Sleeps for the reason TestLimiterAdmitsAWaiterWhenAPermitIsReleased does.
 func TestBytePoolReleaseLetsAWaiterThrough(t *testing.T) {
 	p := admission.NewBytePool(100)
 	require.NoError(t, p.Reserve(context.Background(), 60))
@@ -51,8 +50,7 @@ func TestBytePoolReleaseLetsAWaiterThrough(t *testing.T) {
 	assert.Equal(t, int64(50), p.Reserved())
 }
 
-// TestBytePoolRefusesMoreThanItsCapacityWithoutWaiting gives the reservation a context that
-// never ends: semaphore.Weighted would wait on it forever.
+// A context that never ends: semaphore.Weighted would wait on it forever.
 func TestBytePoolRefusesMoreThanItsCapacityWithoutWaiting(t *testing.T) {
 	p := admission.NewBytePool(100)
 	refused := make(chan error, 1)

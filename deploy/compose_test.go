@@ -1,5 +1,4 @@
-// Package deploy_test checks the release compose asset as a reader receives it: rendered by
-// hack/render-compose.sh, then resolved by docker compose.
+// Package deploy_test checks the release compose asset as rendered and resolved for a reader.
 package deploy_test
 
 import (
@@ -46,8 +45,7 @@ type composeService struct {
 	} `json:"configs"`
 }
 
-// render runs hack/render-compose.sh in a scratch directory holding a copy of the template,
-// so the test neither reads nor writes the checkout's .render/.
+// render runs hack/render-compose.sh on a copy of the template, away from the checkout.
 func render(t *testing.T) string {
 	t.Helper()
 	script, err := filepath.Abs(filepath.Join("..", "hack", "render-compose.sh"))
@@ -75,8 +73,7 @@ func render(t *testing.T) string {
 	return filepath.Join(work, ".render", "docker-compose.yaml")
 }
 
-// resolve checks the rendered file with `config --quiet`, as CI's reader would meet it, and
-// returns the project docker compose resolves from it.
+// resolve checks the rendered file with config --quiet and returns the resolved project.
 func resolve(t *testing.T, file string, profiles ...string) composeProject {
 	t.Helper()
 	args := []string{"compose", "-f", file}
@@ -100,8 +97,7 @@ func resolve(t *testing.T, file string, profiles ...string) composeProject {
 	return project
 }
 
-// mounted returns the content a service's container sees at target. `config` prints inline
-// content with its `$$` escapes intact; the container receives each as a single `$`.
+// mounted returns a service's content at target, with config's $$ escapes turned into $.
 func mounted(t *testing.T, p composeProject, service, target string) string {
 	t.Helper()
 	for _, c := range p.Services[service].Configs {
@@ -160,8 +156,7 @@ func TestWithoutProfileFiveServicesRunWithMetricsOffTheHost(t *testing.T) {
 	}
 }
 
-// The asset is a trial stack on one machine, and its dev keys are public, so the APIs
-// answer only on the host's loopback.
+// The asset is a single-machine trial stack with public dev keys.
 func TestDaemonsPublishTheirAPIsOnLoopbackOnly(t *testing.T) {
 	clearComposeEnv(t)
 	p := resolve(t, render(t))
@@ -197,8 +192,7 @@ func TestGrafanaProfileAddsPrometheusAndGrafanaOnLoopback(t *testing.T) {
 	}
 }
 
-// The asset's third-party pins are exact versions written in the template, not ${VAR:-…}
-// defaults: the tutorial tests the file a reader downloads.
+// The tutorial tests the file a reader downloads, so pins are literals, not ${VAR:-…}.
 func TestGrafanaProfilePinsAreLiterals(t *testing.T) {
 	template, err := os.ReadFile("docker-compose.yaml")
 	if err != nil {
@@ -329,8 +323,7 @@ func TestGrafanaHoropterDatasource(t *testing.T) {
 	}
 }
 
-// One variable sets the reader key both bootstrap issues and Grafana sends, so overriding
-// it cannot leave the datasource holding a key egress no longer accepts.
+// One variable sets the reader key both bootstrap issues and Grafana sends.
 func TestReaderKeyOverrideReachesBootstrapAndGrafana(t *testing.T) {
 	clearComposeEnv(t)
 	const key = "horo_beef00000002_" +
@@ -479,8 +472,7 @@ func TestDaemonImagesCarryTheRenderedTag(t *testing.T) {
 	}
 }
 
-// The repository's development stack publishes Postgres with a known password and runs on
-// public dev keys, so nothing it publishes answers beyond the host's loopback.
+// The dev stack publishes Postgres with a known password and runs on public dev keys.
 func TestDevStackPublishesOnLoopbackOnly(t *testing.T) {
 	clearComposeEnv(t)
 	p := resolve(t, filepath.Join("..", "docker-compose.yaml"), "*")

@@ -1,5 +1,4 @@
-// Package buildinfo reports the release a binary was built from and how it was built, and
-// answers every binary's --version and --build-info flags.
+// Package buildinfo reports how a binary was built and answers --version and --build-info.
 package buildinfo
 
 import (
@@ -20,16 +19,13 @@ const (
 	exitUsage = 2
 )
 
-// version is the release GoReleaser stamps, without the tag's v, with
-// -ldflags "-X horopter.dev/horopter/internal/buildinfo.version=…".
+// version is the release GoReleaser stamps via -ldflags, without the tag's v.
 var version string
 
 // readBuildInfo is a seam for tests.
 var readBuildInfo = debug.ReadBuildInfo
 
-// Version is the stamped release, such as 0.9.0. Unstamped, it is the module version the
-// build recorded, without its v: the tag's for `go install …@vX.Y.Z`, a pseudo-version or
-// "(devel)" for a local build, and "unknown" when the binary carries no build info.
+// Version is the stamped release, else the module version without its v, or "unknown".
 func Version() string {
 	if version != "" {
 		return version
@@ -48,9 +44,7 @@ func display(v string) string {
 	return v
 }
 
-// Handle answers --version or --build-info when args, a binary's arguments without its own
-// name, begin with one, so a binary calls it before any parsing of its own. handled reports
-// whether it did; code is then the exit status, after the answer or a usage error is written.
+// Handle answers --version or --build-info at the start of args; code is the exit status.
 func Handle(name string, args []string, stdout, stderr io.Writer) (code int, handled bool) {
 	if len(args) == 0 || !isInfoFlag(args[0]) {
 		return exitOK, false
@@ -161,8 +155,7 @@ func (r versionReport) writeText(w io.Writer) error {
 	return err
 }
 
-// buildReport is what --build-info reports. The commit fields are null when the binary was
-// built outside a checkout; the commit time is the commit's, not the build's.
+// buildReport is what --build-info reports; the commit time is the commit's, not the build's.
 type buildReport struct {
 	Name       string  `json:"name"`
 	Version    string  `json:"version"`

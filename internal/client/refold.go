@@ -14,9 +14,7 @@ type Refolded struct {
 	Altered []string `json:"altered"`
 }
 
-// Refold re-folds one change from its log. ref is the stored <locus>/<ref> form; tenant is
-// for a global key, and is sent only when set. A re-fold is idempotent, so it retries as Post
-// does, until retryUntil.
+// Refold re-folds the stored <locus>/<ref> change from its log, retrying as Post does.
 func (c *Client) Refold(
 	ctx context.Context, ref, tenant string, retryUntil time.Time,
 ) (Refolded, error) {

@@ -140,8 +140,6 @@ func TestBuildInfoAsJSON(t *testing.T) {
 	}, got)
 }
 
-// TestBuildInfoWithoutVCSOmitsWhatItCannotKnow: a build outside a checkout records no vcs.*
-// settings, so text output leaves those lines out and JSON reports them as null.
 func TestBuildInfoWithoutVCSOmitsWhatItCannotKnow(t *testing.T) {
 	stamp(t, "0.9.0", nil)
 	_, _, out, _ := handle("--build-info")

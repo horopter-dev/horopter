@@ -12,8 +12,7 @@ import (
 	"time"
 )
 
-// attemptTimeout caps one request, so a server that never answers costs at most this much of
-// the caller's deadline before the next attempt. A variable so a test can shorten it.
+// attemptTimeout caps one request; a variable so a test can shorten it.
 var attemptTimeout = 5 * time.Second
 
 // NewEvent is one event to append. It never carries a source: ingress takes that from the key.
@@ -31,8 +30,7 @@ type Appended struct {
 	Created        bool   `json:"created"`
 }
 
-// Post appends ev, retrying network errors and 503 with backoff until retryUntil. retryUntil
-// bounds the whole call, every attempt included.
+// Post appends ev, retrying network errors and 503 with backoff until retryUntil.
 func (c *Client) Post(ctx context.Context, ev NewEvent, retryUntil time.Time) (Appended, error) {
 	body, err := json.Marshal(eventBody(ev))
 	if err != nil {
@@ -43,9 +41,7 @@ func (c *Client) Post(ctx context.Context, ev NewEvent, retryUntil time.Time) (A
 	return got, err
 }
 
-// postRetrying posts body to path, retrying network errors and 503 with backoff until
-// retryUntil, and decodes a 200 or 201 answer into out. retryUntil bounds the whole call,
-// every attempt included.
+// postRetrying posts body to path as Post does and decodes a 200 or 201 answer into out.
 func (c *Client) postRetrying(
 	ctx context.Context, path string, body []byte, out any, retryUntil time.Time,
 ) error {
@@ -128,9 +124,7 @@ func retryable(err error) bool {
 	return true
 }
 
-// Refused reports an answer that proves a post was not stored, whatever an earlier attempt did:
-// ingress refusing it, since a stored post is replayed rather than refused. Only the statuses
-// ingress refuses with count; any other 4xx, a 408 or 429 say, comes from a hop in front of it.
+// Refused reports an answer proving a post was not stored: ingress replays a stored post.
 func Refused(err error) bool {
 	var he *HTTPError
 	if !errors.As(err, &he) {

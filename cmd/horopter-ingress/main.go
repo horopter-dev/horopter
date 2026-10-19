@@ -102,12 +102,9 @@ func run() error {
 		return err
 	}
 
-	// DefaultOptions, never a zero Options: an uncached authenticator queries the
-	// database on every request, ahead of anything that could shed it.
+	// DefaultOptions, never a zero Options: an uncached authenticator queries the database.
 	authn := auth.New(auth.NewStore(store.Pool()), time.Now, auth.DefaultOptions())
 
-	// ingress.New rejects a nil authenticator, so this is checked exactly once, in the
-	// constructor, rather than here as well: two guards on one fact drift.
 	api, err := ingress.New(store, time.Now, rand.Reader, authn,
 		ingress.WithAllowLocusPrefixedRef(cfg.allowLocusPrefixedRef))
 	if err != nil {
@@ -117,29 +114,19 @@ func run() error {
 	return serve(ctx, &http.Server{
 		Addr:    cfg.addr,
 		Handler: api.Routes(),
-		// auth.MaxHeaderBytes bounds the request line plus headers, Authorization
-		// included — see its own doc comment for why Go's 1 MiB default is worth
-		// tightening, and why one constant serves both daemons.
+
 		MaxHeaderBytes: auth.MaxHeaderBytes,
-		// ReadHeaderTimeout bounds a slowloris header dribble. ReadTimeout bounds the
-		// whole request including the body, so a client sending one byte a minute cannot
-		// hold a connection open indefinitely; 15s is far longer than a few-kilobyte
-		// event needs over any real network.
+
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		// WriteTimeout bounds handler time plus the response write. An append is one
-		// short transaction, and the longest a handler can legitimately block is
-		// postgres.AppendLockTimeout waiting behind a rebuild, so this must comfortably
-		// exceed that or a retryable 503 would be replaced by a dropped connection.
+		// Must exceed postgres.AppendLockTimeout, or a retryable 503 becomes a dropped connection.
 		WriteTimeout: 30 * time.Second,
-		// IdleTimeout bounds a kept-alive connection between requests, so idle clients
-		// cannot accumulate file descriptors.
+
 		IdleTimeout: 120 * time.Second,
 	})
 }
 
-// serve runs srv until ctx is cancelled or it fails, then drains in-flight requests
-// rather than cutting them mid-write on every rollout.
+// serve runs srv until ctx is cancelled or it fails, then drains in-flight requests.
 func serve(ctx context.Context, srv *http.Server) error {
 	errCh := make(chan error, 1)
 	go func() {

@@ -9,14 +9,10 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
-// ErrExceedsCapacity reports a reservation larger than the whole pool, which no amount of
-// waiting could satisfy.
+// ErrExceedsCapacity reports a reservation larger than the whole pool.
 var ErrExceedsCapacity = errors.New("reservation exceeds the pool's capacity")
 
-// BytePool is a fixed number of bytes that reads reserve from while they run.
-//
-// It is built on semaphore.Weighted, which serves waiters in the order they arrived, so a
-// stream of small reservations cannot starve a large one.
+// BytePool is a fixed number of bytes reads reserve from, serving waiters in arrival order.
 type BytePool struct {
 	capacity int64
 	sem      *semaphore.Weighted
@@ -29,9 +25,7 @@ func NewBytePool(capacity int64) *BytePool {
 	return &BytePool{capacity: capacity, sem: semaphore.NewWeighted(capacity)}
 }
 
-// Reserve takes n bytes, waiting until they are free or ctx ends. A reservation larger than
-// the pool fails at once with ErrExceedsCapacity: semaphore.Weighted would otherwise wait for
-// ctx to end, so a read that can never fit would look like one refused for being busy.
+// Reserve takes n bytes, waiting until free or ctx ends; more than the capacity fails at once.
 func (p *BytePool) Reserve(ctx context.Context, n int64) error {
 	if n > p.capacity {
 		return fmt.Errorf("%w: %d bytes requested of %d", ErrExceedsCapacity, n, p.capacity)

@@ -1,6 +1,4 @@
-// Package separation holds no code: its tests keep this repository from citing the private
-// repository its specs and decisions live in, whose documents a reader of the public code
-// cannot reach.
+// Package separation holds no code: its tests keep this repository from citing the private one.
 package separation
 
 import (
@@ -18,16 +16,13 @@ import (
 // privateRepository is assembled so that this file does not cite it.
 const privateRepository = "horopter" + "-internal"
 
-// exempt are the files allowed to name the private repository: the agent files, which point
-// at its sibling checkout.
+// exempt are the agent files, which point at the private repository's sibling checkout.
 var exempt = []string{
 	"CLAUDE.md",
 	"docs/agents/",
 }
 
-// citations returns every line of a file tracked in the repository at dir that names the
-// private repository, as git grep prints it, except in the exempt files. It reads the
-// working tree, so a citation not yet staged still counts.
+// citations git-greps the working tree at dir for the private repository, outside exempt.
 func citations(dir string) ([]string, error) {
 	args := []string{"grep", "--line-number", "-I", "--fixed-strings", privateRepository, "--"}
 	for _, path := range exempt {
@@ -44,8 +39,7 @@ func citations(dir string) ([]string, error) {
 	return strings.Split(strings.TrimRight(string(out), "\n"), "\n"), nil
 }
 
-// git runs git in dir without the GIT_* variables a hook inherits: under git commit,
-// GIT_INDEX_FILE names the outer repository's index, and -C does not override it.
+// git drops inherited GIT_* variables: under a hook, GIT_INDEX_FILE overrides -C.
 func git(dir string, args ...string) *exec.Cmd {
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...) //nolint:gosec // G204: git.
 	for _, kv := range os.Environ() {

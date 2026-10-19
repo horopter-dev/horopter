@@ -81,9 +81,7 @@ func TestPostStopsRetryingAtItsDeadline(t *testing.T) {
 	assert.Less(t, time.Since(start), 2*time.Second)
 }
 
-// TestPostIsBoundedAgainstAServerThatNeverAnswers: the deadline bounds every attempt, so a
-// Horopter that accepts a connection and never answers cannot hold the caller for the HTTP
-// client's own timeout.
+// A Horopter that never answers must not hold the caller for the HTTP client's timeout.
 func TestPostIsBoundedAgainstAServerThatNeverAnswers(t *testing.T) {
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
@@ -109,8 +107,7 @@ func TestPostNeverSendsSource(t *testing.T) {
 	assert.Equal(t, "2026-10-05T09:00:00Z", (*bodies)[0]["occurred_at"])
 }
 
-// TestPostDoesNotRetryA500: only a 503 means "retry later". A 500 retried for the whole window
-// holds a deploy for 30 seconds before reporting an error it already had.
+// Retrying a 500 for the whole window only delays an error the caller already has.
 func TestPostDoesNotRetryA500(t *testing.T) {
 	srv, bodies := ingress(t, http.StatusInternalServerError)
 	c, err := client.New(srv.URL, "k")
@@ -122,9 +119,7 @@ func TestPostDoesNotRetryA500(t *testing.T) {
 	assert.Len(t, *bodies, 1)
 }
 
-// TestPostRetriesARefusedConnection: during an ingress restart the port refuses connections
-// for a moment. That is the case retries exist for; giving up at once loses horo run's start
-// or end although the window had time left.
+// An ingress restart refuses connections for a moment: the case retries exist for.
 func TestPostRetriesARefusedConnection(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -151,8 +146,6 @@ func TestPostRetriesARefusedConnection(t *testing.T) {
 	assert.True(t, got.Created)
 }
 
-// TestPostRetriesAfterAHungAttempt: each attempt has its own timeout, so one hung attempt
-// costs that much of the window, not all of it.
 func TestPostRetriesAfterAHungAttempt(t *testing.T) {
 	client.SetAttemptTimeout(t, 200*time.Millisecond)
 	var calls atomic.Int32
@@ -173,9 +166,7 @@ func TestPostRetriesAfterAHungAttempt(t *testing.T) {
 	assert.EqualValues(t, 2, calls.Load())
 }
 
-// TestRefusedIsAnAnswerThatProvesNothingWasStored: a stored post is replayed rather than
-// refused, so ingress refusing it proves it was not stored. Any other 4xx comes from a hop in
-// front of ingress, and says nothing about an earlier attempt.
+// A stored post is replayed rather than refused; any other 4xx comes from a hop in front.
 func TestRefusedIsAnAnswerThatProvesNothingWasStored(t *testing.T) {
 	for status, refused := range map[int]bool{
 		http.StatusBadRequest: true, http.StatusUnauthorized: true, http.StatusForbidden: true,

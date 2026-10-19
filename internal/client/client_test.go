@@ -167,9 +167,7 @@ func TestNewRefusesAnEmptyURLOrKey(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestAChangeRepeatedAcrossPagesIsYieldedOnce: a change's start can move later while a caller
-// pages (a started event arriving after an annotation), carrying it past the cursor and onto a
-// later page too. The client yields each ref once.
+// A started event arriving after an annotation moves a change's start onto a later page.
 func TestAChangeRepeatedAcrossPagesIsYieldedOnce(t *testing.T) {
 	srv, _ := pages(t, []string{"a", "b"}, []string{"b", "c"})
 	c, err := client.New(srv.URL, "k")
@@ -179,8 +177,6 @@ func TestAChangeRepeatedAcrossPagesIsYieldedOnce(t *testing.T) {
 	assert.Equal(t, []string{"a", "b", "c"}, got)
 }
 
-// TestAnErrorMidSequenceEndsTheIterationWithIt: rows already read are yielded, then the error,
-// then nothing.
 func TestAnErrorMidSequenceEndsTheIterationWithIt(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("cursor") == "" {
@@ -212,10 +208,7 @@ func TestAnErrorMidSequenceEndsTheIterationWithIt(t *testing.T) {
 	assert.Equal(t, 2, calls, "the error ends the iteration")
 }
 
-// TestChangesSendsEveryFilterAsEgressExpects pins the query the client sends. Every fake in
-// this file ignores the query string, so a filter sent under the wrong name — an attribute
-// without its "attr." prefix — was silently dropped by egress and unfiltered rows came back,
-// with no test to notice.
+// The fakes ignore the query string, so a misnamed filter was once dropped unnoticed.
 func TestChangesSendsEveryFilterAsEgressExpects(t *testing.T) {
 	var got url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -240,9 +233,7 @@ func TestChangesSendsEveryFilterAsEgressExpects(t *testing.T) {
 	}, got)
 }
 
-// TestAReadAgainstASilentEgressEnds: a server that accepts the connection and never answers
-// must not hold a read for ever — in CI, a hung horo changes holds the job until its own
-// timeout.
+// A hung horo changes in CI holds the job until the job's own timeout.
 func TestAReadAgainstASilentEgressEnds(t *testing.T) {
 	client.SetHTTPTimeout(t, 200*time.Millisecond)
 	release := make(chan struct{})
