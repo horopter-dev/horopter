@@ -14,8 +14,7 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// TestEveryBinaryAnswers builds each command under cmd/, so a binary added later without
-// buildinfo.Handle fails here rather than on someone's laptop.
+// A binary added without buildinfo.Handle fails here rather than on someone's laptop.
 func TestEveryBinaryAnswers(t *testing.T) {
 	cmds, err := os.ReadDir(filepath.Join("..", "..", "cmd"))
 	require.NoError(t, err)
@@ -39,8 +38,7 @@ func TestEveryBinaryAnswers(t *testing.T) {
 	}
 }
 
-// answer runs a freshly built binary with no environment, so a daemon that read its
-// configuration before answering would fail rather than pass on the developer's shell.
+// answer runs a built binary with no environment, so the developer's shell cannot satisfy it.
 func answer(t *testing.T, path string, args ...string) string {
 	t.Helper()
 	//nolint:gosec // G204: path is a binary this test just built.
@@ -52,8 +50,7 @@ func answer(t *testing.T, path string, args ...string) string {
 	return out.String()
 }
 
-// TestEveryBinaryIsStamped: a GoReleaser build without the version ldflags ships a binary
-// that reports a pseudo-version, which no test of a locally built binary can see.
+// A GoReleaser build without the version ldflags reports a pseudo-version.
 func TestEveryBinaryIsStamped(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", ".goreleaser.yaml"))
 	require.NoError(t, err)
