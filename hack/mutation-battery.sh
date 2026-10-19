@@ -1,15 +1,5 @@
 #!/usr/bin/env bash
-# Applies each mutation in a directory of patches, runs the mutated package's tests, reports
-# which tests caught it, and reverts it. See reviews/2026-10-05-mutation-battery.md.
-#
-# A patch names its package and the tests expected to catch it in header lines git apply
-# ignores:
-#
-#   # package: ./internal/egress/        (several, space-separated, are allowed)
-#   # expect: TestEpochBoundsAreInclusive
-#
-# A patch that no longer applies is BROKEN rather than silently re-aimed: the code it mutates
-# has moved, and the mutation must be re-derived against what is there now.
+# Patch headers git apply ignores: "# package: <pkg>..." and "# expect: <test>...".
 set -euo pipefail
 
 usage() {
