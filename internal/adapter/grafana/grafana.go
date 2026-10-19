@@ -1,7 +1,4 @@
-// Package grafana renders changes as Grafana JSON-datasource annotations.
-//
-// Grafana wants epoch milliseconds and a flat []string of tags. Datadog wants
-// epoch seconds. Neither is neutral, which is why the conversion lives here.
+// Package grafana renders changes as Grafana JSON-datasource annotations, in epoch milliseconds.
 package grafana
 
 import (
@@ -34,12 +31,7 @@ func New() *Renderer { return &Renderer{} }
 func (r *Renderer) Render(changes []core.Change, now time.Time) (any, error) {
 	out := make([]Annotation, 0, len(changes))
 	for _, c := range changes {
-		// An open change renders as a region growing to the present; anything else
-		// renders to the end it recorded. A change takes one of three shapes — point,
-		// open, or closed — and core.Change.IsOpen is the domain's name for the
-		// distinction, so the adapter asks the change which shape it is rather than
-		// re-deriving it from a nil check the concept has a word for.
-		// IsOpen() is false exactly when End is non-nil, so the dereference is safe.
+		// IsOpen() is false exactly when End is non-nil.
 		end := now
 		if !c.IsOpen() {
 			end = *c.End
@@ -55,14 +47,7 @@ func (r *Renderer) Render(changes []core.Change, now time.Time) (any, error) {
 	return out, nil
 }
 
-// tagsFor flattens structured attributes into Grafana's flat tag list. Sorted so
-// that output is deterministic: Go map iteration order is not.
-// The computed tags OVERLAY a producer's attributes of the same name rather than being
-// appended beside them. Grafana tags are a flat list, so an attribute literally named
-// "status" used to render a second "status:" tag next to the change's own, with nothing
-// marking which one is authoritative. Nothing restricts attribute keys, so that is
-// reachable from either ingest path. otlp.mergedAttributes overlays its computed keys
-// for the same reason, and textFor was fixed for the same collision on "description".
+// tagsFor overlays status and subject: an attribute named "status" once rendered a second tag.
 func tagsFor(c core.Change) []string {
 	merged := make(map[string]any, len(c.Attributes)+2)
 	for k, v := range c.Attributes {
@@ -82,22 +67,7 @@ func tagsFor(c core.Change) []string {
 	return tags
 }
 
-// textFor returns the annotation body text.
-//
-// horopter.description is a Horopter extension, not an OTel semantic
-// convention — no OTel convention names an annotation-body concept. It is
-// namespaced under "horopter." the same way otlp.mergedAttributes sets
-// horopter.subject, horopter.ref and horopter.status (internal/adapter/otlp),
-// which is what keeps a project-specific extension point consistent with
-// "attribute keys follow OTel semantic conventions rather than an invented
-// vocabulary": the vocabulary itself stays OTel-only, and this is a clearly
-// namespaced addition layered on it, not a second invented vocabulary
-// competing with it.
-//
-// Reading a bare, unnamespaced "description" previously captured whatever
-// attribute a producer happened to give that name into the annotation body as
-// a side effect nobody asked for. A producer that wants annotation body text
-// now sets horopter.description explicitly.
+// textFor reads horopter.description only: a bare "description" once leaked into the body.
 func textFor(c core.Change) string {
 	if v, ok := c.Attributes["horopter.description"]; ok {
 		return fmt.Sprintf("%v", v)

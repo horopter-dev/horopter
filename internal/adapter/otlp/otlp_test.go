@@ -18,8 +18,6 @@ var (
 	now   = time.Date(2026, 9, 14, 10, 30, 0, 0, time.UTC)
 )
 
-// spansOf reaches through the OTLP envelope to the one ResourceSpans and
-// ScopeSpans every Render call produces, and returns its spans.
 func spansOf(t *testing.T, out any) []otlp.Span {
 	t.Helper()
 	req, ok := out.(otlp.ExportRequest)
@@ -44,10 +42,7 @@ func TestRenderUsesNanosecondsNotMilliseconds(t *testing.T) {
 	assert.Equal(t, strconv.FormatInt(end.UnixNano(), 10), span.EndTimeUnixNano)
 }
 
-// TestRenderMapsAttributesToTypedAnyValue pins that each Go attribute type maps
-// onto the specific AnyValue union member OTLP defines for it, not a flattened
-// string: a string-only fixture can't distinguish "kept typed" from "flattened
-// to a string", since flattening a string is the identity operation.
+// A string-only fixture cannot tell typed from flattened: flattening a string is the identity.
 func TestRenderMapsAttributesToTypedAnyValue(t *testing.T) {
 	end := start.Add(time.Minute)
 	out, err := otlp.New().Render([]core.Change{{
@@ -84,9 +79,6 @@ func TestRenderMapsAttributesToTypedAnyValue(t *testing.T) {
 	assert.Equal(t, "us-east-1", *nested[0].Value.StringValue)
 }
 
-// TestRenderFallsBackToStringForUnmappedAttributeTypes pins the documented
-// fallback for a Go value with no clean AnyValue counterpart (see AnyValue's
-// doc comment): its fmt "%v" string form, not a render failure.
 func TestRenderFallsBackToStringForUnmappedAttributeTypes(t *testing.T) {
 	type custom struct{ N int }
 	end := start.Add(time.Minute)
@@ -101,9 +93,6 @@ func TestRenderFallsBackToStringForUnmappedAttributeTypes(t *testing.T) {
 	assert.Equal(t, "{7}", *byKey["exotic"].StringValue)
 }
 
-// TestRenderMapsNilAttributeToEmptyAnyValue pins the other half of the
-// fallback rule: a Go nil is OTLP's own "no value" case, not the misleading
-// string "<nil>".
 func TestRenderMapsNilAttributeToEmptyAnyValue(t *testing.T) {
 	end := start.Add(time.Minute)
 	out, err := otlp.New().Render([]core.Change{{
@@ -162,8 +151,6 @@ func TestRenderOpenChangeEndsAtNow(t *testing.T) {
 	assert.Equal(t, strconv.FormatInt(now.UnixNano(), 10), spansOf(t, out)[0].EndTimeUnixNano)
 }
 
-// Re-exporting the same change must yield the same span and trace ids rather
-// than duplicates, so that OTel backends can deduplicate correctly.
 func TestRenderIDsAreStableAcrossReRender(t *testing.T) {
 	end := start.Add(time.Minute)
 	change := core.Change{
@@ -181,9 +168,7 @@ func TestRenderIDsAreStableAcrossReRender(t *testing.T) {
 	assert.Equal(t, span1.SpanID, span2.SpanID, "re-exporting must not duplicate span ids")
 }
 
-// TestRenderIDsDependOnTenant pins that two changes differing only by
-// tenant must produce different span ids AND different trace ids. Before the
-// fix, SpanID derived from ref alone, so two tenants sharing a ref collided.
+// SpanID once derived from the ref alone, so two tenants sharing a ref collided.
 func TestRenderIDsDependOnTenant(t *testing.T) {
 	end := start.Add(time.Minute)
 	a, err := otlp.New().Render([]core.Change{{
@@ -205,10 +190,6 @@ func TestRenderIDsDependOnTenant(t *testing.T) {
 		"two tenants sharing a ref must not collide on span id")
 }
 
-// TestRenderSpanIDIsNotATraceIDPrefix guards the domain-separation half of that:
-// trace id and span id must be independent derivations, not the same hash
-// truncated at two lengths, or the 8-byte span id would always be a prefix of
-// the 16-byte trace id — an accidental correlation nobody asked for.
 func TestRenderSpanIDIsNotATraceIDPrefix(t *testing.T) {
 	end := start.Add(time.Minute)
 	out, err := otlp.New().Render([]core.Change{{
@@ -222,10 +203,7 @@ func TestRenderSpanIDIsNotATraceIDPrefix(t *testing.T) {
 		"trace id and span id must be domain-separated, independent derivations")
 }
 
-// TestRenderGoldenOTLPJSON asserts the exact marshalled JSON
-// shape — nesting, lowerCamelCase field names, and specifically that the
-// nanosecond fields serialise as strings — rather than asserting against the
-// Go struct, which cannot catch a missing or wrong json tag.
+// Asserting on the marshalled JSON, not the Go struct, catches a missing or wrong json tag.
 func TestRenderGoldenOTLPJSON(t *testing.T) {
 	end := start.Add(20 * time.Minute)
 	out, err := otlp.New().Render([]core.Change{{
@@ -293,9 +271,7 @@ func decodedSpan(t *testing.T, decoded map[string]any) map[string]any {
 	return span
 }
 
-// Render(nil, now) must still emit a well-formed envelope whose spans array is
-// [], never null: a real OTLP collector's JSON receiver expects the envelope
-// shape unconditionally, and a bare null spans list can break one.
+// A collector's JSON receiver expects the envelope unconditionally; a null spans list can break it.
 func TestRenderNilChangesSpansArrayIsEmptyNotNull(t *testing.T) {
 	out, err := otlp.New().Render(nil, now)
 	require.NoError(t, err)
@@ -312,8 +288,6 @@ func TestRenderNilChangesSpansArrayIsEmptyNotNull(t *testing.T) {
 	}`, string(b))
 }
 
-// mustLocus builds a Locus from a name the caller asserts is well-formed, so a fixture
-// that stops being one fails where it is written rather than three assertions later.
 func mustLocus(t *testing.T, v string) core.Locus {
 	t.Helper()
 	l, err := core.NewLocus(v)
@@ -321,16 +295,7 @@ func mustLocus(t *testing.T, v string) core.Locus {
 	return l
 }
 
-// The trace and span ids derive from the ref's STORED string form. Deriving from anything
-// else — the producer half, or a rendering with different separators — makes every
-// re-export a new span instead of the same one, which is the property derive() exists for.
-//
-// The second half is what gives the test teeth. Comparing a NewRef-built ref against a
-// RefFromRow-built one only pins that the two constructors agree, which they cannot help
-// doing; a render that hashed c.Ref.ProducerRef() instead would pass it unchanged. Two
-// refs sharing a producer half under DIFFERENT loci is the pair that separates the two
-// derivations: identical under ProducerRef, distinct under the stored form. Without it a
-// whole locus's changes would collide with another's on both ids.
+// Only the second half would catch hashing c.Ref.ProducerRef(): the constructors always agree.
 func TestSpanIDsDeriveFromTheStoredRefForm(t *testing.T) {
 	ref, err := core.NewRef(mustLocus(t, "ci"), "dep-7")
 	require.NoError(t, err)

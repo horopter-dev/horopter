@@ -54,8 +54,6 @@ func TestRenderPointHasEqualTimes(t *testing.T) {
 	assert.Equal(t, anns[0].Time, anns[0].TimeEnd, "a point must not render as a region")
 }
 
-// Golden test: the exact bytes Grafana receives. If this changes, a vendor
-// concept has moved.
 func TestRenderGoldenJSON(t *testing.T) {
 	end := start.Add(20 * time.Minute)
 	out, err := grafana.New().Render([]core.Change{{
@@ -84,11 +82,6 @@ func TestRenderGoldenJSON(t *testing.T) {
 	}]`, string(b))
 }
 
-// TestTextForReadsNamespacedDescriptionOnly pins that
-// horopter.description populates the annotation body, and that an
-// unnamespaced "description" attribute — an invented key the OTel semantic
-// conventions do not define — no longer does, even when
-// both are present on the same change.
 func TestTextForReadsNamespacedDescriptionOnly(t *testing.T) {
 	out, err := grafana.New().Render([]core.Change{{
 		Ref: core.RefFromRow("dep-11"), Start: start, End: &start, Status: core.StatusOccurred,
@@ -103,9 +96,6 @@ func TestTextForReadsNamespacedDescriptionOnly(t *testing.T) {
 	assert.Equal(t, "namespaced, must populate the annotation", anns[0].Text)
 }
 
-// TestTextForIsEmptyWithoutNamespacedDescription is the other half of the
-// same guard: a bare "description" attribute, with no namespaced sibling,
-// must render an empty annotation body rather than leaking into it.
 func TestTextForIsEmptyWithoutNamespacedDescription(t *testing.T) {
 	out, err := grafana.New().Render([]core.Change{{
 		Ref: core.RefFromRow("dep-12"), Start: start, End: &start, Status: core.StatusOccurred,
@@ -117,8 +107,7 @@ func TestTextForIsEmptyWithoutNamespacedDescription(t *testing.T) {
 	assert.Empty(t, anns[0].Text)
 }
 
-// Render(nil, now) must marshal to a JSON array, never null: Grafana's
-// JSON-datasource contract expects an array, and a bare null can break panels.
+// Grafana's JSON datasource expects an array; a bare null can break panels.
 func TestRenderNilChangesMarshalsToEmptyArray(t *testing.T) {
 	out, err := grafana.New().Render(nil, now)
 	require.NoError(t, err)
@@ -128,10 +117,6 @@ func TestRenderNilChangesMarshalsToEmptyArray(t *testing.T) {
 	assert.JSONEq(t, `[]`, string(b))
 }
 
-// A producer attribute named "status" or "subject" must not produce a second tag under
-// the same prefix: Grafana tags are a flat list, so a reader given both has no way to
-// tell which is the change's own status. The change's value wins, matching how the OTLP
-// adapter overlays its computed keys.
 func TestTagsForOverlaysComputedTagsOverCollidingAttributes(t *testing.T) {
 	out, err := grafana.New().Render([]core.Change{{
 		Tenant: "acme", Ref: core.RefFromRow("dep-12"), Start: start, End: &start,
