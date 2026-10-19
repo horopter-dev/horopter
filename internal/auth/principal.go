@@ -20,8 +20,7 @@ const (
 	CapIssue  Capability = "issue"
 )
 
-// Credential is a credential row with its role's capabilities resolved. It is what the
-// cache holds, so it carries the stored hash and never a presented secret.
+// Credential is a cached credential row with its role's capabilities, never a presented secret.
 type Credential struct {
 	ID, PrincipalID string
 	Type            string
@@ -36,8 +35,7 @@ type Credential struct {
 	ExpiresAt       *time.Time
 }
 
-// Principal is the authenticated identity a handler reads its tenant and scope from,
-// rather than parsing either out of the request.
+// Principal is the authenticated identity a handler reads its tenant and scope from.
 type Principal struct {
 	CredentialID, PrincipalID string
 	Tenant                    core.TenantID
@@ -47,8 +45,7 @@ type Principal struct {
 	Source                    string
 	Locus                     string
 	SubjectPattern            string
-	// KeyPrefix is the public half of the key the request presented, set by resolve. It
-	// is what a log line names the credential by: horoctl prints it too.
+	// KeyPrefix is the presented key's public half, which logs and horoctl name it by.
 	KeyPrefix string
 }
 
@@ -73,8 +70,7 @@ func (c Credential) validAt(now time.Time) error {
 	return nil
 }
 
-// principal derives the identity c authorizes, refusing the credentials the database can
-// hold but this model has no coherent reading for.
+// principal refuses credentials the database can hold but this model cannot read.
 func (c Credential) principal() (Principal, error) {
 	origin, err := core.OriginForCredentialType(c.Type)
 	if err != nil {
@@ -98,8 +94,7 @@ func withPrincipal(ctx context.Context, p Principal) context.Context {
 	return context.WithValue(ctx, principalKey{}, p)
 }
 
-// PrincipalFrom returns the principal Require resolved, reporting false for a request
-// that did not pass through it.
+// PrincipalFrom returns the principal Require resolved, or false outside Require.
 func PrincipalFrom(ctx context.Context) (Principal, bool) {
 	p, ok := ctx.Value(principalKey{}).(Principal)
 	return p, ok

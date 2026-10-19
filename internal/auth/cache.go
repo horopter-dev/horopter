@@ -5,22 +5,16 @@ import (
 	"time"
 )
 
-// maxCacheEntries bounds one generation of the credential cache. A flood of distinct
-// unknown prefixes writes a negative entry each, so without a bound the cache that
-// exists to absorb such a flood becomes the memory it exhausts instead.
+// A flood of unknown prefixes writes an entry each, so an unbounded cache exhausts memory.
 const maxCacheEntries = 8192
 
-// entry is one lookup outcome. found distinguishes a cached credential from a cached
-// absence, which is the whole point of caching a miss.
 type entry struct {
 	cred    Credential
 	found   bool
 	expires time.Time
 }
 
-// cache holds lookup outcomes by key prefix. It keeps two generations rather than
-// sweeping expired entries: a full generation is retired whole and dropped on the next
-// rotation, which bounds memory without an O(n) pass on the request path.
+// Two generations rather than a sweep: bounded memory without an O(n) pass per request.
 type cache struct {
 	mu             sync.RWMutex
 	live, previous map[string]entry
@@ -37,7 +31,6 @@ func newCache(positiveTTL, negativeTTL time.Duration) *cache {
 	}
 }
 
-// get returns the outcome cached for prefix, if one is present and still live at now.
 func (c *cache) get(prefix string, now time.Time) (entry, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -51,8 +44,6 @@ func (c *cache) get(prefix string, now time.Time) (entry, bool) {
 	return e, true
 }
 
-// put caches e under prefix for the TTL its outcome carries; a TTL of zero caches
-// nothing, which is how the cache is turned off.
 func (c *cache) put(prefix string, e entry, now time.Time) {
 	ttl := c.negativeTTL
 	if e.found {

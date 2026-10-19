@@ -8,8 +8,6 @@ import (
 	"horopter.dev/horopter/internal/auth"
 )
 
-// TestTheNullableTenantIsMappedStructurally pins how credential.tenant_id is read: NULL
-// is the global credential, and nothing else may become one by accident.
 func TestTheNullableTenantIsMappedStructurally(t *testing.T) {
 	t.Run("null is global", func(t *testing.T) {
 		got, err := auth.TenantFrom(nil)
