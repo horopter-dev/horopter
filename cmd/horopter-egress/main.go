@@ -70,12 +70,9 @@ func run() error {
 	}
 	defer store.Close()
 
-	// DefaultOptions, never a zero Options: an uncached authenticator queries the database
-	// on every request, ahead of anything that could shed it.
+	// DefaultOptions, never a zero Options: an uncached authenticator queries the database.
 	authn := auth.New(auth.NewStore(store.Pool()), time.Now, auth.DefaultOptions())
 
-	// egress.New rejects a nil authenticator, so this is checked exactly once, in the
-	// constructor, rather than here as well: two guards on one fact drift.
 	api, err := egress.New(store, time.Now, limits, authn)
 	if err != nil {
 		return err
@@ -84,17 +81,9 @@ func run() error {
 	srv := &http.Server{
 		Addr:    *addr,
 		Handler: api.Routes(),
-		// auth.MaxHeaderBytes bounds the request line plus headers, Authorization
-		// included — see its own doc comment for why Go's 1 MiB default is worth
-		// tightening, and why one constant serves both daemons.
+
 		MaxHeaderBytes: auth.MaxHeaderBytes,
-		// ReadHeaderTimeout bounds a slowloris header dribble. ReadTimeout bounds reading a
-		// request; every egress route is now a GET, so the only body it ever reads is
-		// headers. WriteTimeout bounds handler time plus the response write, which for a
-		// MaxLimit result set is up to two admission waits — LimitsFromEnv keeps both well
-		// inside it — a size estimate, one indexed query and a JSON encode. IdleTimeout
-		// bounds a kept-alive connection between requests so idle clients cannot accumulate
-		// file descriptors. Without the last three a client could hold a connection forever.
+		// LimitsFromEnv keeps both admission waits well inside WriteTimeout.
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -104,8 +93,7 @@ func run() error {
 	return serve(ctx, srv)
 }
 
-// openStore connects without migrating and refuses a schema this build does not
-// understand. Only horopter-migrate changes the schema.
+// openStore connects without migrating and refuses a schema this build does not understand.
 func openStore(ctx context.Context, dsn string) (*postgres.Store, error) {
 	store, err := postgres.OpenNoMigrate(ctx, dsn)
 	if err != nil {
@@ -118,8 +106,7 @@ func openStore(ctx context.Context, dsn string) (*postgres.Store, error) {
 	return store, nil
 }
 
-// serve runs srv until ctx is cancelled or it fails, then drains in-flight requests
-// rather than cutting them mid-write on every rollout.
+// serve runs srv until ctx is cancelled or it fails, then drains in-flight requests.
 func serve(ctx context.Context, srv *http.Server) error {
 	errCh := make(chan error, 1)
 	go func() {
