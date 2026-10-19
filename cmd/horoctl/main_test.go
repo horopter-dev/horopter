@@ -21,16 +21,10 @@ import (
 	"horopter.dev/horopter/internal/testdb"
 )
 
-// horoctlBin is the path TestMain builds the real horoctl binary to. The dispatch tests
-// need a genuine subprocess — PATH resolution and delegation happen in exec.LookPath and
-// os/exec, neither of which a same-process call to main() could exercise — and every other
-// test runs the built binary too, so the whole suite exercises exactly what an operator
-// would run.
+// horoctlBin is the binary TestMain builds; every test runs it as a subprocess.
 var horoctlBin string
 
-// tenantID is a tenant created once for the whole suite, shared by every test that needs
-// a real opaque id to pass as --tenant. keys issue's --tenant is opaque by design, so
-// nothing here parses or depends on its shape beyond that.
+// tenantID is a tenant created once for the whole suite.
 var tenantID string
 
 func TestMain(m *testing.M) {
@@ -67,8 +61,7 @@ func runTestMain(m *testing.M) int {
 	return m.Run()
 }
 
-// bootstrapSharedTenant runs the freshly built binary directly, without a *testing.T:
-// TestMain has none to hand a helper.
+// bootstrapSharedTenant takes no *testing.T: TestMain has none to hand it.
 func bootstrapSharedTenant(dsn string) (string, error) {
 	name := "horoctl-cli-test-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	// horoctlBin is the path runTestMain just built, not caller input.
@@ -83,19 +76,14 @@ func bootstrapSharedTenant(dsn string) (string, error) {
 	return strings.TrimSpace(out.String()), nil
 }
 
-// execHoroctl runs the built binary with args, returning its stdout and stderr
-// separately. Every admin and migrate invocation needs a database, so this is the one
-// place that skips when HOROPTER_TEST_DSN is unset — matching internal/testdb's own
-// per-test skip, and covering the dispatch tests too, which need no database themselves
-// but share this helper for consistency.
+// execHoroctl runs the built binary, skipping when HOROPTER_TEST_DSN is unset.
 func execHoroctl(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	dsn := os.Getenv(testdb.DSNVar)
 	if dsn == "" {
 		t.Skip("set " + testdb.DSNVar + " to run horoctl tests (docker compose up -d db)")
 	}
-	// horoctlBin is the path runTestMain built; args come from this test file's own
-	// literals, never from outside input.
+	// horoctlBin is runTestMain's build; args are this file's own literals.
 	//nolint:gosec // G204
 	cmd := exec.Command(horoctlBin, args...)
 	cmd.Env = append(os.Environ(), "DATABASE_URL="+dsn)
@@ -105,17 +93,14 @@ func execHoroctl(t *testing.T, args ...string) (stdout, stderr string, err error
 	return outBuf.String(), errBuf.String(), err
 }
 
-// runHoroctl runs horoctl and requires success, returning stdout alone — for assertions
-// that only care what a passing run printed there.
+// runHoroctl runs horoctl, requires success and returns stdout.
 func runHoroctl(t *testing.T, args ...string) string {
 	t.Helper()
 	stdout, _ := runHoroctlSplit(t, args...)
 	return stdout
 }
 
-// runHoroctlSplit runs horoctl, requires success, and returns stdout and stderr
-// separately — for assertions that care which stream carried what, such as the key
-// appearing on stdout exactly once with everything else on stderr.
+// runHoroctlSplit runs horoctl, requires success and returns stdout and stderr apart.
 func runHoroctlSplit(t *testing.T, args ...string) (stdout, stderr string) {
 	t.Helper()
 	stdout, stderr, err := execHoroctl(t, args...)
@@ -123,39 +108,31 @@ func runHoroctlSplit(t *testing.T, args ...string) (stdout, stderr string) {
 	return stdout, stderr
 }
 
-// runHoroctlErr runs horoctl without requiring anything, returning combined output
-// alongside the error — for assertions that expect the run to fail.
+// runHoroctlErr runs horoctl and returns its combined output and error.
 func runHoroctlErr(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	stdout, stderr, err := execHoroctl(t, args...)
 	return stdout + stderr, err
 }
 
-// runHoroctlOK runs horoctl and returns only the error, for callers checking success or
-// failure without needing the output — TestBootstrapIsIdempotent runs bootstrap twice and
-// only cares that neither call fails.
+// runHoroctlOK runs horoctl and returns only the error.
 func runHoroctlOK(t *testing.T, args ...string) error {
 	t.Helper()
 	_, _, err := execHoroctl(t, args...)
 	return err
 }
 
-// writeExecutable creates a shell script at path and marks it executable, for staging a
-// fake horoctl-<verb> plugin on a test's PATH.
+// writeExecutable stages a fake horoctl-<verb> plugin script at path.
 func writeExecutable(t *testing.T, path, content string) {
 	t.Helper()
-	// The script must be executable to stand in for a horoctl-<verb> plugin on PATH;
-	// 0600 would defeat the point of the fixture.
+	// A plugin stand-in must be executable; 0600 would defeat the fixture.
 	//nolint:gosec // G306
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o755))
 }
 
 func TestSchemaTouchingVerbsAreNeverDelegated(t *testing.T) {
 	dir := t.TempDir()
-	// horoctl-migrate, NOT horopter-migrate: delegate() looks up "horoctl-" + verb, so the
-	// plugin convention and the standalone binary's name merely share a spelling. Staging the
-	// binary's name would leave nothing on PATH for delegate() to find, and the test would pass
-	// because the hijack candidate was absent rather than because the compiled-in verb won.
+	// horoctl-migrate, not horopter-migrate: delegate() finds only that, else this passes vacuously.
 	writeExecutable(t, filepath.Join(dir, "horoctl-migrate"), "#!/bin/sh\necho hijacked\n")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -172,10 +149,7 @@ func TestAnUnknownVerbIsDelegatedToPATH(t *testing.T) {
 	assert.Contains(t, runHoroctl(t, "weather"), "sunny")
 }
 
-// TestDelegatedPluginExitCodeIsPreserved pins exit-code fidelity through delegation: a
-// caller scripting `horoctl weather; case $? in 3) ... esac` must see the plugin's own
-// exit code, not a fixed 1, and must not see horoctl's own wrapper text on top of
-// whatever the plugin already wrote to stderr.
+// TestDelegatedPluginExitCodeIsPreserved: a plugin's exit code and stderr pass through unwrapped.
 func TestDelegatedPluginExitCodeIsPreserved(t *testing.T) {
 	dir := t.TempDir()
 	writeExecutable(t, filepath.Join(dir, "horoctl-flaky"),
@@ -208,9 +182,7 @@ func TestIssueRejectsALocusContainingASlash(t *testing.T) {
 	assert.Contains(t, out, "unsplittable")
 }
 
-// TestIssueRejectsALegacySourceDefaultingToALegacyLocus pins the reported reproduction
-// directly: locus defaults to --source when --locus is omitted, so --source legacy resolves
-// to the reserved locus without an operator ever typing --locus legacy.
+// TestIssueRejectsALegacySourceDefaultingToALegacyLocus: the locus defaults from --source.
 func TestIssueRejectsALegacySourceDefaultingToALegacyLocus(t *testing.T) {
 	out, err := runHoroctlErr(t, "admin", "keys", "issue",
 		"--tenant", tenantID, "--role", "producer", "--source", "legacy")
@@ -218,15 +190,11 @@ func TestIssueRejectsALegacySourceDefaultingToALegacyLocus(t *testing.T) {
 	assert.Contains(t, out, "legacy")
 }
 
-// devExplicitKeyPrefix is a valid-hex, 12-character prefix: parseExplicitKey validates an
-// explicit key against the identical rule auth.SplitKey enforces on a presented
-// credential, so a fixture prefix has to satisfy that rule to ever be usable, the same as
-// one auth.NewKey would generate.
+// devExplicitKeyPrefix is 12 hex characters, as auth.SplitKey requires of a usable prefix.
 const devExplicitKeyPrefix = "deaddeaddead"
 
 func TestIssueWithAnExplicitKeyWarns(t *testing.T) {
-	// The key's prefix is fixed by the test, not generated, so a second run in the same
-	// shared database must not collide with the first run's row.
+	// A fixed prefix: clear the row a previous run left in the shared database.
 	resetCredential(t, devExplicitKeyPrefix)
 	_, stderr := runHoroctlSplit(t, "admin", "keys", "issue",
 		"--tenant", tenantID, "--role", "producer", "--source", "dev",
@@ -240,10 +208,7 @@ func TestIssueRejectsAShortExplicitKey(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestIssueRejectsANonHexExplicitKeyPrefix pins the fix for a credential that would
-// otherwise insert cleanly and then never authenticate: auth.SplitKey requires a 12-
-// character hex prefix, and a --key that does not match it must be refused at issue time
-// with a message naming the requirement, not stored as a credential nothing can present.
+// TestIssueRejectsANonHexExplicitKeyPrefix: a key SplitKey refuses is refused at issue time.
 func TestIssueRejectsANonHexExplicitKeyPrefix(t *testing.T) {
 	out, err := runHoroctlErr(t, "admin", "keys", "issue",
 		"--tenant", tenantID, "--role", "producer", "--source", "dev",
@@ -253,11 +218,7 @@ func TestIssueRejectsANonHexExplicitKeyPrefix(t *testing.T) {
 		"the error must name the requirement an operator has to satisfy")
 }
 
-// TestIssueRejectsAMalformedExplicitKeyWithoutEchoingIt pins the fix for a malformed --key
-// being embedded verbatim in the rejection error: that error reaches stderr unmodified from
-// every caller (horoctl's own dispatch, bootstrap's ensureCredential run on every compose
-// stack start, and keys issue's deriveKey), so a mistyped or truncated secret must never
-// travel into a log stream through it.
+// TestIssueRejectsAMalformedExplicitKeyWithoutEchoingIt: the error must not leak the secret.
 func TestIssueRejectsAMalformedExplicitKeyWithoutEchoingIt(t *testing.T) {
 	const secretMarker = "shouldneverbeloggedmarker"
 	out, err := runHoroctlErr(t, "admin", "keys", "issue",
@@ -275,9 +236,7 @@ func TestTenantCreateMintsAnOpaqueID(t *testing.T) {
 	assert.NotContains(t, id, "acme", "the id is opaque; the display name is not the id")
 }
 
-// devProducerPrefix and devReaderPrefix are valid-hex, 12-character prefixes — the shape
-// auth.SplitKey requires of any credential that is to authenticate a real request, dev
-// convenience or not.
+// devProducerPrefix and devReaderPrefix are 12 hex characters, as auth.SplitKey requires.
 const (
 	devProducerPrefix = "dead00000001"
 	devProducerKey    = "horo_" + devProducerPrefix + "_" +
@@ -287,8 +246,7 @@ const (
 		"11111111111111111111111111111111111111111111111111111111111111"
 )
 
-// runBootstrap runs `admin bootstrap` with fixed dev credentials, matching the compose
-// stack's own two-key convention: one producer, one reader, neither superuser.
+// runBootstrap mirrors the compose stack: one producer, one reader, no superuser.
 func runBootstrap(t *testing.T) {
 	t.Helper()
 	require.NoError(t, runHoroctlOK(t, "admin", "bootstrap", "--display-name", "default",
@@ -296,14 +254,7 @@ func runBootstrap(t *testing.T) {
 		"--producer-key", devProducerKey, "--reader-key", devReaderKey))
 }
 
-// tenantCount counts tenants named displayName that are also the tenant this suite's own
-// bootstrap producer credential resolved to. A plain `WHERE display_name = $1` would be
-// wrong in this codebase on principle, not only under pollution: display names are not
-// unique by design, a tenant's identity being its id, so nothing stops another tenant, from
-// another run or another suite, sharing the name "default" in the same never-truncated
-// development database. Scoping through devProducerPrefix's credential — whose key_prefix
-// is UNIQUE — names the one tenant this test's own bootstrap call actually resolved, however
-// many other rows share its name.
+// tenantCount scopes through devProducerPrefix's credential: display names are not unique.
 func tenantCount(t *testing.T, displayName string) int {
 	t.Helper()
 	pool, err := testdb.Pool()
@@ -327,8 +278,7 @@ func credentialCount(t *testing.T, prefix string) int {
 	return n
 }
 
-// principalCount counts principal rows for the id issueCredential would derive from prefix,
-// for a test that must see a failed issue leave no orphaned principal behind.
+// principalCount counts the principals issueCredential would derive from prefix.
 func principalCount(t *testing.T, prefix string) int {
 	t.Helper()
 	pool, err := testdb.Pool()
@@ -349,10 +299,7 @@ func TestBootstrapIsIdempotent(t *testing.T) {
 	assert.Equal(t, 1, credentialCount(t, devReaderPrefix))
 }
 
-// tenantCountByName counts tenant rows named displayName outright, unscoped by any
-// credential. That is safe only for a name this test minted itself and never reuses —
-// unlike tenantCount's "default", which tenantCount's own doc explains is shared across
-// runs of this suite by design and therefore needs scoping through a credential.
+// tenantCountByName is unscoped, so it is safe only for a name the test minted.
 func tenantCountByName(t *testing.T, displayName string) int {
 	t.Helper()
 	pool, err := testdb.Pool()
@@ -363,9 +310,7 @@ func tenantCountByName(t *testing.T, displayName string) int {
 	return n
 }
 
-// newExplicitKey mints a fresh, valid horo_<prefix>_<secret> key via auth.NewKey, for a
-// test that needs bootstrap's --producer-key/--reader-key shape without colliding with
-// devProducerKey/devReaderKey or any other test's fixed prefix.
+// newExplicitKey mints a valid key whose prefix no other test uses.
 func newExplicitKey(t *testing.T) (key, prefix string) {
 	t.Helper()
 	key, prefix, _, err := auth.NewKey(rand.Reader)
@@ -373,16 +318,7 @@ func newExplicitKey(t *testing.T) (key, prefix string) {
 	return key, prefix
 }
 
-// TestBootstrapUnderConcurrencySharesOneTenant runs two bootstrap invocations
-// concurrently against the same, freshly minted display name and the same fixed
-// producer/reader keys — the shape a retried CI job, an operator re-running while a
-// prior run is in flight, or a Kubernetes Job with parallelism > 1 takes.
-// TestBootstrapIsIdempotent above already covers two SEQUENTIAL runs, which is exactly
-// why it never caught this: resolveTenant's check-then-act (SELECT, then INSERT if
-// absent) races when both runs start with no tenant row yet. Without its advisory lock,
-// both can see no match and both INSERT, leaving two tenants under one display name,
-// and whichever run then binds its fixed key prefix to the "wrong" tenant_id collides
-// with credential.key_prefix's UNIQUE constraint.
+// TestBootstrapUnderConcurrencySharesOneTenant races two bootstraps on one new display name.
 func TestBootstrapUnderConcurrencySharesOneTenant(t *testing.T) {
 	if os.Getenv(testdb.DSNVar) == "" {
 		t.Skip("set " + testdb.DSNVar + " to run horoctl tests (docker compose up -d db)")
@@ -416,14 +352,10 @@ func TestBootstrapUnderConcurrencySharesOneTenant(t *testing.T) {
 	assert.Equal(t, 1, credentialCount(t, readerPrefix))
 }
 
-// testCredential is one row allCredentials reads back, carrying just enough to look up
-// its role's capabilities.
+// testCredential is one row allCredentials reads back.
 type testCredential struct{ prefix, role string }
 
-// allCredentials reads back exactly the two rows bootstrap issues — devProducerPrefix and
-// devReaderPrefix — rather than the whole credential table, so a credential some other
-// package's test suite happens to have live in the shared database at the same moment
-// cannot make this test's outcome depend on scheduling.
+// allCredentials reads only bootstrap's two prefixes, not other suites' live rows.
 func allCredentials(t *testing.T) []testCredential {
 	t.Helper()
 	pool, err := testdb.Pool()
@@ -486,11 +418,7 @@ func TestIssuePrintsTheKeyExactlyOnce(t *testing.T) {
 	cleanupCredential(t, prefix)
 }
 
-// resetCredential deletes any credential and principal rows for prefix immediately, and
-// registers the same delete to run again after the test. The immediate delete matters for
-// a fixed, non-random prefix (TestIssueWithAnExplicitKeyWarns's "devdevdevdev"): without
-// it, a second run of this suite against the same shared, never-truncated database would
-// collide with the first run's row rather than only with rows created within one test.
+// resetCredential deletes prefix's rows now and after the test: fixed prefixes recur.
 func resetCredential(t *testing.T, prefix string) {
 	t.Helper()
 	deleteCredential(prefix)
@@ -507,10 +435,7 @@ func deleteCredential(prefix string) {
 	_, _ = pool.Exec(ctx, `DELETE FROM principal WHERE id = $1`, "prn_"+prefix)
 }
 
-// cleanupCredential registers prefix's credential and principal rows for deletion after
-// the test, without deleting anything now — for a credential the test just issued under a
-// generated (never-colliding) prefix and still needs to exist for the rest of the test
-// body, unlike resetCredential's fixed-prefix case above.
+// cleanupCredential deletes prefix's rows after the test only.
 func cleanupCredential(t *testing.T, prefix string) {
 	t.Helper()
 	t.Cleanup(func() { deleteCredential(prefix) })
@@ -558,11 +483,7 @@ func TestTenantListShowsACreatedTenant(t *testing.T) {
 	assert.Contains(t, out, name)
 }
 
-// TestAGlobalProducerCredentialIsIssuable re-confirms, now that keys issue can actually
-// mint one, an answer earlier tasks only inferred: nothing at issue time rejects a
-// credential that is both global (no tenant) and producer (append). core.Event.Validate's
-// tenant check is where such a credential is refused, on the first append it attempts —
-// see internal/core/event.go and this task's report for the traced behaviour.
+// TestAGlobalProducerCredentialIsIssuable: issue allows it; core.Event.Validate refuses it.
 func TestAGlobalProducerCredentialIsIssuable(t *testing.T) {
 	stdout, _ := runHoroctlSplit(t, "admin", "keys", "issue",
 		"--role", "producer", "--source", "test", "--locus", "global-test")
@@ -579,8 +500,7 @@ func TestAGlobalProducerCredentialIsIssuable(t *testing.T) {
 	assert.Nil(t, storedTenant, "a global credential's tenant_id must be NULL")
 }
 
-// execDB runs one statement against the shared development database, for a test that has to
-// put the database into a state horoctl itself will not create — residue an earlier run left.
+// execDB runs one statement to seed state horoctl itself will not create.
 func execDB(t *testing.T, sql string, args ...any) {
 	t.Helper()
 	pool, err := testdb.Pool()
@@ -600,9 +520,7 @@ func credentialBinding(t *testing.T, prefix string) (tenantID, role string) {
 	return tenantID, role
 }
 
-// seedRole adds a role to the table and removes it afterwards. The name is unique per run
-// because the shared development database is never truncated, and the capabilities are what
-// the test is about — the name is not.
+// seedRole adds a uniquely named role for the test and removes it afterwards.
 func seedRole(t *testing.T, capabilities []string) string {
 	t.Helper()
 	name := "auditor-" + strconv.FormatInt(time.Now().UnixNano(), 36)
@@ -611,9 +529,7 @@ func seedRole(t *testing.T, capabilities []string) string {
 	return name
 }
 
-// TestIssueAllowsASubjectPatternOnProducer pins the case a subject pattern exists for: append
-// is the one capability a pattern narrows anything real about, and producer is the role
-// seeded with only it.
+// TestIssueAllowsASubjectPatternOnProducer: append is what a pattern narrows.
 func TestIssueAllowsASubjectPatternOnProducer(t *testing.T) {
 	stdout, _ := runHoroctlSplit(t, "admin", "keys", "issue", "--tenant", tenantID,
 		"--role", "producer", "--source", "github", "--subject-pattern", "team-a/*")
@@ -623,11 +539,7 @@ func TestIssueAllowsASubjectPatternOnProducer(t *testing.T) {
 	cleanupCredential(t, prefix)
 }
 
-// TestIssueRefusesASubjectPatternOnReader pins Finding 1: a read is not narrowed by subject
-// at all — GET /v1/changes and its siblings answered with every subject in the tenant
-// regardless of what subject_pattern named — so a pattern on reader must be refused here, the
-// only place this branch backstops it, rather than accepted and then silently ignored on
-// every read route.
+// TestIssueRefusesASubjectPatternOnReader pins Finding 1: reads ignore subject patterns.
 func TestIssueRefusesASubjectPatternOnReader(t *testing.T) {
 	out, err := runHoroctlErr(t, "admin", "keys", "issue", "--tenant", tenantID,
 		"--role", "reader", "--source", "github", "--subject-pattern", "team-a/*")
@@ -637,12 +549,7 @@ func TestIssueRefusesASubjectPatternOnReader(t *testing.T) {
 		"a credential a pattern would silently do nothing for must not be minted")
 }
 
-// TestIssueRefusesASubjectPatternOnEveryAdminCapableRole is the composition the whole-branch
-// review found: role is a table precisely so the vocabulary can grow, so an issue-time check
-// that enumerates tenant_admin and superuser goes stale the moment a role is added. Such a
-// credential inserted cleanly, printed a key, and then answered 401 on every request it ever
-// made, because internal/auth refuses an admin-capable credential carrying a subject pattern.
-// The check reads role.capabilities now, which is the same fact principal() tests.
+// TestIssueRefusesASubjectPatternOnEveryAdminCapableRole: capabilities decide, not names.
 func TestIssueRefusesASubjectPatternOnEveryAdminCapableRole(t *testing.T) {
 	role := seedRole(t, []string{"read", "admin"})
 	out, err := runHoroctlErr(t, "admin", "keys", "issue", "--tenant", tenantID,
@@ -653,10 +560,7 @@ func TestIssueRefusesASubjectPatternOnEveryAdminCapableRole(t *testing.T) {
 		"a credential that can never authenticate must not be minted, let alone printed")
 }
 
-// TestIssueAllowsASubjectPatternOnANewAppendOnlyRole is the other half: the check must follow
-// the capabilities rather than refuse every unfamiliar name — a freshly seeded role granting
-// only append is exactly as eligible for a subject pattern as producer, without this check
-// ever being told its name.
+// TestIssueAllowsASubjectPatternOnANewAppendOnlyRole: an unnamed append-only role qualifies.
 func TestIssueAllowsASubjectPatternOnANewAppendOnlyRole(t *testing.T) {
 	role := seedRole(t, []string{"append"})
 	stdout, _ := runHoroctlSplit(t, "admin", "keys", "issue", "--tenant", tenantID,
@@ -675,12 +579,7 @@ func TestIssueRejectsAnUnknownRole(t *testing.T) {
 	assert.NotContains(t, out, "horo_", "an unknown role must fail before a key is minted")
 }
 
-// TestIssueWithANonexistentTenantLeavesNoOrphanedPrincipal pins Finding 3: issueCredential
-// ran its principal and credential INSERTs against the raw pool, each committing
-// independently, so a --tenant naming no row let the principal INSERT commit and only the
-// credential INSERT fail on tenant_id's foreign key — leaving an orphaned principal a retry
-// with the corrected --tenant and the same --key could not get past, failing instead on
-// principal_pkey with nothing said about the real mistake.
+// TestIssueWithANonexistentTenantLeavesNoOrphanedPrincipal pins Finding 3.
 func TestIssueWithANonexistentTenantLeavesNoOrphanedPrincipal(t *testing.T) {
 	key, prefix := newExplicitKey(t)
 	cleanupCredential(t, prefix)
@@ -695,10 +594,7 @@ func TestIssueWithANonexistentTenantLeavesNoOrphanedPrincipal(t *testing.T) {
 	assert.Equal(t, 0, credentialCount(t, prefix))
 }
 
-// bootstrapFixture is one bootstrap invocation over prefixes and a tenant no other test
-// shares, so a test may leave the credential in a state the dev stack's own keys must not be
-// left in. Cleanup order is deliberate: the tenant row is registered for deletion first so it
-// runs last, after the credentials whose foreign keys point at it.
+// bootstrapFixture bootstraps over prefixes and a tenant no other test shares.
 type bootstrapFixture struct {
 	args                         []string
 	displayName                  string
@@ -708,6 +604,7 @@ type bootstrapFixture struct {
 func newBootstrapFixture(t *testing.T, producerPrefix, readerPrefix string) bootstrapFixture {
 	t.Helper()
 	name := "horoctl-bootstrap-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	// Registered first so it runs last, after the credentials that reference the tenant.
 	t.Cleanup(func() { execDB(t, `DELETE FROM tenant WHERE display_name = $1`, name) })
 	resetCredential(t, producerPrefix)
 	resetCredential(t, readerPrefix)
@@ -723,11 +620,7 @@ func newBootstrapFixture(t *testing.T, producerPrefix, readerPrefix string) boot
 	}
 }
 
-// TestBootstrapReconcilesACredentialBoundElsewhere pins what "idempotent by design" has to
-// mean. Treating "a credential with this prefix exists" as done left a key bound to whatever
-// tenant and role an earlier run gave it: both daemons then authenticated against the stale
-// row while bootstrap reported success, and because bootstrap runs on every container start
-// nothing ever corrected it.
+// TestBootstrapReconcilesACredentialBoundElsewhere: a key left on another tenant is rebound.
 func TestBootstrapReconcilesACredentialBoundElsewhere(t *testing.T) {
 	f := newBootstrapFixture(t, "beef00000001", "beef00000002")
 	require.NoError(t, runHoroctlOK(t, f.args...))
@@ -746,9 +639,7 @@ func TestBootstrapReconcilesACredentialBoundElsewhere(t *testing.T) {
 	assert.Contains(t, stderr, "tenant ")
 }
 
-// TestBootstrapRefusesToUnRevokeACredential is the one mismatch bootstrap does not own.
-// Clearing revoked_at on the next container start would undo an operator's deliberate act
-// with nothing said, so it fails loudly and names the credential instead.
+// TestBootstrapRefusesToUnRevokeACredential: revocation is the operator's, not bootstrap's.
 func TestBootstrapRefusesToUnRevokeACredential(t *testing.T) {
 	f := newBootstrapFixture(t, "beef00000003", "beef00000004")
 	require.NoError(t, runHoroctlOK(t, f.args...))
@@ -760,15 +651,7 @@ func TestBootstrapRefusesToUnRevokeACredential(t *testing.T) {
 	assert.Contains(t, out, "revoked")
 }
 
-// TestResolveLocusDefaultsToSourceOnlyWhenLocusIsEmpty pins the asymmetry that made
-// resolveLocus's two bare string parameters worth removing: the arguments are not
-// interchangeable, and a caller that swapped them used to compile.
-//
-// The old signature was resolveLocus(source, locus string). Passing them the other way
-// round returned the locus when the SOURCE was empty, which is a different rule — and
-// nothing in the suite would have noticed, because no test called this function at all.
-// issueFlags makes the swap unwriteable rather than merely untested; this pins the
-// behaviour the swap would have changed.
+// TestResolveLocusDefaultsToSourceOnlyWhenLocusIsEmpty pins what swapped arguments broke.
 func TestResolveLocusDefaultsToSourceOnlyWhenLocusIsEmpty(t *testing.T) {
 	assert.Equal(t, "github", resolveLocus(issueFlags{source: "github"}),
 		"an absent locus defaults to the source")
@@ -788,9 +671,7 @@ func TestVersionAndBuildInfoAnswerBeforeAnyVerb(t *testing.T) {
 	assert.Contains(t, runHoroctl(t, "--build-info", "--json"), `"name":"horoctl"`)
 }
 
-// TestAPluginIsToldTheVersionHoroctlReports: HOROCTL_VERSION is how a plugin checks it is
-// compatible with the horoctl that ran it, so it is the version --build-info reports, without
-// the v that only text output adds.
+// TestAPluginIsToldTheVersionHoroctlReports: --build-info's version, without the v.
 func TestAPluginIsToldTheVersionHoroctlReports(t *testing.T) {
 	dir := t.TempDir()
 	writeExecutable(t, filepath.Join(dir, "horoctl-whichversion"),

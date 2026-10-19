@@ -15,23 +15,16 @@ import (
 	"horopter.dev/horopter/internal/auth"
 )
 
-// dbExecer is the Exec/QueryRow subset both *pgxpool.Pool and pgx.Tx provide, mirroring
-// internal/store/postgres's own querier interface. It lets issueCredential and bootstrap's
-// credential helpers run unchanged whether called directly against the pool, as
-// runKeysIssue does, or inside bootstrap's single locked transaction — see resolveTenant.
+// dbExecer is the subset of *pgxpool.Pool and pgx.Tx that the credential writes use.
 type dbExecer interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// dsnFlag registers the --dsn flag every DB-touching admin subcommand exposes, defaulting
-// to DATABASE_URL so scripts need not repeat it on every invocation.
 func dsnFlag(fs *flag.FlagSet) *string {
 	return fs.String("dsn", os.Getenv("DATABASE_URL"), "PostgreSQL connection string")
 }
 
-// openPool connects to dsn, refusing an empty one before pgxpool produces a less readable
-// error trying to parse it.
 func openPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	if dsn == "" {
 		return nil, errors.New(
@@ -44,9 +37,7 @@ func openPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-// helpOrErr turns flag.ErrHelp into a clean exit: -h/--help already printed usage to the
-// FlagSet's own output, and the process should exit 0 rather than report a help request
-// as a failure.
+// helpOrErr treats -h as success: the FlagSet has already printed usage.
 func helpOrErr(err error) error {
 	if errors.Is(err, flag.ErrHelp) {
 		return nil
@@ -54,12 +45,7 @@ func helpOrErr(err error) error {
 	return err
 }
 
-// resolveLocus applies the design's default: locus is admin-chosen and required, and
-// defaults to source when the operator does not name one separately.
-//
-// It takes issueFlags rather than two strings because the rule is asymmetric — swap the
-// arguments and an absent SOURCE would take the locus instead, which is a different rule
-// that used to compile.
+// resolveLocus defaults the locus to the source.
 func resolveLocus(f issueFlags) string {
 	if f.locus == "" {
 		return f.source
@@ -67,8 +53,7 @@ func resolveLocus(f issueFlags) string {
 	return f.locus
 }
 
-// tenantLabel renders an empty tenant id (a global credential) readably in operator
-// output, where an empty string would otherwise look like a blank field.
+// tenantLabel names a global credential's empty tenant in operator output.
 func tenantLabel(tenant string) string {
 	if tenant == "" {
 		return "global"
@@ -76,17 +61,7 @@ func tenantLabel(tenant string) string {
 	return tenant
 }
 
-// roleIsAppendOnly reads role's stored capabilities and reports whether they are append and
-// nothing else — the only shape a subject pattern narrows anything real about. A read is not
-// narrowed by subject at all, and a rebuild an admin grant triggers is whole-tenant by
-// construction, so both are refused a pattern exactly as append-only roles are allowed one.
-//
-// It queries the row rather than enumerating role names, so issue time and request time agree
-// by construction: internal/auth's principal() refuses an admin-capable credential carrying a
-// subject pattern by testing the same capability list. Enumerating names instead let a role
-// added to the table — one granting read or admin under a name nothing here knew — be issued
-// with a subject pattern that either 401s on every request (admin) or is silently ignored on
-// every read (Finding 1), with a key already printed either way.
+// roleIsAppendOnly reads capabilities, not names, so it agrees with internal/auth's principal().
 func roleIsAppendOnly(ctx context.Context, pool *pgxpool.Pool, role string) (bool, error) {
 	var appendOnly bool
 	err := pool.QueryRow(ctx, `SELECT capabilities = ARRAY[$1]::text[] FROM role WHERE name = $2`,
@@ -101,9 +76,6 @@ func roleIsAppendOnly(ctx context.Context, pool *pgxpool.Pool, role string) (boo
 	return appendOnly, nil
 }
 
-// newTenantID mints an opaque, server-assigned tenant id. The display name is what an
-// operator recognizes a tenant by; the id exists so a rename is a single-row update rather
-// than a rewrite of every event and change row that names it.
 func newTenantID() (string, error) {
 	raw := make([]byte, 16)
 	if _, err := rand.Read(raw); err != nil {
