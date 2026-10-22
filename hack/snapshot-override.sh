@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Not `docker images`: a snapshot's images share one repository, told apart only by digest.
+# Not `docker images`: only artifacts.json maps a kos build id to the image this snapshot built.
 set -euo pipefail
 
 command -v jq > /dev/null || {

@@ -78,6 +78,7 @@ kos:
     base_image: gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
     user: "65532:65532"
     repositories: [ghcr.io/horopter-dev/horopter-ingress]
+    local_domain: goreleaser.ko.local/horopter-ingress
     platforms: [linux/amd64, linux/arm64]
     tags: ["{{ .Tag }}"]
     bare: true
@@ -91,6 +92,7 @@ kos:
     base_image: gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
     user: "65532:65532"
     repositories: [ghcr.io/horopter-dev/horopter-egress]
+    local_domain: goreleaser.ko.local/horopter-egress
     platforms: [linux/amd64, linux/arm64]
     tags: ["{{ .Tag }}"]
     bare: true
@@ -104,6 +106,7 @@ kos:
     base_image: gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
     user: "65532:65532"
     repositories: [ghcr.io/horopter-dev/horopter-migrate]
+    local_domain: goreleaser.ko.local/horopter-migrate
     platforms: [linux/amd64, linux/arm64]
     tags: ["{{ .Tag }}"]
     bare: true
@@ -117,6 +120,7 @@ kos:
     base_image: gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
     user: "65532:65532"
     repositories: [ghcr.io/horopter-dev/horopter-flux]
+    local_domain: goreleaser.ko.local/horopter-flux
     platforms: [linux/amd64, linux/arm64]
     tags: ["{{ .Tag }}"]
     bare: true
@@ -132,6 +136,7 @@ kos:
     base_image: gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
     user: "65532:65532"
     repositories: [ghcr.io/horopter-dev/horoctl]
+    local_domain: goreleaser.ko.local/horoctl
     platforms: [linux/amd64, linux/arm64]
     tags: ["{{ .Tag }}"]
     bare: true
