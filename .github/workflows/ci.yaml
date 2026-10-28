@@ -115,7 +115,7 @@ jobs:
       - name: Lint workflows
         env:
           # renovate: datasource=go depName=github.com/jdx/jactionlint/v2
-          JACTIONLINT_VERSION: v2.2.0
+          JACTIONLINT_VERSION: v2.3.0
           # jactionlint's online rules, which replace zizmor's online audits.
           JACTIONLINT_ONLINE: 1
           GITHUB_TOKEN: ${{ github.token }}
