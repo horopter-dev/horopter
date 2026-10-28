@@ -107,6 +107,6 @@ jobs:
           # A nightly until v2.19.0, for the casks' install_steps (HOR-121). GoReleaser keeps
           # about a week of nightlies, so bump it by hand before this one is pruned (HOR-122).
           # renovate: datasource=github-releases depName=goreleaser/goreleaser
-          GORELEASER_VERSION: v2.19.0-4a71e1e8-nightly
+          GORELEASER_VERSION: v2.19.0
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ steps.tap_token.outputs.token }}
