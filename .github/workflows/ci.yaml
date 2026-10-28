@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:18@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
+        image: postgres:18@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4
         env:
           POSTGRES_USER: horopter
           POSTGRES_PASSWORD: horopter
@@ -193,10 +193,9 @@ jobs:
         if: steps.changes.outputs.code == 'true'
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de  # v7.3.0
         env:
-          # A nightly until v2.19.0, for the casks' install_steps (HOR-121). GoReleaser keeps
-          # about a week of nightlies, so bump it by hand before this one is pruned (HOR-122).
+          # v2.19.0 or later: the casks' install_steps need it (HOR-121).
           # renovate: datasource=github-releases depName=goreleaser/goreleaser
-          GORELEASER_VERSION: v2.19.0-4a71e1e8-nightly
+          GORELEASER_VERSION: v2.19.0
         with:
           distribution: goreleaser
           # Exact, not '~> v2': this is the tool that builds the released artefacts, so a
