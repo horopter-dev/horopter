@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.14.2](https://github.com/horopter-dev/horopter/compare/v0.14.1...v0.14.2) (2026-10-28)
+
+
+### Bug Fixes
+
+* **ci:** give each snapshot ko image its own local repository ([#147](https://github.com/horopter-dev/horopter/issues/147)) ([8e19f1d](https://github.com/horopter-dev/horopter/commit/8e19f1d6e96669c46df5760cb1f2bcf7bdfee73c))
+* **deps:** move to Go 1.27.3 ([#145](https://github.com/horopter-dev/horopter/issues/145)) ([9324b4b](https://github.com/horopter-dev/horopter/commit/9324b4bde75ecd0e1363da64269fc64d8c9d8f47))
+* **deps:** update module golang.org/x/net to v0.62.0 [security] ([#149](https://github.com/horopter-dev/horopter/issues/149)) ([61b1638](https://github.com/horopter-dev/horopter/commit/61b1638618ad99551d384e0feb22412d951a7f45))
+
+
+### Code Refactoring
+
+* cut comment blocks in cmd/horo ([#134](https://github.com/horopter-dev/horopter/issues/134)) ([fb6c84e](https://github.com/horopter-dev/horopter/commit/fb6c84e6b6db5e3578c4e8930f0bd66b0c864bd8))
+* cut comment blocks in cmd/horoctl ([#139](https://github.com/horopter-dev/horopter/issues/139)) ([d1a738b](https://github.com/horopter-dev/horopter/commit/d1a738b03977c579f977c35a0e6923f02e5f7e57))
+* cut comment blocks in egress and ingress ([#131](https://github.com/horopter-dev/horopter/issues/131)) ([0252730](https://github.com/horopter-dev/horopter/commit/0252730810c974e740c9e915bc62522040bee2be))
+* cut comment blocks in hack/ scripts ([#137](https://github.com/horopter-dev/horopter/issues/137)) ([a7a73c0](https://github.com/horopter-dev/horopter/commit/a7a73c0e1b1dd6dbbdb52a8ae7ec7dccb7c30d86))
+* cut comment blocks in internal/auth ([#135](https://github.com/horopter-dev/horopter/issues/135)) ([71ee4ac](https://github.com/horopter-dev/horopter/commit/71ee4acd512a70dd90d55c042760ed23c63b6461))
+* cut comment blocks in internal/core ([#136](https://github.com/horopter-dev/horopter/issues/136)) ([292513c](https://github.com/horopter-dev/horopter/commit/292513cac3d601eee45c945793e7b9036967e746))
+* cut comment blocks in internal/telemetry ([#142](https://github.com/horopter-dev/horopter/issues/142)) ([70b3856](https://github.com/horopter-dev/horopter/commit/70b3856108eacce582ce67e56e78045f4cc455a7))
+* cut comment blocks in the Flux client and the adapters ([#140](https://github.com/horopter-dev/horopter/issues/140)) ([4167dc2](https://github.com/horopter-dev/horopter/commit/4167dc28957e78ea3898d285de742164e621a722))
+* cut comment blocks in the remaining Go packages ([#141](https://github.com/horopter-dev/horopter/issues/141)) ([0e3c111](https://github.com/horopter-dev/horopter/commit/0e3c111aa982634ab8b00022b421dd6f27e9e66a))
+* cut comment blocks in the store ([#132](https://github.com/horopter-dev/horopter/issues/132)) ([1cf328e](https://github.com/horopter-dev/horopter/commit/1cf328e44b7fc9c3a1789e82e31b9a97c1f552ea))
+
 ## [0.14.1](https://github.com/horopter-dev/horopter/compare/v0.14.0...v0.14.1) (2026-10-13)
 
 
