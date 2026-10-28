@@ -34,10 +34,8 @@
 
   packageRules: [
     {
-      // GoReleaser is pinned to a nightly by hand until v2.19.0 (HOR-121). Nightly tags carry
-      // a commit hash, so Renovate cannot order them and proposes only releases. semver, not
-      // the default semver-coerced, which drops the -nightly suffix and so would read v2.19.0
-      // as equal to the pin and never propose it.
+      // Never propose a GoReleaser nightly: semver-coerced would drop the -nightly suffix and
+      // read v2.20.0-<hash>-nightly as release v2.20.0.
       matchDepNames: ["goreleaser/goreleaser"],
       allowedVersions: "!/-nightly$/",
       versioning: "semver",
