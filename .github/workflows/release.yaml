@@ -106,6 +106,6 @@ jobs:
         env:
           # v2.19.0 or later: the casks' install_steps need it (HOR-121).
           # renovate: datasource=github-releases depName=goreleaser/goreleaser
-          GORELEASER_VERSION: v2.19.0
+          GORELEASER_VERSION: v2.20.0
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ steps.tap_token.outputs.token }}
