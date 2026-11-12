@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.3](https://github.com/horopter-dev/horopter/compare/v0.14.2...v0.14.3) (2026-11-12)
+
+
+### Bug Fixes
+
+* **deps:** update go to 1.27.4 ([#165](https://github.com/horopter-dev/horopter/issues/165)) ([f0d3ce0](https://github.com/horopter-dev/horopter/commit/f0d3ce063256364cac4d78109d2b75d40f0800c1))
+
 ## [0.14.2](https://github.com/horopter-dev/horopter/compare/v0.14.1...v0.14.2) (2026-10-28)
 
 
