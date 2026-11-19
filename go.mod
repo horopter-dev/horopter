@@ -6,7 +6,7 @@ require (
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/exaring/otelpgx v0.13.0
 	github.com/go-logr/logr v1.4.4
-	github.com/jackc/pgx/v5 v5.12.0
+	github.com/jackc/pgx/v5 v5.13.0
 	github.com/oklog/ulid/v2 v2.1.2
 	github.com/prometheus/client_golang v1.25.0
 	github.com/stretchr/testify v1.12.1
